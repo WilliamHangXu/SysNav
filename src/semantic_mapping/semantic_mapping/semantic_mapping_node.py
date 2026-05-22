@@ -546,11 +546,11 @@ class MappingNode(Node):
                 self.publish_object_type_query(target_objs)
 
             total_time = time.time() - start_time
-            # self.log_info(f"🚨🚨 Map update time: {map_update_time}, sam2 time: {sam2_time}, annotate time: {annotate_time}, publish time: {publish_time}, total time: {total_time}")
+            self.log_info(f"🚨🚨 Map update time: {map_update_time}, sam2 time: {sam2_time}, annotate time: {annotate_time}, publish time: {publish_time}, total time: {total_time}")
             self.total_mapping_calls += 1
             if total_time > 3.0:
                 self.mapping_over_3s += 1
-                self.log_info(f"Mapping processing took over 3 seconds! Total calls: {self.total_mapping_calls}, Over 3s calls: {self.mapping_over_3s}")
+                self.log_info(f"🚨🚨 Mapping processing took over 3 seconds! Total calls: {self.total_mapping_calls}, Over 3s calls: {self.mapping_over_3s}")
             
             # 定期强制垃圾回收
             if self.total_mapping_calls % 10 == 0:

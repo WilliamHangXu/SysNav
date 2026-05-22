@@ -49,11 +49,14 @@ class DetectNode(Node):
         self.declare_parameter('device', device)
         self.declare_parameter('annotate_image', True)
         self.declare_parameter('object_file', str(self.CONFIG_DIR / 'config' / 'objects.yaml'))
+        self.declare_parameter('image_topic', '/camera/image')
+
 
         self.platform = self.get_parameter('platform').get_parameter_value().string_value
         self.ANNOTATE = self.get_parameter('annotate_image').get_parameter_value().bool_value
         self.grounding_score_thresh = self.get_parameter('grounding_score_thresh').get_parameter_value().double_value
         object_file_path = self.get_parameter('object_file').get_parameter_value().string_value
+        self.image_topic = self.get_parameter('image_topic').get_parameter_value().string_value
 
         with open(object_file_path, "r") as file:
             self.object_config = yaml.safe_load(file)
@@ -67,7 +70,7 @@ class DetectNode(Node):
 
         self.grounding_model = YOLO(self.CONFIG_DIR / "external/yolov8x-worldv2_cus.engine", task='detect')
         # self.grounding_model = YOLOE(self.CONFIG_DIR / "external/yoloe-11l-seg.engine", task="segment")
-        self.grounding_model = YOLOE(self.CONFIG_DIR / "external/yoloe-26x-seg.engine", task="segment")
+        # self.grounding_model = YOLOE(self.CONFIG_DIR / "external/yoloe-26x-seg.engine", task="segment")
 
         self.device = device
 
@@ -94,7 +97,7 @@ class DetectNode(Node):
         # ROS2 subscriptions and publishers
         self.rgb_sub = self.create_subscription(
             Image,
-            '/camera/image',
+            self.image_topic,
             self.image_callback,
             10,
             # qos_profile=QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT),
@@ -195,7 +198,7 @@ class DetectNode(Node):
         anotate_time = time.time()
         self.publish_detection_results(detections, detection_stamp, image, image_anno)
         publish_time = time.time()
-        # self.log_info(f"🚨🚨🚨🚨 Detection time: {time.time() - start_time:.2f} seconds, detection time: {detection_time - start_time:.2f}, annotate time: {anotate_time - detection_time:.2f}, publish time: {publish_time - anotate_time:.2f}")
+        self.log_info(f"🚨🚨🚨🚨 Detection time: {time.time() - start_time:.2f} seconds, detection time: {detection_time - start_time:.2f}, annotate time: {anotate_time - detection_time:.2f}, publish time: {publish_time - anotate_time:.2f}")
 
     def publish_detection_results(self, detections_tracked, detection_stamp, image, image_anno):
         """

@@ -7,6 +7,7 @@ from scipy.stats import gaussian_kde, kurtosis, skew
 from scipy.signal import find_peaks
 from sklearn.mixture import GaussianMixture
 from scipy.ndimage import minimum_filter
+import os
 
 import time
 
@@ -241,6 +242,74 @@ def scan2pixels_diablo(laserCloud):
     
     return point_pixel_idx
 
+def scan2pixels_go2w(laserCloud):
+    # AlphaZ Go2-W: Mid-360 LiDAR + forward-facing pinhole camera.
+    # Extrinsic from AlphaZ's static yaml at
+    #   /home/all/AlphaZ/perception/src/perception_bringup/config/tf/go2w_006.yaml
+    # That yaml publishes livox_frame -> front_cam_optical:
+    #   t = (0.1705, 0.0262, -0.0628)
+    #   q (xyzw) = (-0.4575, 0.4339, -0.5384, 0.5591)
+    # Inverted to express the projection direction (livox -> camera):
+    R_l2c = np.array([
+        [ 0.0436, -0.9990,  0.0074],
+        [ 0.2049,  0.0017, -0.9788],
+        [ 0.9779,  0.0444,  0.2049],
+    ])
+    t_l2c = np.array([0.01921, -0.09647, -0.15504])
+
+    # Rectified intrinsics from camera_info's P matrix (not K).
+    fx = 789.61359
+    fy = 797.78961
+    cx = 612.8791
+    cy = 358.62105
+    W = 1280
+    H = 720
+
+    # Row-vector convention: p_cam = p_lidar @ R.T + t
+    xyz_cam = laserCloud[:, :3] @ R_l2c.T + t_l2c
+    z_cam = xyz_cam[:, 2]
+
+    # Pinhole projection (use safe z; behind-camera points masked out below).
+    behind = z_cam <= 1e-3
+    z_safe = np.where(behind, 1.0, z_cam)
+    u = fx * xyz_cam[:, 0] / z_safe + cx
+    v = fy * xyz_cam[:, 1] / z_safe + cy
+
+    horiPixelID = u.astype(int)
+    vertPixelID = v.astype(int)
+    pixelDepth = z_cam.astype(float).copy()
+
+    out_of_image = (horiPixelID < 0) | (horiPixelID >= W) | (vertPixelID < 0) | (vertPixelID >= H)
+    invalid = behind | out_of_image
+    horiPixelID[invalid] = -1
+    vertPixelID[invalid] = -1
+    pixelDepth[invalid] = np.inf  # push invalid points to end of depth-sort
+
+    # Z-buffer occlusion (same approach as scan2pixels_mecanum).
+    valid_mask = ~invalid
+    if np.any(valid_mask):
+        depth_map = np.full((H, W), np.inf)
+        idx = vertPixelID[valid_mask] * W + horiPixelID[valid_mask]
+        np.minimum.at(depth_map.ravel(), idx, pixelDepth[valid_mask])
+
+        neighborhood = 3
+        depth_map = minimum_filter(depth_map, size=(2 * neighborhood + 1), mode='nearest')
+
+        depth_at_pixel = np.full(pixelDepth.shape, np.inf)
+        depth_at_pixel[valid_mask] = depth_map[vertPixelID[valid_mask], horiPixelID[valid_mask]]
+        occluded = (pixelDepth >= depth_at_pixel + 0.15) & valid_mask
+        horiPixelID[occluded] = -1
+        vertPixelID[occluded] = -1
+
+    point_pixel_idx = np.stack([horiPixelID, vertPixelID, pixelDepth], axis=-1)
+
+    # Sort by depth ascending; mirror the permutation on laserCloud so caller's parallel-array indexing matches.
+    sort_idx = np.argsort(point_pixel_idx[:, 2])
+    point_pixel_idx = point_pixel_idx[sort_idx]
+    laserCloud[:] = laserCloud[sort_idx]
+
+    return point_pixel_idx
+
 def scan2pixels_scannet(cloud):
     rgb_intrinsics = {
         'fx': 1169.621094,
@@ -302,7 +371,7 @@ def grow_cluster_from_min(points, threshold=0.3):
 
 class CloudImageFusion:
     def __init__(self, platform):
-        self.platform_list = ['wheelchair', 'mecanum', 'mecanum_bagfile', 'mecanum_sim', 'scannet', 'diablo']
+        self.platform_list = ['wheelchair', 'mecanum', 'mecanum_bagfile', 'mecanum_sim', 'scannet', 'diablo', 'go2w']
 
         if platform not in self.platform_list:
             raise ValueError(f"Invalid platform: {platform}. Available platforms: {self.platform_list}")
@@ -320,12 +389,32 @@ class CloudImageFusion:
             self.scan2pixels = scan2pixels_scannet
         elif platform == 'diablo':
             self.scan2pixels = scan2pixels_diablo
+        elif platform == 'go2w':
+            self.scan2pixels = scan2pixels_go2w
         else:
-            print(f"Invalid platform: {platform}. Available platforms: [wheelchair, mecanum, mecanum_bagfile, mecanum_sim, scannet, diablo]")
+            print(f"Invalid platform: {platform}. Available platforms: [wheelchair, mecanum, mecanum_bagfile, mecanum_sim, scannet, diablo, go2w]")
             raise ValueError
     
     def generate_seg_cloud(self, cloud: np.ndarray, masks, labels, confidences, R_b2w, t_b2w, image_src=None):
         # Project the cloud points to image pixels
+
+        # arise_slam pre-rotates every input point by imu_laser_R_Gravity at
+        # feature_extraction (see featureExtraction.cpp:1585-1589), so cloud_body
+        # lands in arise_slam's gravity-aligned frame, not the bag's livox_frame.
+        # Undo it: cloud_lidar = cloud_body @ R_gravity.T (column-form rotation
+        # by R_gravity). Matrix read from arise_slam stdout on this bag.
+        # Lift back to world reuses R_GRAVITY (inverse of R_GRAVITY.T) to undo
+        # this rotation before applying R_b2w, which is the pose of arise's
+        # gravity-aligned body frame in world.
+        R_GRAVITY = np.eye(3)
+        if self.platform == 'go2w':
+            R_GRAVITY = np.array([
+                [ 0.978664,    0.0,         -0.205469 ],
+                [ 0.00283797,  0.999905,     0.0135174],
+                [ 0.205449,   -0.0138121,    0.97857  ],
+            ])
+            cloud = cloud @ R_GRAVITY.T
+
         point_pixel_idx = self.scan2pixels(cloud) # [N, 3] array of pixel coordinates (x, y, depth)
 
         if masks is None or len(masks) == 0:
@@ -355,7 +444,7 @@ class CloudImageFusion:
             obj_cloud = cloud[cloud_mask]
 
             if obj_depth.shape[0] <=1:
-                obj_cloud_world = obj_cloud[:, :3] @ R_b2w.T + t_b2w
+                obj_cloud_world = obj_cloud[:, :3] @ R_GRAVITY @ R_b2w.T + t_b2w
                 obj_cloud_world_list.append(obj_cloud_world)
                 continue
             # 错位相减obj_depth
@@ -419,7 +508,7 @@ class CloudImageFusion:
                 all_obj_cloud_mask_ori = np.logical_or(all_obj_cloud_mask_ori, cloud_mask)
                 # obj_cloud_list.append(obj_cloud)
         
-            obj_cloud_world = obj_cloud[:, :3] @ R_b2w.T + t_b2w
+            obj_cloud_world = obj_cloud[:, :3] @ R_GRAVITY @ R_b2w.T + t_b2w
             obj_cloud_world_list.append(obj_cloud_world)
 
         # if image_src is not None:
@@ -456,7 +545,8 @@ class CloudImageFusion:
                 cv2.circle(image_src, (int(x), int(y)), radius=1, 
                           color=tuple(int(c) for c in color), thickness=-1)
             time1 = int(round(time.time() * 1000))
-            cv2.imwrite(f"debug_obj/debug_all_obj_points_{time1}_1.png", image_src)
+            os.makedirs("debug/img_lidar", exist_ok=True)
+            cv2.imwrite(f"debug/img_lidar/debug_all_obj_points_{time1}_1.png", image_src)
         
         return obj_cloud_world_list
 
