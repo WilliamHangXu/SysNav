@@ -6,8 +6,8 @@ feature_extraction_node:
         use_sim_time: true
         PROJECT_NAME: ""
 
-        imu_topic: "/go2w_006/livox/imu"
-        laser_topic: "/go2w_006/livox/lidar"  #velodyne_points  #/livox/lidar /lidar/scan
+        imu_topic: "/go2w_011/livox/imu"
+        laser_topic: "/go2w_011/livox/lidar"  #velodyne_points  #/livox/lidar /lidar/scan
         odom_topic: "/dummy"
         depthup_topic: "/rs_up/depth/cloud_filtered"
         depthdown_topic: "/rs_down/depth/cloud_filtered"
@@ -96,7 +96,7 @@ imu_preintegration_node:
         use_sim_time: true
         PROJECT_NAME: ""
         sensor: "livox"
-        imu_topic: "/go2w_006/livox/imu"
+        imu_topic: "/go2w_011/livox/imu"
         laser_topic: "/lidar/scan"
         odom_topic:  "integrated_to_init"
         depthup_topic: "/rs_up/depth/cloud_filtered"

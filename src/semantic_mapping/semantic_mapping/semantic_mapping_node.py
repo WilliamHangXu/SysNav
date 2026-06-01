@@ -529,6 +529,7 @@ class MappingNode(Node):
 
             map_update_start = time.time()
             if not self.demo_frozen:
+                # self.log_info(f"🚨🚨 Detection number: {len(detections_tracked['ids'])}")
                 self.obj_mapper.update_map(detections_tracked, detection_stamp, camera_odom, neighboring_cloud, image, viewpoint_stamp_to_process)
             map_update_time = time.time() - map_update_start
 
@@ -546,7 +547,7 @@ class MappingNode(Node):
                 self.publish_object_type_query(target_objs)
 
             total_time = time.time() - start_time
-            self.log_info(f"🚨🚨 Map update time: {map_update_time}, sam2 time: {sam2_time}, annotate time: {annotate_time}, publish time: {publish_time}, total time: {total_time}")
+            # self.log_info(f"🚨🚨 Map update time: {map_update_time}, sam2 time: {sam2_time}, annotate time: {annotate_time}, publish time: {publish_time}, total time: {total_time}")
             self.total_mapping_calls += 1
             if total_time > 3.0:
                 self.mapping_over_3s += 1
@@ -712,6 +713,7 @@ class MappingNode(Node):
         self.timestamp = detection_stamp - 0.5
 
         # threading.Thread(target=self.mapping_processing, args=(image, camera_odom, detections, detection_stamp, neighboring_cloud, viewpoint_stamp_to_process)).start()
+        # self.log_info(f"🚨🚨 Detection number: {len(detections['ids'])}")
         self.mapping_processing(image, camera_odom, detections, detection_stamp, neighboring_cloud, viewpoint_stamp_to_process)
 
     def publish_map(self, stamp):

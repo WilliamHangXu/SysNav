@@ -147,10 +147,10 @@ prompts:
     prompts:
       - pan
     is_instance: true
-  # box:
-  #   prompts:
-  #     - box
-  #   is_instance: true
+  box:
+    prompts:
+      - box
+    is_instance: true
   suitcase:
     prompts:
       - suitcase

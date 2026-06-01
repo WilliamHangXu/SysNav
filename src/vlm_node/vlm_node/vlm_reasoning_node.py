@@ -307,6 +307,7 @@ class VLMNode(Node):
         os.makedirs(f"debug/target_object", exist_ok=True)
         os.makedirs(f"debug/anchor_object", exist_ok=True)
         os.makedirs(f"debug/target_object_spatial", exist_ok=True)
+        os.makedirs("debug/img_lidar", exist_ok=True)
 
         self.viewpoint_path = "output/viewpoint_images"
         

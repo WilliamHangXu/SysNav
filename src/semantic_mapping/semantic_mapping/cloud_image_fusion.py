@@ -546,7 +546,11 @@ class CloudImageFusion:
                           color=tuple(int(c) for c in color), thickness=-1)
             time1 = int(round(time.time() * 1000))
             os.makedirs("debug/img_lidar", exist_ok=True)
-            cv2.imwrite(f"debug/img_lidar/debug_all_obj_points_{time1}_1.png", image_src)
+            out_path = f"debug/img_lidar/debug_all_obj_points_{time1}_1.png"
+            ok = cv2.imwrite(out_path, image_src)
+            print(f"[generate_seg_cloud] imwrite ok={ok} path={os.path.abspath(out_path)} "
+                  f"img shape={None if image_src is None else image_src.shape} "
+                  f"dtype={None if image_src is None else image_src.dtype}")
         
         return obj_cloud_world_list
 

@@ -25,7 +25,8 @@ setup(
     entry_points={
         'console_scripts': [
              'semantic_mapping_node = semantic_mapping.semantic_mapping_node:main',
-             'detection_node = semantic_mapping.detection_node:main'
+             'detection_node = semantic_mapping.detection_node:main',
+             'detection_node_nanoowl = semantic_mapping.detection_node_nanoowl:main'
         ],
     },
 )

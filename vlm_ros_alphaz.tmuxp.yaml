@@ -56,7 +56,7 @@ windows:
       - shell_command:
           - "# 9. Bag (paused — press SPACE when planner is up)"
           - >
-            ros2 bag play /home/all/AlphaZ/bags/rosbag_20260223_200231_043146_ros2
+            ros2 bag play /home/all/AlphaZ/bags/rosbag_B03W-Mission-Camera-Point-Update_date-09april2026_time-20-37-00_currenttime-20-38-02-20260410T230756Z-3-0_ros2
             --clock --start-paused
       - shell_command:
           - "# 10. Probes / snapshot trigger — manual"
