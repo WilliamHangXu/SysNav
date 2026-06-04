@@ -456,6 +456,7 @@ private:
   // GADM-style scene-graph snapshot export
   void SaveSceneGraphSnapshot(const std::string &reason);
   void SceneGraphWatchdogCallback();
+  bool TryFreezeWorldFromMap();  // compose & latch world_T_map once
 
   // ========== VLM-Related Data Members ==========
   // Representation core
@@ -471,10 +472,14 @@ private:
   rclcpp::Time scene_graph_last_sim_time_;
   rclcpp::TimerBase::SharedPtr scene_graph_save_timer_;
   rclcpp::TimerBase::SharedPtr scene_graph_watchdog_timer_;
-  // world_frame <- source_frame lookup for snapshots (only created when
-  // scene_graph_export.world_transform.enabled).
+  // world_T_map for snapshots: composed once via the shared LiDAR across the
+  // bag's `world` tree and arise's `map` tree, then frozen. Buffer/listener only
+  // created when scene_graph_export.world_transform.enabled.
   std::shared_ptr<tf2_ros::Buffer> scene_graph_tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> scene_graph_tf_listener_;
+  Eigen::Isometry3d scene_graph_world_from_map_ = Eigen::Isometry3d::Identity();
+  bool scene_graph_world_from_map_valid_ = false;
+  rclcpp::TimerBase::SharedPtr scene_graph_world_tf_timer_;
 
   // Viewpoint representation parameters
   double rep_threshold_;

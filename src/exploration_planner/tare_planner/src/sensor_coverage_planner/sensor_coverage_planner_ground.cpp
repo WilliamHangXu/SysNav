@@ -278,9 +278,13 @@ void SensorCoveragePlanner3D::ReadParameters() {
   this->declare_parameter<std::string>("scene_graph_export.building", scene_graph_cfg_.building);
   this->declare_parameter<int>("scene_graph_export.floor_level", scene_graph_cfg_.floor_level);
   this->declare_parameter<std::string>("scene_graph_export.floor_id", scene_graph_cfg_.floor_id);
-  this->declare_parameter<bool>("scene_graph_export.world_transform.enabled", scene_graph_cfg_.apply_world_transform);
+  this->declare_parameter<bool>("scene_graph_export.world_transform.enabled", scene_graph_cfg_.enabled_world_transform);
   this->declare_parameter<std::string>("scene_graph_export.world_transform.world_frame", scene_graph_cfg_.world_frame);
-  this->declare_parameter<std::string>("scene_graph_export.world_transform.source_frame", scene_graph_cfg_.source_frame);
+  this->declare_parameter<std::string>("scene_graph_export.world_transform.livox_frame", scene_graph_cfg_.livox_frame);
+  this->declare_parameter<std::string>("scene_graph_export.world_transform.map_frame", scene_graph_cfg_.map_frame);
+  this->declare_parameter<std::string>("scene_graph_export.world_transform.sensor_frame", scene_graph_cfg_.sensor_frame);
+  this->declare_parameter<std::vector<double>>("scene_graph_export.world_transform.gravity_matrix",
+      std::vector<double>(scene_graph_cfg_.gravity_matrix.begin(), scene_graph_cfg_.gravity_matrix.end()));
 
   this->get_parameter("scene_graph_export.enabled", scene_graph_cfg_.enabled);
   this->get_parameter("scene_graph_export.output_root", scene_graph_cfg_.output_root);
@@ -298,9 +302,25 @@ void SensorCoveragePlanner3D::ReadParameters() {
   this->get_parameter("scene_graph_export.building", scene_graph_cfg_.building);
   this->get_parameter("scene_graph_export.floor_level", scene_graph_cfg_.floor_level);
   this->get_parameter("scene_graph_export.floor_id", scene_graph_cfg_.floor_id);
-  this->get_parameter("scene_graph_export.world_transform.enabled", scene_graph_cfg_.apply_world_transform);
+  this->get_parameter("scene_graph_export.world_transform.enabled", scene_graph_cfg_.enabled_world_transform);
   this->get_parameter("scene_graph_export.world_transform.world_frame", scene_graph_cfg_.world_frame);
-  this->get_parameter("scene_graph_export.world_transform.source_frame", scene_graph_cfg_.source_frame);
+  this->get_parameter("scene_graph_export.world_transform.livox_frame", scene_graph_cfg_.livox_frame);
+  this->get_parameter("scene_graph_export.world_transform.map_frame", scene_graph_cfg_.map_frame);
+  this->get_parameter("scene_graph_export.world_transform.sensor_frame", scene_graph_cfg_.sensor_frame);
+  {
+    std::vector<double> g;
+    this->get_parameter("scene_graph_export.world_transform.gravity_matrix", g);
+    if (g.size() == 9)
+    {
+      std::copy(g.begin(), g.end(), scene_graph_cfg_.gravity_matrix.begin());
+    }
+    else
+    {
+      RCLCPP_WARN(this->get_logger(),
+                  "[scene_graph] gravity_matrix needs 9 values, got %zu; using identity",
+                  g.size());
+    }
+  }
 }
 
 // void PlannerData::Initialize(rclcpp::Node::SharedPtr node_)
@@ -616,17 +636,29 @@ bool SensorCoveragePlanner3D::initialize() {
       RCLCPP_INFO(this->get_logger(), "[scene_graph] snapshots -> %s",
                   scene_graph_run_dir_.c_str());
 
-      // TF listener for the optional world_frame <- source_frame transform.
-      if (scene_graph_cfg_.apply_world_transform)
+      // Bridge arise's `map` to the bag's `world` via the shared LiDAR; compose
+      // world_T_map once and freeze it. The single buffer hears /tf, which
+      // carries both (disjoint) trees, so each in-tree lookup resolves.
+      if (scene_graph_cfg_.enabled_world_transform)
       {
         scene_graph_tf_buffer_ =
             std::make_shared<tf2_ros::Buffer>(this->get_clock());
         scene_graph_tf_listener_ =
             std::make_shared<tf2_ros::TransformListener>(*scene_graph_tf_buffer_);
         RCLCPP_INFO(this->get_logger(),
-                    "[scene_graph] world transform on: %s <- %s",
+                    "[scene_graph] world transform on: %s <- %s (via %s / %s)",
                     scene_graph_cfg_.world_frame.c_str(),
-                    scene_graph_cfg_.source_frame.c_str());
+                    scene_graph_cfg_.map_frame.c_str(),
+                    scene_graph_cfg_.livox_frame.c_str(),
+                    scene_graph_cfg_.sensor_frame.c_str());
+        // Retry until both trees are flowing, then freeze and stop retrying.
+        scene_graph_world_tf_timer_ = this->create_wall_timer(
+            std::chrono::duration<double>(1.0), [this]() {
+              if (TryFreezeWorldFromMap())
+              {
+                scene_graph_world_tf_timer_->cancel();
+              }
+            });
       }
 
       // Periodic snapshots (wall clock so they fire under sim time too).
@@ -4549,6 +4581,67 @@ void SensorCoveragePlanner3D::to_json(json &j, const representation_ns::Represen
   RCLCPP_INFO(this->get_logger(), "Representation JSON:\n%s", json_str.c_str());
 }
 
+bool SensorCoveragePlanner3D::TryFreezeWorldFromMap()
+{
+  if (!scene_graph_cfg_.enabled_world_transform)
+  {
+    return true;  // disabled: identity, export stays in the map frame
+  }
+  if (!scene_graph_tf_buffer_)
+  {
+    return false;
+  }
+  try
+  {
+    // Two lookups, each within its own (disjoint) tree; compose in code. The
+    // shared physical LiDAR is `livox_frame` in the bag tree and `sensor` in
+    // arise's tree, related by the gravity rotation G = livox_T_sensor.
+    const geometry_msgs::msg::TransformStamped world_T_livox_msg =
+        scene_graph_tf_buffer_->lookupTransform(
+            scene_graph_cfg_.world_frame, scene_graph_cfg_.livox_frame,
+            tf2::TimePointZero);
+    const geometry_msgs::msg::TransformStamped map_T_sensor_msg =
+        scene_graph_tf_buffer_->lookupTransform(
+            scene_graph_cfg_.map_frame, scene_graph_cfg_.sensor_frame,
+            tf2::TimePointZero);
+
+    const auto to_iso = [](const geometry_msgs::msg::TransformStamped& m) {
+      Eigen::Isometry3d iso = Eigen::Isometry3d::Identity();
+      const auto& t = m.transform.translation;
+      const auto& r = m.transform.rotation;
+      iso.translation() = Eigen::Vector3d(t.x, t.y, t.z);
+      iso.linear() =
+          Eigen::Quaterniond(r.w, r.x, r.y, r.z).normalized().toRotationMatrix();
+      return iso;
+    };
+    const Eigen::Isometry3d world_T_livox = to_iso(world_T_livox_msg);
+    const Eigen::Isometry3d map_T_sensor = to_iso(map_T_sensor_msg);
+
+    // G = livox_T_sensor (gravity rotation), row-major 3x3 from config.
+    const auto& gm = scene_graph_cfg_.gravity_matrix;
+    Eigen::Matrix3d g_rot;
+    g_rot << gm[0], gm[1], gm[2], gm[3], gm[4], gm[5], gm[6], gm[7], gm[8];
+    Eigen::Isometry3d G = Eigen::Isometry3d::Identity();
+    G.linear() = g_rot;
+
+    scene_graph_world_from_map_ = world_T_livox * G * map_T_sensor.inverse();
+    scene_graph_world_from_map_valid_ = true;
+
+    const Eigen::Vector3d trans = scene_graph_world_from_map_.translation();
+    RCLCPP_INFO(this->get_logger(),
+                "[scene_graph] world_T_map frozen: t=(%.3f, %.3f, %.3f)",
+                trans.x(), trans.y(), trans.z());
+    return true;
+  }
+  catch (const tf2::TransformException& ex)
+  {
+    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                         "[scene_graph] world_T_map lookup pending (%s)",
+                         ex.what());
+    return false;
+  }
+}
+
 void SensorCoveragePlanner3D::SaveSceneGraphSnapshot(const std::string &reason)
 {
   if (!scene_graph_exporter_ || !initialized_)
@@ -4556,37 +4649,24 @@ void SensorCoveragePlanner3D::SaveSceneGraphSnapshot(const std::string &reason)
     return;
   }
 
-  // Resolve world_frame <- source_frame; fall back to identity (source frame)
-  // on any TF failure so a snapshot is still written.
-  Eigen::Isometry3d world_from_source = Eigen::Isometry3d::Identity();
-  if (scene_graph_cfg_.apply_world_transform && scene_graph_tf_buffer_)
+  // world_T_map is composed once and frozen (TryFreezeWorldFromMap). If it isn't
+  // latched yet (e.g. an early snapshot before TF is flowing), try now; on
+  // failure fall back to identity and write the snapshot in the map frame.
+  if (scene_graph_cfg_.enabled_world_transform && !scene_graph_world_from_map_valid_)
   {
-    try
-    {
-      const geometry_msgs::msg::TransformStamped tf =
-          scene_graph_tf_buffer_->lookupTransform(
-              scene_graph_cfg_.world_frame, scene_graph_cfg_.source_frame,
-              tf2::TimePointZero);
-      const auto& t = tf.transform.translation;
-      const auto& r = tf.transform.rotation;
-      world_from_source.translation() = Eigen::Vector3d(t.x, t.y, t.z);
-      world_from_source.linear() =
-          Eigen::Quaterniond(r.w, r.x, r.y, r.z).normalized().toRotationMatrix();
-    }
-    catch (const tf2::TransformException& ex)
+    if (!TryFreezeWorldFromMap())
     {
       RCLCPP_WARN(this->get_logger(),
-                  "[scene_graph] TF %s <- %s unavailable (%s); writing %s "
-                  "snapshot in source frame",
-                  scene_graph_cfg_.world_frame.c_str(),
-                  scene_graph_cfg_.source_frame.c_str(), ex.what(),
+                  "[scene_graph] world_T_map not available yet; writing %s "
+                  "snapshot in map frame",
                   reason.c_str());
     }
   }
 
   json snapshot = scene_graph_exporter_->Build(
       representation_->GetRoomNodesMap(), representation_->GetObjectNodeRepMap(),
-      representation_->GetViewPointReps(), *door_cloud_, world_from_source);
+      representation_->GetViewPointReps(), *door_cloud_,
+      scene_graph_world_from_map_);
 
   // "final" gets a stable name; everything else is a numbered, time-stamped file.
   std::string filename;

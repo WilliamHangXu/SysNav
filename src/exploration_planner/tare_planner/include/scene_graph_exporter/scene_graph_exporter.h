@@ -10,6 +10,7 @@
  */
 #pragma once
 
+#include <array>
 #include <map>
 #include <string>
 #include <unordered_map>
@@ -42,14 +43,20 @@ struct SceneGraphExportConfig
   double bag_end_timeout_s = 5.0;  // wall-clock stall before declaring "bag over"
   std::string manual_save_keyword = "save";
 
-  // --- world-frame transform (applied to every emitted coordinate) ---
-  // When enabled, the planner looks up world_frame <- source_frame on /tf and
-  // /tf_static and passes the resulting rigid transform into Build(); the
-  // exporter then expresses all coordinates in world_frame. ROS 2 tf2 strips a
-  // leading '/', so source_frame must be given without one.
-  bool apply_world_transform = false;
+  // --- world-frame transform (composed by the planner, applied in Build) ---
+  // The scene graph lives in arise's `map` frame, a disjoint TF tree from the
+  // bag's `world`. The planner bridges them via the shared physical LiDAR:
+  //   world_T_map = world_T_livox * G * (map_T_sensor)^-1
+  // where G (= livox_T_sensor) is the gravity rotation, arise's per-run
+  // imu_laser_R_Gravity (identical to cloud_image_fusion.py's R_GRAVITY).
+  // tf2 strips a leading '/', so give frame names without one. gravity_matrix is
+  // row-major 3x3. The exporter just receives the final transform via Build().
+  bool enabled_world_transform = false;
   std::string world_frame = "world";
-  std::string source_frame = "go2w_005/odom";
+  std::string livox_frame = "go2w_005/livox_frame";
+  std::string map_frame = "map";
+  std::string sensor_frame = "sensor";
+  std::array<double, 9> gravity_matrix = {1, 0, 0, 0, 1, 0, 0, 0, 1};
 
   // --- written verbatim into the JSON ---
   std::string zone = "all";        // single zone bucket for all rooms

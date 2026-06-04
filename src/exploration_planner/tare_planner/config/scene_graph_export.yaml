@@ -12,13 +12,21 @@ tare_planner_node:
     scene_graph_export.manual_save_keyword: "ssg"       # /keyboard_input trigger for on-demand dump
 
     # --- world-frame transform ---
-    # When enabled, coordinates are emitted in world_frame by looking up
-    # world_frame <- source_frame on /tf + /tf_static. ROS 2 tf2 strips a
-    # leading '/', so give source_frame without one. On lookup failure the
-    # snapshot is still written, untransformed (source frame).
+    # The scene graph lives in arise's `map` frame, a disjoint TF tree from the
+    # bag's `world`. We bridge them via the shared physical LiDAR (frozen once):
+    #   world_T_map = world_T_livox * G * (map_T_sensor)^-1
+    # tf2 strips a leading '/', so give frame names without one. On lookup
+    # failure the snapshot is still written, untransformed (map frame).
     scene_graph_export.world_transform.enabled: true
     scene_graph_export.world_transform.world_frame: "world"
-    scene_graph_export.world_transform.source_frame: "go2w_005/odom"
+    scene_graph_export.world_transform.livox_frame: "go2w_005/livox_frame"
+    scene_graph_export.world_transform.map_frame: "map"
+    scene_graph_export.world_transform.sensor_frame: "sensor"
+    # G = arise's per-run imu_laser_R_Gravity (row-major 3x3). MUST match
+    # cloud_image_fusion.py:411 and arise's stdout for THIS bag; identity
+    # disables the rotation. Re-read it for any new bag / IMU init / remount.
+    scene_graph_export.world_transform.gravity_matrix:
+      [0.978664, 0.0, -0.205469, 0.00283797, 0.999905, 0.0135174, 0.205449, -0.0138121, 0.97857]
 
     # --- single zone bucket for all rooms ---
     scene_graph_export.zone: "all"
