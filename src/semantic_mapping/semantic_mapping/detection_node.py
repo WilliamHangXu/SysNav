@@ -48,7 +48,7 @@ class DetectNode(Node):
         self.declare_parameter('grounding_score_thresh', 0.3)
         self.declare_parameter('device', device)
         self.declare_parameter('annotate_image', True)
-        self.declare_parameter('object_file', str(self.CONFIG_DIR / 'config' / 'objects.yaml'))
+        self.declare_parameter('object_file', str(self.CONFIG_DIR / 'config' / 'objects_office.yaml'))
         self.declare_parameter('image_topic', '/camera/image')
 
 
@@ -68,9 +68,9 @@ class DetectNode(Node):
         self.text_prompt_list = np.array(self.text_prompt_list)
         print(f"Text prompt: {self.text_prompt}")
 
-        self.grounding_model = YOLO(self.CONFIG_DIR / "external/yolov8x-worldv2_cus.engine", task='detect')
+        # self.grounding_model = YOLO(self.CONFIG_DIR / "external/yolov8x-worldv2_cus.engine", task='detect')
         # self.grounding_model = YOLOE(self.CONFIG_DIR / "external/yoloe-11l-seg.engine", task="segment")
-        # self.grounding_model = YOLOE(self.CONFIG_DIR / "external/yoloe-26x-seg.engine", task="segment")
+        self.grounding_model = YOLOE(self.CONFIG_DIR / "external/yoloe-26x-seg.engine", task="segment")
 
         self.device = device
 
@@ -198,7 +198,7 @@ class DetectNode(Node):
         anotate_time = time.time()
         self.publish_detection_results(detections, detection_stamp, image, image_anno)
         publish_time = time.time()
-        self.log_info(f"🚨🚨🚨🚨 Detection time: {time.time() - start_time:.2f} seconds, detection time: {detection_time - start_time:.2f}, annotate time: {anotate_time - detection_time:.2f}, publish time: {publish_time - anotate_time:.2f}")
+        # self.log_info(f"🚨🚨🚨🚨 Detection time: {time.time() - start_time:.2f} seconds, detection time: {detection_time - start_time:.2f}, annotate time: {anotate_time - detection_time:.2f}, publish time: {publish_time - anotate_time:.2f}")
 
     def publish_detection_results(self, detections_tracked, detection_stamp, image, image_anno):
         """

@@ -131,7 +131,7 @@ tare_planner_node:
     kLocalPlanningHorizonMarkerWidth : 0.08
     kLocalPlanningHorizonHeight : 3.0
 
-    rep_threshold_: 0.45
+    rep_threshold_: 0.65
     kRepSensorRange : 5.0
 
     # remeber to change in both room_segmentation and tare_planner

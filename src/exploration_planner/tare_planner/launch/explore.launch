@@ -15,7 +15,8 @@ def launch_tare_node(context, scenario):
         name='tare_planner_node',
         output='screen',
         # namespace='sensor_coverage_planner',
-        parameters=[get_package_share_directory('tare_planner')+'/' + scenario_str + '.yaml'],
+        parameters=[get_package_share_directory('tare_planner')+'/' + scenario_str + '.yaml',
+                    get_package_share_directory('tare_planner')+'/scene_graph_export.yaml'],
         # gdb debugging
         # prefix=['xterm -e gdb -ex run --args']
         )

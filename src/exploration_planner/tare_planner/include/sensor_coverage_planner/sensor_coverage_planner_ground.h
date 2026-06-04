@@ -33,6 +33,8 @@
 #include <std_msgs/msg/string.hpp>
 #include <std_msgs/msg/int32_multi_array.hpp>
 #include <tf2/transform_datatypes.h>
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
 // PCL
 #include <pcl/PointIndices.h>
 #include <pcl/filters/extract_indices.h>
@@ -60,6 +62,7 @@
 #include "viewpoint_manager/viewpoint_manager.h"
 
 #include "representation/representation.h"
+#include "scene_graph_exporter/scene_graph_exporter.h"
 #include "grid/grid.h"
 #include "tare_planner/msg/object_node.hpp"
 #include "tare_planner/msg/object_node_list.hpp"
@@ -450,10 +453,29 @@ private:
   void to_json(json &j, const representation_ns::RoomNodeRep &room) const;
   void to_json(json &j, const representation_ns::Representation &rep) const;
 
+  // GADM-style scene-graph snapshot export
+  void SaveSceneGraphSnapshot(const std::string &reason);
+  void SceneGraphWatchdogCallback();
+
   // ========== VLM-Related Data Members ==========
   // Representation core
   std::shared_ptr<representation_ns::Representation> representation_;
-  
+
+  // Scene-graph JSON export
+  scene_graph_exporter_ns::SceneGraphExportConfig scene_graph_cfg_;
+  std::unique_ptr<scene_graph_exporter_ns::SceneGraphExporter> scene_graph_exporter_;
+  std::string scene_graph_run_dir_;
+  int scene_graph_snapshot_count_;
+  bool scene_graph_final_saved_;
+  bool scene_graph_clock_started_;  // sim clock has advanced at least once (bag playing)
+  rclcpp::Time scene_graph_last_sim_time_;
+  rclcpp::TimerBase::SharedPtr scene_graph_save_timer_;
+  rclcpp::TimerBase::SharedPtr scene_graph_watchdog_timer_;
+  // world_frame <- source_frame lookup for snapshots (only created when
+  // scene_graph_export.world_transform.enabled).
+  std::shared_ptr<tf2_ros::Buffer> scene_graph_tf_buffer_;
+  std::shared_ptr<tf2_ros::TransformListener> scene_graph_tf_listener_;
+
   // Viewpoint representation parameters
   double rep_threshold_;
   int rep_threshold_voxel_num_;

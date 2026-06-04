@@ -13,6 +13,10 @@
 #include "graph/graph.h"
 #include <memory>
 #include <unordered_map>
+#include <algorithm>
+#include <chrono>
+#include <ctime>
+#include <fstream>
 #include <tf2/LinearMath/Matrix3x3.h>
 #include <tf2/LinearMath/Quaternion.h>
 using json = nlohmann::json;
@@ -256,6 +260,47 @@ void SensorCoveragePlanner3D::ReadParameters() {
   room_voxel_dimension_.x() = this->get_parameter("room_x").as_int();
   room_voxel_dimension_.y() = this->get_parameter("room_y").as_int();
   room_voxel_dimension_.z() = this->get_parameter("room_z").as_int();
+
+  // Scene-graph JSON export (see config/scene_graph_export.yaml)
+  this->declare_parameter<bool>("scene_graph_export.enabled", scene_graph_cfg_.enabled);
+  this->declare_parameter<std::string>("scene_graph_export.output_root", scene_graph_cfg_.output_root);
+  this->declare_parameter<double>("scene_graph_export.save_interval_s", scene_graph_cfg_.save_interval_s);
+  this->declare_parameter<bool>("scene_graph_export.end_of_bag_save", scene_graph_cfg_.end_of_bag_save);
+  this->declare_parameter<double>("scene_graph_export.bag_end_timeout_s", scene_graph_cfg_.bag_end_timeout_s);
+  this->declare_parameter<std::string>("scene_graph_export.manual_save_keyword", scene_graph_cfg_.manual_save_keyword);
+  this->declare_parameter<std::string>("scene_graph_export.zone", scene_graph_cfg_.zone);
+  this->declare_parameter<std::string>("scene_graph_export.map_id", scene_graph_cfg_.map_id);
+  this->declare_parameter<std::string>("scene_graph_export.warehouse_id", scene_graph_cfg_.warehouse_id);
+  this->declare_parameter<std::string>("scene_graph_export.name", scene_graph_cfg_.name);
+  this->declare_parameter<std::string>("scene_graph_export.client_id", scene_graph_cfg_.client_id);
+  this->declare_parameter<std::string>("scene_graph_export.uploaded_by", scene_graph_cfg_.uploaded_by);
+  this->declare_parameter<std::string>("scene_graph_export.units", scene_graph_cfg_.units);
+  this->declare_parameter<std::string>("scene_graph_export.building", scene_graph_cfg_.building);
+  this->declare_parameter<int>("scene_graph_export.floor_level", scene_graph_cfg_.floor_level);
+  this->declare_parameter<std::string>("scene_graph_export.floor_id", scene_graph_cfg_.floor_id);
+  this->declare_parameter<bool>("scene_graph_export.world_transform.enabled", scene_graph_cfg_.apply_world_transform);
+  this->declare_parameter<std::string>("scene_graph_export.world_transform.world_frame", scene_graph_cfg_.world_frame);
+  this->declare_parameter<std::string>("scene_graph_export.world_transform.source_frame", scene_graph_cfg_.source_frame);
+
+  this->get_parameter("scene_graph_export.enabled", scene_graph_cfg_.enabled);
+  this->get_parameter("scene_graph_export.output_root", scene_graph_cfg_.output_root);
+  this->get_parameter("scene_graph_export.save_interval_s", scene_graph_cfg_.save_interval_s);
+  this->get_parameter("scene_graph_export.end_of_bag_save", scene_graph_cfg_.end_of_bag_save);
+  this->get_parameter("scene_graph_export.bag_end_timeout_s", scene_graph_cfg_.bag_end_timeout_s);
+  this->get_parameter("scene_graph_export.manual_save_keyword", scene_graph_cfg_.manual_save_keyword);
+  this->get_parameter("scene_graph_export.zone", scene_graph_cfg_.zone);
+  this->get_parameter("scene_graph_export.map_id", scene_graph_cfg_.map_id);
+  this->get_parameter("scene_graph_export.warehouse_id", scene_graph_cfg_.warehouse_id);
+  this->get_parameter("scene_graph_export.name", scene_graph_cfg_.name);
+  this->get_parameter("scene_graph_export.client_id", scene_graph_cfg_.client_id);
+  this->get_parameter("scene_graph_export.uploaded_by", scene_graph_cfg_.uploaded_by);
+  this->get_parameter("scene_graph_export.units", scene_graph_cfg_.units);
+  this->get_parameter("scene_graph_export.building", scene_graph_cfg_.building);
+  this->get_parameter("scene_graph_export.floor_level", scene_graph_cfg_.floor_level);
+  this->get_parameter("scene_graph_export.floor_id", scene_graph_cfg_.floor_id);
+  this->get_parameter("scene_graph_export.world_transform.enabled", scene_graph_cfg_.apply_world_transform);
+  this->get_parameter("scene_graph_export.world_transform.world_frame", scene_graph_cfg_.world_frame);
+  this->get_parameter("scene_graph_export.world_transform.source_frame", scene_graph_cfg_.source_frame);
 }
 
 // void PlannerData::Initialize(rclcpp::Node::SharedPtr node_)
@@ -523,7 +568,9 @@ SensorCoveragePlanner3D::SensorCoveragePlanner3D()
       reset_waypoint_(false), registered_cloud_count_(0), keypose_count_(0),
       direction_change_count_(0), direction_no_change_count_(0),
       momentum_activation_count_(0), reset_waypoint_joystick_axis_value_(-1.0),
-      add_viewpoint_rep_(false), at_room_(false), near_room_1_(false), near_room_2_(false)
+      add_viewpoint_rep_(false), at_room_(false), near_room_1_(false), near_room_2_(false),
+      scene_graph_snapshot_count_(0), scene_graph_final_saved_(false),
+      scene_graph_clock_started_(false)
 {
   std::cout << "finished constructor" << std::endl;
 }
@@ -539,6 +586,71 @@ bool SensorCoveragePlanner3D::initialize() {
 
   execution_timer_ = this->create_wall_timer(
       1000ms, std::bind(&SensorCoveragePlanner3D::execute, this));
+
+  // ---- Scene-graph JSON export setup ----
+  if (scene_graph_cfg_.enabled)
+  {
+    scene_graph_exporter_ =
+        std::make_unique<scene_graph_exporter_ns::SceneGraphExporter>(scene_graph_cfg_);
+
+    // Create a fresh per-run output folder: <output_root>/run_<wallclock>/
+    std::time_t now_time = std::time(nullptr);
+    char run_stamp[32];
+    std::strftime(run_stamp, sizeof(run_stamp), "%Y-%m-%d_%H-%M-%S",
+                  std::localtime(&now_time));
+    std::filesystem::path run_dir =
+        std::filesystem::path(scene_graph_cfg_.output_root) /
+        (std::string("run_") + run_stamp);
+    std::error_code ec;
+    std::filesystem::create_directories(run_dir, ec);
+    if (ec)
+    {
+      RCLCPP_ERROR(this->get_logger(),
+                   "[scene_graph] failed to create run dir %s: %s",
+                   run_dir.c_str(), ec.message().c_str());
+      scene_graph_exporter_.reset();  // disable export rather than crash later
+    }
+    else
+    {
+      scene_graph_run_dir_ = run_dir.string();
+      RCLCPP_INFO(this->get_logger(), "[scene_graph] snapshots -> %s",
+                  scene_graph_run_dir_.c_str());
+
+      // TF listener for the optional world_frame <- source_frame transform.
+      if (scene_graph_cfg_.apply_world_transform)
+      {
+        scene_graph_tf_buffer_ =
+            std::make_shared<tf2_ros::Buffer>(this->get_clock());
+        scene_graph_tf_listener_ =
+            std::make_shared<tf2_ros::TransformListener>(*scene_graph_tf_buffer_);
+        RCLCPP_INFO(this->get_logger(),
+                    "[scene_graph] world transform on: %s <- %s",
+                    scene_graph_cfg_.world_frame.c_str(),
+                    scene_graph_cfg_.source_frame.c_str());
+      }
+
+      // Periodic snapshots (wall clock so they fire under sim time too).
+      if (scene_graph_cfg_.save_interval_s > 0.0)
+      {
+        scene_graph_save_timer_ = this->create_wall_timer(
+            std::chrono::duration<double>(scene_graph_cfg_.save_interval_s),
+            [this]() { SaveSceneGraphSnapshot("periodic"); });
+      }
+
+      // End-of-bag watchdog: only meaningful when replaying on sim time.
+      bool use_sim_time = false;
+      this->get_parameter("use_sim_time", use_sim_time);
+      if (scene_graph_cfg_.end_of_bag_save && use_sim_time)
+      {
+        scene_graph_last_sim_time_ = this->now();
+        scene_graph_clock_started_ = false;
+        scene_graph_watchdog_timer_ = this->create_wall_timer(
+            std::chrono::duration<double>(
+                std::max(0.5, scene_graph_cfg_.bag_end_timeout_s)),
+            std::bind(&SensorCoveragePlanner3D::SceneGraphWatchdogCallback, this));
+      }
+    }
+  }
 
   exploration_start_sub_ = this->create_subscription<std_msgs::msg::Bool>(
       sub_start_exploration_topic_, 5,
@@ -1336,6 +1448,10 @@ void SensorCoveragePlanner3D::KeyboardInputCallback(const std_msgs::msg::String:
   if (keyboard_input_msg->data == "reset")
   {
     tmp_flag_ = true;
+  }
+  if (keyboard_input_msg->data == scene_graph_cfg_.manual_save_keyword)
+  {
+    SaveSceneGraphSnapshot("manual");
   }
 }
 
@@ -4431,6 +4547,109 @@ void SensorCoveragePlanner3D::to_json(json &j, const representation_ns::Represen
   // print the json as a string
   std::string json_str = j.dump(4); // 4 is the indentation level
   RCLCPP_INFO(this->get_logger(), "Representation JSON:\n%s", json_str.c_str());
+}
+
+void SensorCoveragePlanner3D::SaveSceneGraphSnapshot(const std::string &reason)
+{
+  if (!scene_graph_exporter_ || !initialized_)
+  {
+    return;
+  }
+
+  // Resolve world_frame <- source_frame; fall back to identity (source frame)
+  // on any TF failure so a snapshot is still written.
+  Eigen::Isometry3d world_from_source = Eigen::Isometry3d::Identity();
+  if (scene_graph_cfg_.apply_world_transform && scene_graph_tf_buffer_)
+  {
+    try
+    {
+      const geometry_msgs::msg::TransformStamped tf =
+          scene_graph_tf_buffer_->lookupTransform(
+              scene_graph_cfg_.world_frame, scene_graph_cfg_.source_frame,
+              tf2::TimePointZero);
+      const auto& t = tf.transform.translation;
+      const auto& r = tf.transform.rotation;
+      world_from_source.translation() = Eigen::Vector3d(t.x, t.y, t.z);
+      world_from_source.linear() =
+          Eigen::Quaterniond(r.w, r.x, r.y, r.z).normalized().toRotationMatrix();
+    }
+    catch (const tf2::TransformException& ex)
+    {
+      RCLCPP_WARN(this->get_logger(),
+                  "[scene_graph] TF %s <- %s unavailable (%s); writing %s "
+                  "snapshot in source frame",
+                  scene_graph_cfg_.world_frame.c_str(),
+                  scene_graph_cfg_.source_frame.c_str(), ex.what(),
+                  reason.c_str());
+    }
+  }
+
+  json snapshot = scene_graph_exporter_->Build(
+      representation_->GetRoomNodesMap(), representation_->GetObjectNodeRepMap(),
+      representation_->GetViewPointReps(), *door_cloud_, world_from_source);
+
+  // "final" gets a stable name; everything else is a numbered, time-stamped file.
+  std::string filename;
+  if (reason == "final")
+  {
+    filename = "snapshot_final.json";
+  }
+  else
+  {
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "snapshot_%04d_%.3f.json",
+                  scene_graph_snapshot_count_, this->now().seconds());
+    filename = buf;
+  }
+
+  std::filesystem::path out_path =
+      std::filesystem::path(scene_graph_run_dir_) / filename;
+  std::ofstream out(out_path);
+  if (!out)
+  {
+    RCLCPP_ERROR(this->get_logger(), "[scene_graph] cannot write %s",
+                 out_path.c_str());
+    return;
+  }
+  out << snapshot.dump(2);
+  out.close();
+  ++scene_graph_snapshot_count_;
+  RCLCPP_INFO(this->get_logger(), "[scene_graph] saved %s snapshot -> %s",
+              reason.c_str(), out_path.c_str());
+}
+
+void SensorCoveragePlanner3D::SceneGraphWatchdogCallback()
+{
+  if (!scene_graph_exporter_ || scene_graph_final_saved_)
+  {
+    return;
+  }
+  rclcpp::Time current_sim_time = this->now();
+
+  // Arming: ignore the pre-playback window. While the bag is paused (or before it
+  // starts) the sim clock is either 0 or held constant, which must NOT be mistaken
+  // for "bag finished". Only arm the watchdog once we have seen the clock advance.
+  if (!scene_graph_clock_started_)
+  {
+    if (current_sim_time.seconds() > 0.0 &&
+        current_sim_time > scene_graph_last_sim_time_)
+    {
+      scene_graph_clock_started_ = true;  // bag has begun playing
+    }
+    scene_graph_last_sim_time_ = current_sim_time;
+    return;
+  }
+
+  // Armed: sim time held constant over a full watchdog period => playback ended.
+  if (current_sim_time == scene_graph_last_sim_time_)
+  {
+    RCLCPP_INFO(this->get_logger(),
+                "[scene_graph] sim time stalled; writing final snapshot");
+    SaveSceneGraphSnapshot("final");
+    scene_graph_final_saved_ = true;
+    return;
+  }
+  scene_graph_last_sim_time_ = current_sim_time;
 }
 
 void SensorCoveragePlanner3D::CheckObjectFound()

@@ -16,7 +16,7 @@ def launch_detection_node(context):
 
     detection_node = Node(
         package='semantic_mapping',
-        executable='detection_node_nanoowl',
+        executable='detection_node',
         name='detection_node',
         output='screen',
         parameters=[{

@@ -30,10 +30,10 @@ windows:
   - window_name: gadm
     layout: tiled
     panes:
-      - shell_command:
-          - "# 5. Mission manager"
-          - sleep 5
-          - ros2 launch mission_manager mission_manager.launch use_sim_time:=true config:=gadm
+      # - shell_command:
+      #     - "# 5. Mission manager"
+      #     - sleep 5
+      #     - ros2 launch mission_manager mission_manager.launch use_sim_time:=true config:=gadm
       - shell_command:
           - "# 6. VLM reasoning"
           - sleep 5
@@ -54,10 +54,18 @@ windows:
   - window_name: bag
     panes:
       - shell_command:
-          - "# 9. Bag (paused — press SPACE when planner is up)"
+          # Start paused so /clock is alive (at the bag's real start time) before the
+          # planner boots — this avoids the 0 -> bag-time clock jump that crashes TARE.
+          # Then auto-resume playback via the rosbag2 service once the stack is up.
+          # --disable-keyboard-controls (+ stdin from /dev/null) keeps the player from
+          # reading the tty; otherwise backgrounding it with & triggers SIGTTIN and the
+          # player is suspended, so its /rosbag2_player/resume service never responds.
+          - "# 9. Bag — starts paused (clock alive), then auto-resumes"
           - >
-            ros2 bag play /home/all/AlphaZ/bags/rosbag_B03W-Mission-Camera-Point-Update_date-09april2026_time-20-37-00_currenttime-20-38-02-20260410T230756Z-3-0_ros2
-            --clock --start-paused
+            ros2 bag play /home/all/AlphaZ/bags/office_building_rosbag_ros2
+            --clock --start-paused --disable-keyboard-controls < /dev/null &
+          - sleep 15
+          - ros2 service call /rosbag2_player/resume rosbag2_interfaces/srv/Resume "{}"
       - shell_command:
           - "# 10. Probes / snapshot trigger — manual"
           - "# ros2 topic hz /room_nodes_list"

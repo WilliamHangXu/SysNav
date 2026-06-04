@@ -156,9 +156,17 @@ rosidl_target_interfaces(representation
   ${PROJECT_NAME}
   "rosidl_typesupport_cpp")
 
+add_library(scene_graph_exporter src/scene_graph_exporter/scene_graph_exporter.cpp)
+ament_target_dependencies(scene_graph_exporter rclcpp std_msgs nav_msgs geometry_msgs sensor_msgs tf2_ros tf2_geometry_msgs tf2 pcl_conversions visualization_msgs OpenCV cv_bridge)
+target_link_libraries(scene_graph_exporter ${catkin_LIBRARIES} ${OpenCV_LIBRARIES} representation nlohmann_json::nlohmann_json)
+
+rosidl_target_interfaces(scene_graph_exporter
+  ${PROJECT_NAME}
+  "rosidl_typesupport_cpp")
+
 add_library(sensor_coverage_planner_ground src/sensor_coverage_planner/sensor_coverage_planner_ground.cpp)
 ament_target_dependencies(sensor_coverage_planner_ground rclcpp std_msgs nav_msgs geometry_msgs sensor_msgs tf2_ros tf2_geometry_msgs tf2 OpenCV visualization_msgs cv_bridge)
-target_link_libraries(sensor_coverage_planner_ground ${catkin_LIBRARIES} ${OpenCV_LIBRARIES} graph planning_env keypose_graph viewpoint_manager pointcloud_manager grid_world local_coverage_planner tare_visualizer misc_utils representation misc_utils nlohmann_json::nlohmann_json)
+target_link_libraries(sensor_coverage_planner_ground ${catkin_LIBRARIES} ${OpenCV_LIBRARIES} graph planning_env keypose_graph viewpoint_manager pointcloud_manager grid_world local_coverage_planner tare_visualizer misc_utils representation scene_graph_exporter misc_utils nlohmann_json::nlohmann_json)
 
 rosidl_target_interfaces(sensor_coverage_planner_ground
   ${PROJECT_NAME}

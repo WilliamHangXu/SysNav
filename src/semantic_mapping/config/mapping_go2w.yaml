@@ -9,7 +9,7 @@ semantic_mapping_node:
     annotate_image: true
     grounding_score_thresh: 0.35
     target_object: refrigerator
-    object_file: src/semantic_mapping/semantic_mapping/config/objects.yaml
+    object_file: src/semantic_mapping/semantic_mapping/config/objects_office.yaml
 
 detection_node:
   ros__parameters:
@@ -20,7 +20,7 @@ detection_node:
     visualize: false
     vis_interval: 0.5
     annotate_image: true
-    grounding_score_thresh: 0.1
+    grounding_score_thresh: 0.5
     target_object: refrigerator
-    object_file: src/semantic_mapping/semantic_mapping/config/objects.yaml
-    image_topic: /go2w_011/camera/image_raw
+    object_file: src/semantic_mapping/semantic_mapping/config/objects_office.yaml
+    image_topic: /go2w_005/camera/image_raw
