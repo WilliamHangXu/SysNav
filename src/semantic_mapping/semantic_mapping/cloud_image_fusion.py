@@ -310,6 +310,84 @@ def scan2pixels_go2w(laserCloud):
 
     return point_pixel_idx
 
+def scan2pixels_go2w_bag(laserCloud):
+    # go2w_005 office_building bag, fed *directly* from the bag's own LIO (no
+    # arise_slam). The cloud reaching generate_seg_cloud is in the body frame of
+    # /state_estimation, i.e. go2w_005/base (R_GRAVITY = identity for this
+    # platform), so the projection extrinsic is base -> camera-optical.
+    #
+    # Extrinsic from the bag's /tf_static chain (go2w_005):
+    #   base -> front_cam:    t=(0.3271, 0, 0.0430), q=identity
+    #   front_cam -> front_cam_ar (optical): q(xyzw)=(-0.5, 0.4996, -0.5, 0.5004)
+    # Composed and inverted to the projection direction p_cam = p_base @ R.T + t:
+    R_l2c = np.array([
+        [ 0.000800, -1.000000,  0.000000],
+        [ 0.000800,  0.000000, -1.000000],
+        [ 0.999999,  0.000800,  0.000800],
+    ])
+    t_l2c = np.array([-0.000262, 0.042738, -0.327134])
+
+    # Intrinsics from /go2w_005/camera/camera_info (K == P; image is raw/distorted).
+    fx = 806.0578
+    fy = 805.5558
+    cx = 632.4743
+    cy = 346.8795
+    W = 1280
+    H = 720
+    # plumb_bob distortion [k1, k2, p1, p2, k3]; NON-trivial, so it must be
+    # applied — the image_raw the detector runs on is unrectified.
+    k1, k2, p1, p2, k3 = -0.3899, 0.17881, 0.0002, -0.00068, -0.04416
+
+    # Row-vector convention: p_cam = p_base @ R.T + t
+    xyz_cam = laserCloud[:, :3] @ R_l2c.T + t_l2c
+    z_cam = xyz_cam[:, 2]
+
+    behind = z_cam <= 1e-3
+    z_safe = np.where(behind, 1.0, z_cam)
+    # Normalised image-plane coords, then plumb_bob (radtan) distortion.
+    xn = xyz_cam[:, 0] / z_safe
+    yn = xyz_cam[:, 1] / z_safe
+    r2 = xn * xn + yn * yn
+    radial = 1.0 + k1 * r2 + k2 * r2 * r2 + k3 * r2 * r2 * r2
+    x_d = xn * radial + 2.0 * p1 * xn * yn + p2 * (r2 + 2.0 * xn * xn)
+    y_d = yn * radial + p1 * (r2 + 2.0 * yn * yn) + 2.0 * p2 * xn * yn
+    u = fx * x_d + cx
+    v = fy * y_d + cy
+
+    horiPixelID = u.astype(int)
+    vertPixelID = v.astype(int)
+    pixelDepth = z_cam.astype(float).copy()
+
+    out_of_image = (horiPixelID < 0) | (horiPixelID >= W) | (vertPixelID < 0) | (vertPixelID >= H)
+    invalid = behind | out_of_image
+    horiPixelID[invalid] = -1
+    vertPixelID[invalid] = -1
+    pixelDepth[invalid] = np.inf  # push invalid points to end of depth-sort
+
+    # Z-buffer occlusion (same approach as scan2pixels_go2w).
+    valid_mask = ~invalid
+    if np.any(valid_mask):
+        depth_map = np.full((H, W), np.inf)
+        idx = vertPixelID[valid_mask] * W + horiPixelID[valid_mask]
+        np.minimum.at(depth_map.ravel(), idx, pixelDepth[valid_mask])
+
+        neighborhood = 3
+        depth_map = minimum_filter(depth_map, size=(2 * neighborhood + 1), mode='nearest')
+
+        depth_at_pixel = np.full(pixelDepth.shape, np.inf)
+        depth_at_pixel[valid_mask] = depth_map[vertPixelID[valid_mask], horiPixelID[valid_mask]]
+        occluded = (pixelDepth >= depth_at_pixel + 0.15) & valid_mask
+        horiPixelID[occluded] = -1
+        vertPixelID[occluded] = -1
+
+    point_pixel_idx = np.stack([horiPixelID, vertPixelID, pixelDepth], axis=-1)
+
+    sort_idx = np.argsort(point_pixel_idx[:, 2])
+    point_pixel_idx = point_pixel_idx[sort_idx]
+    laserCloud[:] = laserCloud[sort_idx]
+
+    return point_pixel_idx
+
 def scan2pixels_scannet(cloud):
     rgb_intrinsics = {
         'fx': 1169.621094,
@@ -371,7 +449,7 @@ def grow_cluster_from_min(points, threshold=0.3):
 
 class CloudImageFusion:
     def __init__(self, platform):
-        self.platform_list = ['wheelchair', 'mecanum', 'mecanum_bagfile', 'mecanum_sim', 'scannet', 'diablo', 'go2w']
+        self.platform_list = ['wheelchair', 'mecanum', 'mecanum_bagfile', 'mecanum_sim', 'scannet', 'diablo', 'go2w', 'go2w_bag']
 
         if platform not in self.platform_list:
             raise ValueError(f"Invalid platform: {platform}. Available platforms: {self.platform_list}")
@@ -391,6 +469,8 @@ class CloudImageFusion:
             self.scan2pixels = scan2pixels_diablo
         elif platform == 'go2w':
             self.scan2pixels = scan2pixels_go2w
+        elif platform == 'go2w_bag':
+            self.scan2pixels = scan2pixels_go2w_bag
         else:
             print(f"Invalid platform: {platform}. Available platforms: [wheelchair, mecanum, mecanum_bagfile, mecanum_sim, scannet, diablo, go2w]")
             raise ValueError

@@ -1,0 +1,33 @@
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
+
+
+def generate_launch_description():
+    use_sim_time = LaunchConfiguration('use_sim_time')
+
+    return LaunchDescription([
+        # Default to the raw Livox CustomMsg stream (what arise consumed, ~13k
+        # pts/sweep); the PointCloud2 /go2w_005/lidar is decimated (~3.8k pts).
+        DeclareLaunchArgument('use_sim_time', default_value='true'),
+        DeclareLaunchArgument('lidar_msg_type', default_value='livox'),
+        DeclareLaunchArgument('lidar_topic', default_value='/go2w_005/livox/lidar'),
+        DeclareLaunchArgument('odom_topic', default_value='/go2w_005/lio/odometry'),
+        DeclareLaunchArgument('world_frame', default_value='world'),
+        DeclareLaunchArgument('output_frame', default_value='map'),
+        Node(
+            package='bag_slam_bridge',
+            executable='bag_slam_bridge',
+            name='bag_slam_bridge',
+            output='screen',
+            parameters=[{
+                'use_sim_time': use_sim_time,
+                'lidar_msg_type': LaunchConfiguration('lidar_msg_type'),
+                'lidar_topic': LaunchConfiguration('lidar_topic'),
+                'odom_topic': LaunchConfiguration('odom_topic'),
+                'world_frame': LaunchConfiguration('world_frame'),
+                'output_frame': LaunchConfiguration('output_frame'),
+            }],
+        ),
+    ])

@@ -1,0 +1,30 @@
+# go2w_005 office_building bag replayed *without* arise_slam: /registered_scan
+# and /state_estimation come straight from the bag's own LIO via bag_slam_bridge.
+# Body frame is go2w_005/base, so cloud_image_fusion uses platform 'go2w_bag'
+# (base->camera-optical extrinsic, go2w_005 intrinsics + distortion, R_GRAVITY=I).
+semantic_mapping_node:
+  ros__parameters:
+    platform: go2w_bag
+    detection_linear_state_time_bias: 0.0
+    detection_angular_state_time_bias: 0.0
+    image_processing_interval: 0.5
+    visualize: false
+    vis_interval: 0.5
+    annotate_image: true
+    grounding_score_thresh: 0.35
+    target_object: refrigerator
+    object_file: src/semantic_mapping/semantic_mapping/config/objects_office.yaml
+
+detection_node:
+  ros__parameters:
+    platform: go2w_bag
+    detection_linear_state_time_bias: 0.0
+    detection_angular_state_time_bias: 0.0
+    image_processing_interval: 0.5
+    visualize: false
+    vis_interval: 0.5
+    annotate_image: true
+    grounding_score_thresh: 0.5
+    target_object: refrigerator
+    object_file: src/semantic_mapping/semantic_mapping/config/objects_office.yaml
+    image_topic: /go2w_005/camera/image_raw
