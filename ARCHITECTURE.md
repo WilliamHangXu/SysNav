@@ -45,7 +45,7 @@ ROS 2 workspace; packages under `src/`:
 | `exploration_planner/tare_planner` | **The heart of this pipeline.** TARE exploration planner + keypose graph + grid world + room segmentation + the `Representation` (scene graph) + the scene-graph exporter. Most of this guide lives here. |
 | `semantic_mapping` | 3D semantic **object** mapping: YOLO-World/NanoOWL detection + SAM2 + LiDAR-image fusion → persistent per-instance object clouds → object nodes. See its [README](src/semantic_mapping/README.md). |
 | `vlm_node` | Vision-Language reasoning: **room typing** (labels rooms), target-object / spatial-condition reasoning for navigation queries. |
-| `slam` | `arise_slam` LiDAR-inertial odometry. Often **bypassed** when a bag already carries its own odometry/TF (see *Coordinate frames*). |
+| `slam` | `arise_slam` LiDAR-inertial odometry. Often **bypassed** when a bag already carries its own odometry/TF (see *Coordinate frames*). See its [README](src/slam/arise_slam_mid360/README.md). |
 | `route_planner` | Far/near route planning between waypoints (navigation execution, not graph building). |
 | `base_autonomy` | Low-level autonomy: local planner, terrain analysis, motion. The bottom of the three-level stack. |
 | `utilities` | Support: `domain_bridge`, Livox driver, ROS-TCP endpoint, RViz overlay plugins. |
