@@ -11,6 +11,8 @@ def generate_launch_description():
         # Default to the raw Livox CustomMsg stream (what arise consumed, ~13k
         # pts/sweep); the PointCloud2 /go2w_005/lidar is decimated (~3.8k pts).
         DeclareLaunchArgument('use_sim_time', default_value='true'),
+        # 'bag_slam_bridge' (C++) or 'bag_slam_bridge_py' (Python reference).
+        DeclareLaunchArgument('executable', default_value='bag_slam_bridge'),
         DeclareLaunchArgument('lidar_msg_type', default_value='livox'),
         DeclareLaunchArgument('lidar_topic', default_value='/go2w_005/livox/lidar'),
         DeclareLaunchArgument('odom_topic', default_value='/go2w_005/lio/odometry'),
@@ -18,7 +20,7 @@ def generate_launch_description():
         DeclareLaunchArgument('output_frame', default_value='map'),
         Node(
             package='bag_slam_bridge',
-            executable='bag_slam_bridge',
+            executable=LaunchConfiguration('executable'),
             name='bag_slam_bridge',
             output='screen',
             parameters=[{
