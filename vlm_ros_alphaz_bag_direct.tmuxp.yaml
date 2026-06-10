@@ -69,7 +69,7 @@ windows:
           # player is suspended, so its /rosbag2_player/resume service never responds.
           - "# 9. Bag — starts paused (clock alive), then auto-resumes"
           - >
-            ros2 bag play /home/all/AlphaZ/bags/office_building_rosbag_ros2
+            ros2 bag play /home/all/AlphaZ/bags/first_floor_2_ros2
             --clock --start-paused --disable-keyboard-controls < /dev/null &
           - sleep 15
           - ros2 service call /rosbag2_player/resume rosbag2_interfaces/srv/Resume "{}"
