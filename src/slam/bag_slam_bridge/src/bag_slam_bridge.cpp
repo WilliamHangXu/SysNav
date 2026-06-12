@@ -2,26 +2,42 @@
 //
 // C++ port of bag_slam_bridge/bag_slam_bridge.py (kept alongside as the
 // reference implementation, installed as `bag_slam_bridge_py`). The Python
-// node burned ~half a core on per-point message access at 15 Hz x ~13k pts;
-// this port is functionally identical. See the Python module docstring for
-// the full design rationale (why the LIO topic instead of /tf, deskew by
-// per-point offset_time, arise's body blind-zone, frame conventions).
+// node burned ~half a core on per-point message access at 15 Hz x ~13k pts.
+// See the Python module docstring for the base design rationale (why the LIO
+// topic instead of /tf, deskew by per-point offset_time, arise's body
+// blind-zone, frame conventions).
 //
 // Pipeline summary:
 //   /go2w_005/lio/odometry  -> (compose static world<-odom)  -> /state_estimation
 //   /go2w_005/livox/lidar   -> body/range filter -> time-bucketed deskew with
 //                              slerp/lerp-interpolated LIO poses -> world
-//                           -> /registered_scan
+//                           -> clamped scan-to-map refinement -> /registered_scan
 // Sweeps wait in a small queue until the first LIO pose after their last
 // point (<= one sweep of latency). Both outputs are stamped `output_frame`
 // (default "map"), defined identical to the bag's `world` via a static
 // identity transform.
+//
+// Scan-to-map refinement (C++ node only; the Python reference stops at
+// deskew): what makes arise's walls razor-thin is that every sweep is
+// ICP-snapped onto its own accumulated local map, absorbing LIO pose jitter
+// and any error in the static base<-lidar extrinsic. We borrow that idea but
+// keep the bag's world frame authoritative: each deskewed sweep gets a few
+// point-to-point ICP iterations against a rolling local map, and the total
+// correction is measured fresh against the world-anchored LIO pose and
+// CLAMPED (default 6 cm / 1 deg) — corrections never integrate, so the output
+// cannot drift from `world` by more than the clamp. Measured on the
+// office_building bag: walls 2.7 -> 2.2 cm (1-sigma), matching arise; actual
+// corrections median ~1 cm / 0.07 deg. /state_estimation stays the pure LIO
+// pose; the <=clamp scan/pose inconsistency is the same tolerance class as
+// arise's deskew + IMU-propagation mismatch (documented in its README).
 
 #include <algorithm>
 #include <cmath>
 #include <deque>
 #include <memory>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <Eigen/Dense>
@@ -49,6 +65,37 @@ constexpr double kBodyDiskZLow = -0.05, kBodyDiskZHigh = 0.05, kBodyDiskRadius =
 std::string stripSlash(const std::string & frame)
 {
   return (!frame.empty() && frame[0] == '/') ? frame.substr(1) : frame;
+}
+
+// Exact 3-int cell key (21 bits/axis, ±2^20 cells) for voxel dedup / grid hash.
+inline uint64_t packKey(int64_t ix, int64_t iy, int64_t iz)
+{
+  constexpr int64_t kOff = int64_t{1} << 20;
+  return (static_cast<uint64_t>(ix + kOff) << 42) |
+         (static_cast<uint64_t>(iy + kOff) << 21) |
+         static_cast<uint64_t>(iz + kOff);
+}
+
+inline uint64_t cellOf(const Eigen::Vector3f & p, double v)
+{
+  return packKey(
+    static_cast<int64_t>(std::floor(p.x() / v)),
+    static_cast<int64_t>(std::floor(p.y() / v)),
+    static_cast<int64_t>(std::floor(p.z() / v)));
+}
+
+std::vector<Eigen::Vector3f> voxelDown(const std::vector<Eigen::Vector3f> & pts, double v)
+{
+  std::vector<Eigen::Vector3f> out;
+  out.reserve(pts.size() / 4);
+  std::unordered_set<uint64_t> seen;
+  seen.reserve(pts.size());
+  for (const auto & p : pts) {
+    if (seen.insert(cellOf(p, v)).second) {
+      out.push_back(p);
+    }
+  }
+  return out;
 }
 
 struct Pose
@@ -103,6 +150,23 @@ public:
     // Drop returns closer than this to the sensor (Livox emits (0,0,0) for no-return).
     min_range_ = declare_parameter<double>("min_range", 0.1);
 
+    // Clamped scan-to-map refinement (see file header). The clamp is what
+    // pins the output to the bag's world frame; raising it trades world-frame
+    // fidelity for sharper self-consistency.
+    refine_ = declare_parameter<bool>("scan_to_map_refine", true);
+    refine_local_map_sweeps_ =
+      static_cast<int>(declare_parameter<int64_t>("refine_local_map_sweeps", 25));
+    refine_min_map_sweeps_ =
+      static_cast<int>(declare_parameter<int64_t>("refine_min_map_sweeps", 5));
+    refine_voxel_ = declare_parameter<double>("refine_voxel", 0.06);
+    refine_iters_ = static_cast<int>(declare_parameter<int64_t>("refine_iters", 3));
+    refine_subsample_ = static_cast<int>(declare_parameter<int64_t>("refine_subsample", 3500));
+    refine_gate_ = declare_parameter<double>("refine_gate", 0.2);
+    refine_min_matches_ = static_cast<int>(declare_parameter<int64_t>("refine_min_matches", 500));
+    refine_clamp_trans_ = declare_parameter<double>("refine_clamp_trans", 0.06);
+    refine_clamp_rot_ =
+      declare_parameter<double>("refine_clamp_rot_deg", 1.0) * M_PI / 180.0;
+
     base_frame_ = base_frame_param_;
 
     tf_buffer_ = std::make_unique<tf2_ros::Buffer>(get_clock());
@@ -129,10 +193,12 @@ public:
     RCLCPP_INFO(
       get_logger(),
       "bag_slam_bridge (c++): lidar='%s' (%s) -> %s, %s -> %s; world='%s', output='%s', "
-      "deskew_buckets=%d, body_filter=%s.",
+      "deskew_buckets=%d, body_filter=%s, scan_to_map_refine=%s (clamp %.0f cm / %.1f deg).",
       lidar_topic_.c_str(), lidar_msg_type_.c_str(), registered_scan_topic_.c_str(),
       odom_topic_.c_str(), state_estimation_topic_.c_str(), world_frame_.c_str(),
-      output_frame_.c_str(), deskew_buckets_, body_filter_ ? "true" : "false");
+      output_frame_.c_str(), deskew_buckets_, body_filter_ ? "true" : "false",
+      refine_ ? "true" : "false", refine_clamp_trans_ * 100.0,
+      refine_clamp_rot_ * 180.0 / M_PI);
   }
 
 private:
@@ -315,6 +381,21 @@ private:
     }
     scan_drop_warned_ = false;
 
+    std::vector<Eigen::Vector3f> xyz_world(n);
+    for (size_t i = 0; i < n; ++i) {
+      const int b = has_off
+        ? std::min(nb - 1, static_cast<int>(sweep.off[i] / step)) : 0;
+      xyz_world[i] = R_wl[b] * sweep.xyz[i] + t_wl[b];
+    }
+
+    if (refine_) {
+      refineAgainstLocalMap(xyz_world);
+      local_map_.push_back(voxelDown(xyz_world, refine_voxel_));
+      while (static_cast<int>(local_map_.size()) > refine_local_map_sweeps_) {
+        local_map_.pop_front();
+      }
+    }
+
     const bool has_intensity = !sweep.intensity.empty();
     sensor_msgs::msg::PointCloud2 cloud;
     cloud.header.stamp = sweep.stamp;
@@ -338,18 +419,155 @@ private:
     float * out = reinterpret_cast<float *>(cloud.data.data());
     const int stride = has_intensity ? 4 : 3;
     for (size_t i = 0; i < n; ++i) {
-      const int b = has_off
-        ? std::min(nb - 1, static_cast<int>(sweep.off[i] / step)) : 0;
-      const Eigen::Vector3f pw = R_wl[b] * sweep.xyz[i] + t_wl[b];
       float * dst = out + i * stride;
-      dst[0] = pw.x();
-      dst[1] = pw.y();
-      dst[2] = pw.z();
+      dst[0] = xyz_world[i].x();
+      dst[1] = xyz_world[i].y();
+      dst[2] = xyz_world[i].z();
       if (has_intensity) {
         dst[3] = sweep.intensity[i];
       }
     }
     scan_pub_->publish(cloud);
+  }
+
+  // A few point-to-point ICP iterations of the sweep against the rolling
+  // local map, with the accumulated correction clamped (relative to the LIO
+  // pose the sweep was registered with) before being applied. The clamp keeps
+  // the output anchored to the bag's world frame: corrections never
+  // integrate across sweeps.
+  void refineAgainstLocalMap(std::vector<Eigen::Vector3f> & pts)
+  {
+    if (static_cast<int>(local_map_.size()) < refine_min_map_sweeps_) {
+      return;
+    }
+    size_t total = 0;
+    for (const auto & s : local_map_) {
+      total += s.size();
+    }
+    auto & map_pts = map_pts_scratch_;
+    map_pts.clear();
+    map_pts.reserve(total);
+    for (const auto & s : local_map_) {
+      map_pts.insert(map_pts.end(), s.begin(), s.end());
+    }
+
+    // Fixed-radius NN via a voxel grid with cell == gate (search 27 cells).
+    // Chained-list layout (head map + next array): no per-cell allocations,
+    // and the hash map's buckets are reused across sweeps.
+    grid_head_.clear();
+    grid_next_.assign(map_pts.size(), 0);
+    for (uint32_t i = 0; i < map_pts.size(); ++i) {
+      uint32_t & h = grid_head_[cellOf(map_pts[i], refine_gate_)];
+      grid_next_[i] = h;  // 0 terminates; stored indices are i+1
+      h = i + 1;
+    }
+    const float gate2 = static_cast<float>(refine_gate_ * refine_gate_);
+    const float g = static_cast<float>(refine_gate_);
+    auto nearest = [&](const Eigen::Vector3f & p, Eigen::Vector3f & nn) -> bool {
+        const int64_t cx = static_cast<int64_t>(std::floor(p.x() / refine_gate_));
+        const int64_t cy = static_cast<int64_t>(std::floor(p.y() / refine_gate_));
+        const int64_t cz = static_cast<int64_t>(std::floor(p.z() / refine_gate_));
+        // offsets of p inside its cell, in [0, g)
+        const float lx = p.x() - cx * g, ly = p.y() - cy * g, lz = p.z() - cz * g;
+        float best = gate2;
+        bool found = false;
+        auto scanCell = [&](int64_t dx, int64_t dy, int64_t dz) {
+            auto it = grid_head_.find(packKey(cx + dx, cy + dy, cz + dz));
+            if (it == grid_head_.end()) {
+              return;
+            }
+            for (uint32_t j = it->second; j != 0; j = grid_next_[j - 1]) {
+              const float d2 = (map_pts[j - 1] - p).squaredNorm();
+              if (d2 < best) {
+                best = d2;
+                nn = map_pts[j - 1];
+                found = true;
+              }
+            }
+          };
+        // Center cell first: once a close match exists, most neighbor cells
+        // are pruned by their minimum possible distance (exact NN preserved).
+        scanCell(0, 0, 0);
+        for (int dx = -1; dx <= 1; ++dx) {
+          const float ex = dx < 0 ? lx : (dx > 0 ? g - lx : 0.0f);
+          for (int dy = -1; dy <= 1; ++dy) {
+            const float ey = dy < 0 ? ly : (dy > 0 ? g - ly : 0.0f);
+            for (int dz = -1; dz <= 1; ++dz) {
+              if (dx == 0 && dy == 0 && dz == 0) {
+                continue;
+              }
+              const float ez = dz < 0 ? lz : (dz > 0 ? g - lz : 0.0f);
+              if (ex * ex + ey * ey + ez * ez >= best) {
+                continue;
+              }
+              scanCell(dx, dy, dz);
+            }
+          }
+        }
+        return found;
+      };
+
+    // Uniform-stride subsample of the sweep (points are scan-ordered).
+    const size_t m = std::min<size_t>(refine_subsample_, pts.size());
+    std::vector<Eigen::Vector3f> sub(m);
+    for (size_t i = 0; i < m; ++i) {
+      sub[i] = pts[i * pts.size() / m];
+    }
+
+    Eigen::Matrix3d Rc = Eigen::Matrix3d::Identity();
+    Eigen::Vector3d tc = Eigen::Vector3d::Zero();
+    std::vector<Eigen::Vector3d> src, dst;
+    src.reserve(m);
+    dst.reserve(m);
+    for (int iter = 0; iter < refine_iters_; ++iter) {
+      src.clear();
+      dst.clear();
+      const Eigen::Matrix3f Rcf = Rc.cast<float>();
+      const Eigen::Vector3f tcf = tc.cast<float>();
+      for (const auto & p : sub) {
+        const Eigen::Vector3f cur = Rcf * p + tcf;
+        Eigen::Vector3f nn;
+        if (nearest(cur, nn)) {
+          src.push_back(cur.cast<double>());
+          dst.push_back(nn.cast<double>());
+        }
+      }
+      if (static_cast<int>(src.size()) < refine_min_matches_) {
+        break;
+      }
+      Eigen::Vector3d ca = Eigen::Vector3d::Zero(), cb = Eigen::Vector3d::Zero();
+      for (size_t i = 0; i < src.size(); ++i) {
+        ca += src[i];
+        cb += dst[i];
+      }
+      ca /= static_cast<double>(src.size());
+      cb /= static_cast<double>(src.size());
+      Eigen::Matrix3d H = Eigen::Matrix3d::Zero();
+      for (size_t i = 0; i < src.size(); ++i) {
+        H += (src[i] - ca) * (dst[i] - cb).transpose();
+      }
+      Eigen::JacobiSVD<Eigen::Matrix3d> svd(H, Eigen::ComputeFullU | Eigen::ComputeFullV);
+      const double d =
+        (svd.matrixV() * svd.matrixU().transpose()).determinant() > 0.0 ? 1.0 : -1.0;
+      const Eigen::Matrix3d Ri = svd.matrixV() *
+        Eigen::Vector3d(1.0, 1.0, d).asDiagonal() * svd.matrixU().transpose();
+      const Eigen::Vector3d ti = cb - Ri * ca;
+      Rc = Ri * Rc;
+      tc = Ri * tc + ti;
+    }
+
+    Eigen::AngleAxisd aa(Rc);
+    if (aa.angle() > refine_clamp_rot_) {
+      Rc = Eigen::AngleAxisd(refine_clamp_rot_, aa.axis()).toRotationMatrix();
+    }
+    if (tc.norm() > refine_clamp_trans_) {
+      tc *= refine_clamp_trans_ / tc.norm();
+    }
+    const Eigen::Matrix3f Rcf = Rc.cast<float>();
+    const Eigen::Vector3f tcf = tc.cast<float>();
+    for (auto & p : pts) {
+      p = Rcf * p + tcf;
+    }
   }
 
   void livoxCallback(const livox_ros_driver2::msg::CustomMsg::SharedPtr msg)
@@ -459,6 +677,11 @@ private:
   double pose_match_tol_{0.05}, max_pose_gap_{0.2}, min_range_{0.1};
   int deskew_buckets_{12};
   bool body_filter_{true};
+  bool refine_{true};
+  int refine_local_map_sweeps_{25}, refine_min_map_sweeps_{5};
+  int refine_iters_{3}, refine_subsample_{3500}, refine_min_matches_{500};
+  double refine_voxel_{0.06}, refine_gate_{0.2};
+  double refine_clamp_trans_{0.06}, refine_clamp_rot_{1.0 * M_PI / 180.0};
 
   // state
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
@@ -474,6 +697,11 @@ private:
   std::string base_frame_;
   std::deque<Pose> odom_hist_;
   std::deque<PendingSweep> pending_;
+  std::deque<std::vector<Eigen::Vector3f>> local_map_;  // rolling, refined sweeps
+  // refinement scratch, reused across sweeps
+  std::vector<Eigen::Vector3f> map_pts_scratch_;
+  std::unordered_map<uint64_t, uint32_t> grid_head_;
+  std::vector<uint32_t> grid_next_;
   bool scan_drop_warned_{false};
 
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr scan_pub_;

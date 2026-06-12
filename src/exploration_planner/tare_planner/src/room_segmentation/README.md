@@ -370,7 +370,109 @@ The pipeline is sensitive to a few of these:
 
 3. **`DoorCloudCallback`.** Decodes the `r`/`g` channels back into room ids and fills `adjacency_matrix` — the planner's own door graph, kept separately from `room_nodes_map_[*].neighbors_`. Doors that would put the planner in collision (`planning_env_->DoorInCollision`) are dropped.
 
-4. The room labels themselves (the strings like "bedroom", "kitchen") **come from the VLM**, not this node. `sensor_coverage_planner_ground` publishes `/room_type_query` for unlabeled rooms and ingests the answers on `/room_type_answer`; those votes are stored in `RoomNodeRep.labels_` and never round-trip back here. Look for `RoomTypeAnswerCallback` in the planner.
+4. The room labels themselves (the strings like "bedroom", "kitchen") **come from the VLM**, not this node. `sensor_coverage_planner_ground` publishes `/room_type_query` for unlabeled (or freshly-grown) rooms and ingests the answers on `/room_type_answer`; those votes are stored in `RoomNodeRep.labels_` and never round-trip back here. The full mechanism — trigger, payload, voting — is documented in **["Room labeling — the semantic room type"](#room-labeling--the-semantic-room-type)** below.
+
+---
+
+## Room labeling — the semantic room type
+
+This node produces **structural** rooms (id, polygon, centroid, mask, neighbors). It never assigns a *type* — the strings "kitchen", "office room", "corridor". That semantic label is added downstream, by `sensor_coverage_planner_ground` together with the VLM (`vlm_node/vlm_reasoning_node.py`), and stored only in the planner's copy of the room (`RoomNodeRep`). It never flows back into this node, but it completes a room's identity, so it is documented here.
+
+The label is not a single answer — it is a **weighted vote histogram** that accumulates over the run. A room can be queried several times as more of it is observed; each answer adds votes, and the current label is always the running argmax.
+
+### Where the state lives — `RoomNodeRep` typing slots
+(`include/representation/representation.h`, written only on the planner side)
+
+| Field | Type | Role |
+|---|---|---|
+| `labels_` | `map<string,int>` | **Vote histogram.** Each VLM answer adds `voxel_num` (the room's coverage size at query time) to that label's tally. |
+| `GetRoomLabel()` | `string` | The current label = **argmax** of `labels_`. Empty string until the first answer arrives. This is the canonical room type everything downstream reads. |
+| `is_labeled_` | `bool` | Set true the moment a room is first *queried* (and again on every answer). Distinguishes "first query" from "re-query" in the trigger logic — **not** a "we have an answer" flag. |
+| `voxel_num_` | `int` | Coverage count at the last query. Doubles as the **vote weight** sent in the query and as the re-query growth baseline. |
+| `last_area_` | `float` | Room area (m²) at the last query; the other re-query baseline. |
+| `anchor_point_` | `Point` | Room centroid at robot `z`. Sent in the query and used to re-resolve the room id when the answer returns (via `room_mask_`). |
+| `image_` | `cv::Mat` | The last room crop sent to the VLM (cached for re-queries that don't refresh the image). |
+| `is_asked_` | `int`, starts at 2 | **Unrelated to typing** — it is the early-stop *navigation* budget (how many times the room may be asked "should I go here next"). Listed only to avoid confusion with `is_labeled_`. |
+| `ClearRoomLabels()` | — | Resets all of the above (votes cleared, `is_asked_`→2) when a room is substantially re-segmented. |
+
+### What triggers a query
+`UpdateRoomLabel()` (`sensor_coverage_planner_ground.cpp:3941`) is the only place queries are emitted. It runs from the main planning loop (`:3700`), gated by `keypose_cloud_update_` — i.e. once per planning cycle in which new coverage (a new keypose cloud) arrived.
+
+Each call:
+1. Pulls the freshly-covered cloud in range (`planning_env_->GetUpdatedCloudInRange()`).
+2. Bins every covered point into a room via `room_mask_` (the `/room_mask` from this node), building `room_counts[id]`, an in-range point cloud, and a running centroid per room.
+3. Walks every live room and decides:
+
+| Condition | Meaning | Action |
+|---|---|---|
+| `room_counts[id] == 0` | room not observed in this cycle | skip |
+| `!IsLabeled()` | **first ever sighting** | capture image, **publish one query**, set `is_labeled_`, record `voxel_num_`/`last_area_` |
+| labeled **and** `room_counts − voxel_num_ > 20` **or** `area − last_area_ > 5.0 m²` | room **grew significantly** since last query | **re-publish a query** with refreshed coverage; if growth came from new coverage, recapture the image, else reuse the cached one |
+| labeled, little growth | already well-characterized | skip |
+
+So queries fire on **first sight** and again whenever a room has grown by ~20 covered voxels or 5 m². Repeated answers pile onto the same `labels_` histogram, so the label stabilizes as the room is more fully seen (and bigger observations vote harder via `voxel_num`).
+
+### What is gathered — the query payload
+Published on `/room_type_query` as `tare_planner/msg/RoomType`:
+
+```
+std_msgs/Header   header        # frame = map (kWorldFrameID)
+geometry_msgs/Point anchor_point # room centroid @ robot z — used to re-resolve the room on answer
+sensor_msgs/Image image          # the "room crop" (see below)
+sensor_msgs/Image room_mask      # this room's mono8 top-down footprint (cropped to its bbox)
+string            room_type      # "" on the way out; filled by the VLM on the way back
+int32             room_id
+int32             voxel_num      # coverage count — becomes the vote weight on the answer
+bool              in_room        # is the robot currently inside this room?
+```
+
+Two images are sent so the VLM has both an **egocentric view** and the room's **shape**: the RGB room crop and the top-down `room_mask`.
+
+### How the room crop is built
+The `image` field is **not** a raw camera frame — it is a per-room slice of the panorama with the room's geometry painted in, produced by `project_pcl_to_image` (`:4258`):
+
+1. `camera_image_` is the latest 1920×640 equirectangular panorama, from `/camera/image` (`CameraImageCallback:901`), with its timestamp stored in `imageTime`.
+2. `GetPoseAtTime(imageTime, …)` (`:4142`) interpolates the LiDAR/robot pose at the image's timestamp from the odom stack.
+3. The room's in-range 3D points are projected into the panorama at that pose; each is tinted by range (blue↔green), and the room centroid is marked red.
+4. The panorama is **rotated so the room centroid sits at the horizontal center** (wrapping across the 360° seam), then **cropped to the room's horizontal point span** (±50 px). The result is a tight, centered RGB view of just that room.
+
+Because the crop is keyed on `imageTime`/`GetPoseAtTime`, the label quality depends on the camera frame and pose being well-synchronized — a stale `camera_image_` or a gap in the odom stack yields a misaligned crop.
+
+### How it is answered — the VLM
+`vlm_node/vlm_reasoning_node.py`:
+
+1. `/room_type_query` → `room_type_callback` (`:341`) just enqueues onto `room_type_query_queue`.
+2. The node's periodic loop (`:1085`) drains the queue but **keeps only the latest query per `room_id`** (older queries for the same room are discarded), then spawns one thread per room running `process_room_type_query` (`:388`).
+3. `process_room_type_query`:
+   - decodes `image` + `room_mask`;
+   - builds the prompt from `ROOM_TYPE_PROMPT` (`:86`) plus a **numbered candidate list** from `self.room_types` — a per-building hardcoded set (e.g. the NSH list: Classroom, Laboratory, Office Room, Meeting Room, Computer Lab, Restroom, Storage Room, Copy Room, Student Lounge, Reception, Corridor). **If `in_room` is false, "Corridor" is removed** from the options (you can only conclude "corridor" from inside it);
+   - calls the VLM with **both images** and structured output (`response_format` with key `room_type`);
+   - republishes the *same* message on `/room_type_answer` with `room_type` filled (lowercased), and dumps the crop/mask/answer under `debug/room_type/` for inspection.
+
+The candidate list is the main thing to change when moving to a new building — it is **not** read from config; edit `self.room_types` in the node.
+
+### How the answer is ingested — voting
+`RoomTypeCallback` (`sensor_coverage_planner_ground.cpp:1363`):
+
+1. Re-resolve the room id from `anchor_point` → voxel → `room_mask_` (ids are mask-derived, so the answer is matched back by *position*, not by trusting the returned `room_id`).
+2. `labels_[room_type] += voxel_num` — accumulate the vote, weighted by coverage size at query time.
+3. `SetIsLabeled(true)`.
+4. If the **argmax label flipped** as a result (`GetRoomLabel()` differs before vs after), every object in that room is marked `is_considered_ = false` so it gets re-evaluated against the new room context.
+
+### Net flow
+```
+room growth (coverage)                   VLM (vlm_reasoning_node.py)
+        │ UpdateRoomLabel() @ keypose update         ▲   │
+        ▼                                            │   ▼
+  build room crop + mask  ──/room_type_query──►  classify (2 imgs + candidate list)
+                                                     │
+  GetRoomLabel() = argmax(labels_)  ◄─vote += voxel_num─  /room_type_answer
+        │
+        ▼
+  exporter RoomKey "<label>-room_<id>", object/nav room context
+```
+
+The exporter consumes only the final `GetRoomLabel()` (snapshot time), so a room's JSON label is whatever the vote argmax is when the snapshot is written — see the [scene_graph_exporter README](../scene_graph_exporter/README.md).
 
 ---
 
