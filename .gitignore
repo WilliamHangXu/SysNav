@@ -38,6 +38,7 @@ bagfile_*/
 *.log
 *.ts
 *.rviz
+!CMakeLists.txt
 !readme.txt
 
 # Simulation & runtime output
