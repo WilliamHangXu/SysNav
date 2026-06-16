@@ -79,6 +79,14 @@ the JSON stays in the `map` frame. Details + caveats:
 > coordinates. For the bag-direct setup (no arise SLAM) the tree is already a
 > single gravity-aligned tree and `G` is identity.
 
+In the bag-direct setup, `bag_slam_bridge` decides which bag frame `map` is
+pinned to via its `anchor_frame` parameter: `world` (default,
+building-anchored — the bag's static `world←odom` is composed onto every LIO
+pose) or `odom` (start-anchored: origin at the robot start, +x = its initial
+heading). The scene graph and the exported JSON inherit that choice verbatim;
+record it by setting `scene_graph_export.frame` to match, which is written into
+`layout.metadata.frame`.
+
 ---
 
 ## The scene graph data model (`Representation`)

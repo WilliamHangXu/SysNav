@@ -31,6 +31,7 @@ def generate_launch_description():
   vehicleX = LaunchConfiguration('vehicleX')
   vehicleY = LaunchConfiguration('vehicleY')
   checkTerrainConn = LaunchConfiguration('checkTerrainConn')
+  anchor_frame = LaunchConfiguration('anchor_frame')
 
   declare_exploration_planner_config = DeclareLaunchArgument('exploration_planner_config', default_value='go2w_bag_direct', description='')
   declare_sg_export_config = DeclareLaunchArgument('sg_export_config', default_value='scene_graph_export_bag_direct', description='')
@@ -41,6 +42,9 @@ def generate_launch_description():
   declare_vehicleX = DeclareLaunchArgument('vehicleX', default_value='0.0', description='')
   declare_vehicleY = DeclareLaunchArgument('vehicleY', default_value='0.0', description='')
   declare_checkTerrainConn = DeclareLaunchArgument('checkTerrainConn', default_value='true', description='')
+  # Bridge anchor: 'world' (building-anchored) or 'odom' (start-anchored). If
+  # changed, keep scene_graph_export.frame in the sg export config in sync.
+  declare_anchor_frame = DeclareLaunchArgument('anchor_frame', default_value='world', description='')
 
   start_local_planner = IncludeLaunchDescription(
     FrontendLaunchDescriptionSource(os.path.join(
@@ -84,6 +88,7 @@ def generate_launch_description():
     ),
     launch_arguments={
       'use_sim_time': 'true',
+      'anchor_frame': anchor_frame,
     }.items()
   )
 
@@ -157,6 +162,7 @@ def generate_launch_description():
   ld.add_action(declare_vehicleX)
   ld.add_action(declare_vehicleY)
   ld.add_action(declare_checkTerrainConn)
+  ld.add_action(declare_anchor_frame)
 
   ld.add_action(start_local_planner)
   ld.add_action(start_terrain_analysis)

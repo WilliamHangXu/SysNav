@@ -79,10 +79,12 @@ class VLMNode(Node):
         # self.room_types = ["Classroom", "Office Room", "Meeting Room", "Computer Lab", "Restroom", "Storage Room", "Copy Room", "Student Lounge", "Reception", "Corridor"]
         # self.room_types = ["Classroom", "Computer Lab", "Restroom", "Student Lounge", "Corridor"]
         # NSH room_types
-        self.room_types = ["Classroom", "Laboratory", "Office Room", "Meeting Room", "Computer Lab", "Restroom", "Storage Room", "Copy Room", "Student Lounge", "Reception", "Corridor"]
+        # self.room_types = ["Classroom", "Laboratory", "Office Room", "Meeting Room", "Computer Lab", "Restroom", "Storage Room", "Copy Room", "Student Lounge", "Reception", "Corridor"]
         # self.room_types = ["Office Room"]
         # CIC room_types
         # self.room_types = ["Office Room", "Meeting Room", "Open Workspace", "Interview Room", "Reception", "Print Room", "Storage Room", "Restroom"]
+        # AlphaZ room types
+        self.room_types = ["Office Room", "Meeting Room", "Kitchenette", "Lobby", "Tool Room"]
         self.ROOM_TYPE_PROMPT = """
         You are given an rgb image of a room and a top-down room layout mask image.
         Identify the room type and respond strictly in valid JSON format.
@@ -92,6 +94,17 @@ class VLMNode(Node):
         {"room_type": "Living Room"}
 
         Options:
+        """
+        self.ROOM_TYPE_PROMPT_FREE = """
+        You are given an rgb image of a room and a top-down room layout mask image.
+        Identify the room type and respond strictly in valid JSON format.
+
+        Use the key "room_type" and use your own knowledge to determine the room type.
+        The room type should be a single word or a short phrase that accurately describes the function or purpose of the room.
+        Do not use vague or generic terms like "room" or "area". 
+        Do not use words like "undetermined" or "unknown". You can make a reasonable guess based on the visual features of the room.
+        For example:
+        {"room_type": "Living Room"}
         """
 
         self.ROOM_FINISH_NAVIGATION_PROMPT = """
@@ -408,18 +421,19 @@ class VLMNode(Node):
             room_mask = cv2.imencode('.jpg', cv_room_mask)[1]
             img_base64 = base64.b64encode(img_jpg).decode('utf-8')
             room_mask_base64 = base64.b64encode(room_mask).decode('utf-8')
-            if msg.in_room:
-                room_type_prompt = self.ROOM_TYPE_PROMPT
-                room_types = self.room_types.copy()
-                for i, room_type in enumerate(room_types):
-                    room_type_prompt += f"{i}. {room_type}\n"
-            else:
-                room_type_prompt = self.ROOM_TYPE_PROMPT
-                room_types = self.room_types.copy()
-                if "Corridor" in room_types:
-                    room_types.remove("Corridor")
-                for i, room_type in enumerate(room_types):
-                    room_type_prompt += f"{i}. {room_type}\n"
+            # if msg.in_room:
+            #     room_type_prompt = self.ROOM_TYPE_PROMPT
+            #     room_types = self.room_types.copy()
+            #     for i, room_type in enumerate(room_types):
+            #         room_type_prompt += f"{i}. {room_type}\n"
+            # else:
+            #     room_type_prompt = self.ROOM_TYPE_PROMPT
+            #     room_types = self.room_types.copy()
+            #     if "Corridor" in room_types:
+            #         room_types.remove("Corridor")
+            #     for i, room_type in enumerate(room_types):
+            #         room_type_prompt += f"{i}. {room_type}\n"
+            room_type_prompt = self.ROOM_TYPE_PROMPT_FREE
 
             completion = self.vlm_model.beta.chat.completions.parse(
                 model=self.room_type_vlm_model, # Use the flash lite model for faster response

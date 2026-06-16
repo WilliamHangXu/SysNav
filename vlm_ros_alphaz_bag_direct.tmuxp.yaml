@@ -17,7 +17,7 @@ windows:
     panes:
       - shell_command:
           - "# 1. SLAM bridge (bag LIO + TF -> /registered_scan + /state_estimation)"
-          - ros2 launch bag_slam_bridge bag_slam_bridge.launch use_sim_time:=true
+          - ros2 launch bag_slam_bridge bag_slam_bridge.launch use_sim_time:=true anchor_frame:=odom
       - shell_command:
           - "# 2. Detection (YOLO)"
           - sleep 3
@@ -97,3 +97,4 @@ windows:
       - shell_command:
           - "# 10. Probes / snapshot trigger — manual"
           - "# ros2 topic hz /room_nodes_list"
+          - "# ros2 topic pub --once /gadm_snapshot_request tare_planner/msg/GadmSnapshotRequest \"{request_id: 'test_001'}\""

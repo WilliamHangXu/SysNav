@@ -48,9 +48,11 @@ and composed with the (interpolated) LIO pose:
 
 Both outputs are stamped with `output_frame` (default "map"), defined to coincide
 *exactly* with the bag's `world`; a static identity `world -> map` unifies the
-labels. Every downstream consumer (`semantic_mapping`, `room_segmentation`, the
-occupancy grid, `tare_planner`) keeps working unchanged — it only reads these two
-topics.
+labels. anchor_frame:='odom' skips the world<-odom composition instead, anchoring
+the outputs (and the scene graph built from them) to the bag's start-anchored
+odom frame: origin at the robot start, +x = initial heading. Every downstream
+consumer (`semantic_mapping`, `room_segmentation`, the occupancy grid,
+`tare_planner`) keeps working unchanged — it only reads these two topics.
 """
 
 from collections import deque
@@ -160,6 +162,13 @@ class BagSlamBridge(Node):
         self.state_estimation_topic = self.declare_parameter('state_estimation_topic', '/state_estimation').value
         self.world_frame = self.declare_parameter('world_frame', 'world').value
         self.output_frame = self.declare_parameter('output_frame', 'map').value
+        # 'world': compose the bag's static world<-odom onto every LIO pose
+        # (building-anchored). 'odom': pass the LIO poses through untouched
+        # (start-anchored). Either way the anchor is pinned to output_frame by
+        # a static identity transform.
+        self.anchor_frame = self.declare_parameter('anchor_frame', 'world').value
+        if self.anchor_frame not in ('world', 'odom'):
+            raise ValueError(f"anchor_frame must be 'world' or 'odom', got '{self.anchor_frame}'")
         self.lidar_frame_param = self.declare_parameter('lidar_frame', 'go2w_005/livox_frame').value
         self.base_frame_param = self.declare_parameter('base_frame', 'go2w_005/base').value
         self.odom_frame_param = self.declare_parameter('odom_frame', 'go2w_005/odom').value
@@ -179,7 +188,9 @@ class BagSlamBridge(Node):
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self, spin_thread=True)
         self.static_broadcaster = StaticTransformBroadcaster(self)
 
-        self.T_world_odom = None          # world <- odom (static, cached)
+        self.T_world_odom = None          # anchor <- odom (static, cached)
+        if self.anchor_frame == 'odom':
+            self.T_world_odom = (np.eye(3), np.zeros(3))  # pass-through
         self.T_base_lidar = None          # base  <- lidar (static, cached)
         self._cached_lidar_frame = None
         self.base_frame = self.base_frame_param
@@ -201,23 +212,35 @@ class BagSlamBridge(Node):
             self.create_subscription(PointCloud2, self.lidar_topic, self.pointcloud_callback, sensor_qos)
         self.create_subscription(Odometry, self.odom_topic, self.odom_callback, 50)
 
-        self._publish_identity_world_to_output()
+        self._anchor_parent_published = None
+        self._publish_identity_anchor_to_output(
+            self.world_frame if self.anchor_frame == 'world' else self.odom_frame_param)
         self._scan_drop_warned = False
         self.get_logger().info(
             f"bag_slam_bridge: lidar='{self.lidar_topic}' ({self.lidar_msg_type}) -> "
             f"{self.registered_scan_topic}, {self.odom_topic} -> {self.state_estimation_topic}; "
             f"world='{self.world_frame}', output='{self.output_frame}', "
+            f"anchor='{self.anchor_frame}', "
             f"deskew_buckets={self.deskew_buckets}, body_filter={self.body_filter}.")
 
-    def _publish_identity_world_to_output(self):
-        if self.output_frame == self.world_frame:
+    def _publish_identity_anchor_to_output(self, parent):
+        """Pin output_frame to the anchor via a static identity transform.
+
+        In odom mode the authoritative frame name only arrives with the first
+        odometry message: the constructor publishes from the param default and
+        odom_callback re-issues if the stream disagrees (static TF is
+        last-writer-wins per child frame).
+        """
+        parent = strip_slash(parent)
+        if parent == self.output_frame or parent == self._anchor_parent_published:
             return
         tf_msg = TransformStamped()
         tf_msg.header.stamp = self.get_clock().now().to_msg()
-        tf_msg.header.frame_id = self.world_frame
+        tf_msg.header.frame_id = parent
         tf_msg.child_frame_id = self.output_frame
         tf_msg.transform.rotation.w = 1.0
         self.static_broadcaster.sendTransform(tf_msg)
+        self._anchor_parent_published = parent
 
     def _lookup_static(self, target, source):
         """Static (time-independent) target<-source; returns (R, t) or None."""
@@ -230,6 +253,9 @@ class BagSlamBridge(Node):
     def odom_callback(self, msg: Odometry):
         odom_frame = msg.header.frame_id or self.odom_frame_param
         self.base_frame = msg.child_frame_id or self.base_frame_param
+
+        if self.anchor_frame == 'odom':
+            self._publish_identity_anchor_to_output(odom_frame)
 
         if self.T_world_odom is None:
             self.T_world_odom = self._lookup_static(self.world_frame, odom_frame)

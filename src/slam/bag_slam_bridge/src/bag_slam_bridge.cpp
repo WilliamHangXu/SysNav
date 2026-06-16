@@ -15,7 +15,10 @@
 // Sweeps wait in a small queue until the first LIO pose after their last
 // point (<= one sweep of latency). Both outputs are stamped `output_frame`
 // (default "map"), defined identical to the bag's `world` via a static
-// identity transform.
+// identity transform. anchor_frame:="odom" skips the world<-odom composition
+// instead, anchoring the outputs (and the scene graph built from them) to the
+// bag's start-anchored odom frame: origin at the robot start, +x = initial
+// heading.
 //
 // Scan-to-map refinement (C++ node only; the Python reference stops at
 // deskew): what makes arise's walls razor-thin is that every sweep is
@@ -35,6 +38,7 @@
 #include <cmath>
 #include <deque>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -135,6 +139,15 @@ public:
       declare_parameter<std::string>("state_estimation_topic", "/state_estimation");
     world_frame_ = declare_parameter<std::string>("world_frame", "world");
     output_frame_ = declare_parameter<std::string>("output_frame", "map");
+    // Which bag frame the outputs are anchored to. "world": compose the bag's
+    // static world<-odom onto every LIO pose (building-anchored). "odom": pass
+    // the LIO poses through untouched (start-anchored). Either way the anchor
+    // is pinned to output_frame_ by a static identity transform.
+    anchor_frame_ = declare_parameter<std::string>("anchor_frame", "world");
+    if (anchor_frame_ != "world" && anchor_frame_ != "odom") {
+      throw std::invalid_argument(
+              "anchor_frame must be 'world' or 'odom', got '" + anchor_frame_ + "'");
+    }
     lidar_frame_param_ = declare_parameter<std::string>("lidar_frame", "go2w_005/livox_frame");
     base_frame_param_ = declare_parameter<std::string>("base_frame", "go2w_005/base");
     odom_frame_param_ = declare_parameter<std::string>("odom_frame", "go2w_005/odom");
@@ -153,7 +166,7 @@ public:
     // Clamped scan-to-map refinement (see file header). The clamp is what
     // pins the output to the bag's world frame; raising it trades world-frame
     // fidelity for sharper self-consistency.
-    refine_ = declare_parameter<bool>("scan_to_map_refine", true);
+    refine_ = declare_parameter<bool>("scan_to_map_refine", false);
     refine_local_map_sweeps_ =
       static_cast<int>(declare_parameter<int64_t>("refine_local_map_sweeps", 25));
     refine_min_map_sweeps_ =
@@ -189,30 +202,46 @@ public:
     odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
       odom_topic_, 50, std::bind(&BagSlamBridge::odomCallback, this, std::placeholders::_1));
 
-    publishIdentityWorldToOutput();
+    if (anchor_frame_ == "odom") {
+      // Pass-through: q_wo_/t_wo_ become anchor<-odom = identity.
+      q_wo_.setIdentity();
+      t_wo_.setZero();
+      have_world_odom_ = true;
+    }
+    publishIdentityAnchorToOutput(
+      anchor_frame_ == "world" ? world_frame_ : odom_frame_param_);
     RCLCPP_INFO(
       get_logger(),
       "bag_slam_bridge (c++): lidar='%s' (%s) -> %s, %s -> %s; world='%s', output='%s', "
-      "deskew_buckets=%d, body_filter=%s, scan_to_map_refine=%s (clamp %.0f cm / %.1f deg).",
+      "anchor='%s', deskew_buckets=%d, body_filter=%s, scan_to_map_refine=%s "
+      "(clamp %.0f cm / %.1f deg).",
       lidar_topic_.c_str(), lidar_msg_type_.c_str(), registered_scan_topic_.c_str(),
       odom_topic_.c_str(), state_estimation_topic_.c_str(), world_frame_.c_str(),
-      output_frame_.c_str(), deskew_buckets_, body_filter_ ? "true" : "false",
+      output_frame_.c_str(), anchor_frame_.c_str(), deskew_buckets_,
+      body_filter_ ? "true" : "false",
       refine_ ? "true" : "false", refine_clamp_trans_ * 100.0,
       refine_clamp_rot_ * 180.0 / M_PI);
   }
 
 private:
-  void publishIdentityWorldToOutput()
+  // Pin output_frame_ to the anchor via a static identity transform. In odom
+  // mode the authoritative frame name only arrives with the first odometry
+  // message: the constructor publishes from the param default and the odom
+  // callback re-issues if the stream disagrees (static TF is last-writer-wins
+  // per child frame).
+  void publishIdentityAnchorToOutput(const std::string & parent)
   {
-    if (output_frame_ == world_frame_) {
+    const std::string parent_stripped = stripSlash(parent);
+    if (parent_stripped == output_frame_ || parent_stripped == anchor_parent_published_) {
       return;
     }
     geometry_msgs::msg::TransformStamped tf_msg;
     tf_msg.header.stamp = now();
-    tf_msg.header.frame_id = world_frame_;
+    tf_msg.header.frame_id = parent_stripped;
     tf_msg.child_frame_id = output_frame_;
     tf_msg.transform.rotation.w = 1.0;
     static_broadcaster_->sendTransform(tf_msg);
+    anchor_parent_published_ = parent_stripped;
   }
 
   // Static (time-independent) target<-source.
@@ -238,6 +267,10 @@ private:
     const std::string odom_frame =
       msg->header.frame_id.empty() ? odom_frame_param_ : msg->header.frame_id;
     base_frame_ = msg->child_frame_id.empty() ? base_frame_param_ : msg->child_frame_id;
+
+    if (anchor_frame_ == "odom") {
+      publishIdentityAnchorToOutput(odom_frame);
+    }
 
     if (!have_world_odom_) {
       if (!lookupStatic(world_frame_, odom_frame, q_wo_, t_wo_)) {
@@ -672,12 +705,12 @@ private:
   // parameters
   std::string lidar_msg_type_, lidar_topic_, odom_topic_;
   std::string registered_scan_topic_, state_estimation_topic_;
-  std::string world_frame_, output_frame_;
+  std::string world_frame_, output_frame_, anchor_frame_;
   std::string lidar_frame_param_, base_frame_param_, odom_frame_param_;
   double pose_match_tol_{0.05}, max_pose_gap_{0.2}, min_range_{0.1};
   int deskew_buckets_{12};
   bool body_filter_{true};
-  bool refine_{true};
+  bool refine_{false};
   int refine_local_map_sweeps_{25}, refine_min_map_sweeps_{5};
   int refine_iters_{3}, refine_subsample_{3500}, refine_min_matches_{500};
   double refine_voxel_{0.06}, refine_gate_{0.2};
@@ -688,8 +721,9 @@ private:
   std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
   std::unique_ptr<tf2_ros::StaticTransformBroadcaster> static_broadcaster_;
   bool have_world_odom_{false};
-  Eigen::Quaterniond q_wo_;       // world <- odom (static, cached)
+  Eigen::Quaterniond q_wo_;       // anchor <- odom (static, cached; identity in odom mode)
   Eigen::Vector3d t_wo_;
+  std::string anchor_parent_published_;  // parent frame of the latched anchor->output static
   bool have_base_lidar_{false};
   Eigen::Quaterniond q_bl_;       // base <- lidar (static sensor mount, cached)
   Eigen::Vector3d t_bl_;

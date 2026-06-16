@@ -275,6 +275,7 @@ void SensorCoveragePlanner3D::ReadParameters() {
   this->declare_parameter<std::string>("scene_graph_export.client_id", scene_graph_cfg_.client_id);
   this->declare_parameter<std::string>("scene_graph_export.uploaded_by", scene_graph_cfg_.uploaded_by);
   this->declare_parameter<std::string>("scene_graph_export.units", scene_graph_cfg_.units);
+  this->declare_parameter<std::string>("scene_graph_export.frame", scene_graph_cfg_.frame);
   this->declare_parameter<std::string>("scene_graph_export.building", scene_graph_cfg_.building);
   this->declare_parameter<int>("scene_graph_export.floor_level", scene_graph_cfg_.floor_level);
   this->declare_parameter<std::string>("scene_graph_export.floor_id", scene_graph_cfg_.floor_id);
@@ -299,6 +300,7 @@ void SensorCoveragePlanner3D::ReadParameters() {
   this->get_parameter("scene_graph_export.client_id", scene_graph_cfg_.client_id);
   this->get_parameter("scene_graph_export.uploaded_by", scene_graph_cfg_.uploaded_by);
   this->get_parameter("scene_graph_export.units", scene_graph_cfg_.units);
+  this->get_parameter("scene_graph_export.frame", scene_graph_cfg_.frame);
   this->get_parameter("scene_graph_export.building", scene_graph_cfg_.building);
   this->get_parameter("scene_graph_export.floor_level", scene_graph_cfg_.floor_level);
   this->get_parameter("scene_graph_export.floor_id", scene_graph_cfg_.floor_id);

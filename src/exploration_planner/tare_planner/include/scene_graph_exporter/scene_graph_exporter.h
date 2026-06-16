@@ -68,6 +68,10 @@ struct SceneGraphExportConfig
 
   // --- layout.metadata ---
   std::string units = "meters";
+  // Which bag frame the coordinates are in ("world" or "odom"). Written
+  // verbatim so snapshots stay distinguishable; the exporter cannot see
+  // bag_slam_bridge's anchor_frame, so keep the two in sync manually.
+  std::string frame = "world";
   std::string building;
   int floor_level = 1;
   std::string floor_id;

@@ -277,6 +277,7 @@ nlohmann::json SceneGraphExporter::Build(
            {"metadata",
             {
                 {"units", config_.units},
+                {"frame", config_.frame},
                 {"building", config_.building},
                 {"floor_level", config_.floor_level},
                 {"floor_id", config_.floor_id},

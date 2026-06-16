@@ -41,6 +41,10 @@ tare_planner_node:
 
     # --- layout.metadata ---
     scene_graph_export.units: "meters"
+    # Which bag frame the coordinates are in. Keep in sync with the bridge's
+    # anchor_frame launch arg: "world" (building-anchored, the default) or
+    # "odom" (start-anchored). Written verbatim into layout.metadata.frame.
+    scene_graph_export.frame: "world"
     scene_graph_export.building: "HomeBuilding"
     scene_graph_export.floor_level: 1
     scene_graph_export.floor_id: "floor_04"
