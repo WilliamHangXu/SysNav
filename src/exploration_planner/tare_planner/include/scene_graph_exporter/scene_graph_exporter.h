@@ -21,6 +21,7 @@
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 
+#include "navgraph/navgraph_types.h"
 #include "representation/representation.h"
 
 namespace scene_graph_exporter_ns
@@ -88,7 +89,12 @@ public:
    *
    * @param rooms       Persistent rooms keyed by stable id (alive rooms only).
    * @param objects     Persistent objects keyed by primary object id.
-   * @param viewpoints  Viewpoints indexed by id (id == vector index).
+   * @param nav_nodes   NavGraph nodes keyed by stable id; each carries a room_id.
+   *                    Emitted as the rooms' waypoints (wp_1..N after the wp_0
+   *                    centroid). Nodes whose room_id is not an alive room are
+   *                    skipped.
+   * @param nav_edges   NavGraph edges (traversable connectivity + distance);
+   *                    emitted into layout.edges, referencing node waypoint ids.
    * @param door_cloud  Door pixels; r/g channels carry the two room ids, x/y is
    *                    the source-frame position. Used to locate entrances.
    * @param world_from_source  Rigid transform mapping source-frame points into
@@ -99,7 +105,8 @@ public:
   nlohmann::json Build(
       const std::map<int, representation_ns::RoomNodeRep>& rooms,
       const std::unordered_map<int, representation_ns::ObjectNodeRep>& objects,
-      const std::vector<representation_ns::ViewPointRep>& viewpoints,
+      const std::map<int, navgraph_ns::NavNode>& nav_nodes,
+      const std::vector<navgraph_ns::NavEdge>& nav_edges,
       const pcl::PointCloud<pcl::PointXYZRGBL>& door_cloud,
       const Eigen::Isometry3d& world_from_source =
           Eigen::Isometry3d::Identity()) const;
@@ -116,13 +123,17 @@ private:
                            const Eigen::Isometry3d& world_from_source,
                            double& x, double& y, double& z);
 
+  // Emits one room's JSON. The room's NavGraph nodes become wp_1..N (after the
+  // wp_0 centroid); nav_id_to_wpid is populated with each node's waypoint id so
+  // Build() can wire NavGraph edges to the right waypoints.
   nlohmann::json BuildRoomJson(
       const representation_ns::RoomNodeRep& room,
       const std::map<int, representation_ns::RoomNodeRep>& rooms,
       const std::unordered_map<int, representation_ns::ObjectNodeRep>& objects,
-      const std::vector<representation_ns::ViewPointRep>& viewpoints,
+      const std::vector<const navgraph_ns::NavNode*>& room_nav_nodes,
       const pcl::PointCloud<pcl::PointXYZRGBL>& door_cloud,
-      const Eigen::Isometry3d& world_from_source) const;
+      const Eigen::Isometry3d& world_from_source,
+      std::map<int, std::string>& nav_id_to_wpid) const;
 
   static nlohmann::json BuildObjectJson(
       const representation_ns::ObjectNodeRep& object);

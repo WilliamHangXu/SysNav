@@ -121,6 +121,13 @@ public:
   {
     return nodes_.size();
   }
+  // Read-only access to a node's neighbor indices (adjacency list). Used by
+  // NavGraph to derive its contracted edges from the keypose graph's topology.
+  const std::vector<int>& GetNodeNeighbors(int node_ind) const
+  {
+    static const std::vector<int> kEmptyNeighbors;
+    return (node_ind >= 0 && node_ind < static_cast<int>(graph_.size())) ? graph_[node_ind] : kEmptyNeighbors;
+  }
   int GetConnectedNodeNum();
   void GetMarker(visualization_msgs::msg::Marker& node_marker, visualization_msgs::msg::Marker& edge_marker);
   void GetVisualizationCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud);

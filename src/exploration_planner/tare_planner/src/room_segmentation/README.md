@@ -405,7 +405,7 @@ Each room maintains a rolling **best-3 set of camera views** (chosen for how muc
 
 1. **Motion gate** — skip unless the robot moved > `room_view.motion_dist_m` (0.2 m) or turned > `room_view.motion_yaw_deg` (5°) since the last evaluated frame (pose taken at the frame's timestamp via `GetPoseAtTime`). Bounds cost and keeps views diverse.
 2. **Yaw-rate (blur) gate** — skip if the instantaneous yaw rate (two latest odom samples) exceeds `room_view.max_yaw_rate_deg_s` (45 °/s). Fast turns ⇒ motion blur.
-3. **Coverage = observed floor cells.** Bin the **instantaneous LiDAR sweep** (`registered_cloud_`, *not* the accumulated map) into rooms via `room_mask_`, FOV+range gated (`room_view.horizontal_fov_deg` 90°, `room_view.max_range_m` 8 m), deduped by cell. A room's coverage = the number of distinct floor cells it returned. Using *observed* returns gives occlusion for free — a wall yields no returns beyond it, so this kills both wall-facing frames and through-wall misattribution. The frame is attributed to the room with the most observed cells, rejected below `room_view.min_coverage_m2` (1.0).
+3. **Coverage = observed floor cells.** Bin the **instantaneous LiDAR sweep** (`registered_cloud_`, *not* the accumulated map) into rooms via `room_mask_`, deduped by cell. Each point is kept only if it projects into the camera image: `PointToCameraView` runs the exact **Go2 pinhole model** (extrinsics + intrinsics + plumb_bob distortion mirrored from `cloud_image_fusion.py:scan2pixels_go2w_bag`), so horizontal **and** vertical FOV come from the real 1280×720 frame, not a hand-set angle; then a `room_view.max_range_m` (8 m) depth gate. A room's coverage = the number of distinct floor cells it returned. Using *observed* returns gives occlusion for free — a wall yields no returns beyond it, so this kills both wall-facing frames and through-wall misattribution. The frame is attributed to the room with the most observed cells, rejected below `room_view.min_coverage_m2` (1.0).
 4. **Pose-diversity admission** into that room's `best_views_`: if pose-close (`room_view.pose_dist_m` 1.5 m / `pose_yaw_deg` 40°) to an existing view, keep the higher-coverage one; otherwise fill an empty slot or evict the weakest if beaten. Accepted frames are written to `room_views/room_<id>_slot_<k>.jpg`; the view's `anchor_xy` is the mean of its covered cells. On any change, `views_dirty_ = true`.
 
 ### Stage 2 — query emission
@@ -475,10 +475,9 @@ The exporter consumes only `GetRoomLabel()` at snapshot time — see the [scene_
 ### Key parameters (planner side; all have defaults, no yaml required)
 | Param | Default | Meaning |
 |---|---|---|
-| `room_view.horizontal_fov_deg` | 90 | Camera horizontal FOV used for coverage. |
-| `room_view.max_range_m` | 8.0 | Max range counted for coverage. |
+| `room_view.max_range_m` | 8.0 | Max depth counted for coverage (camera FOV itself comes from the baked-in Go2 pinhole intrinsics, not a param). |
 | `room_view.min_coverage_m2` | 1.0 | Reject frames seeing less room than this. |
-| `room_view.max_yaw_rate_deg_s` | 45 | Reject frames captured turning faster (blur). |
+| `room_view.max_yaw_rate_deg_s` | 30 | Reject frames captured turning faster (blur). |
 | `room_view.motion_dist_m` / `.motion_yaw_deg` | 0.2 / 5 | Intake gate (move/turn since last eval). |
 | `room_view.pose_dist_m` / `.pose_yaw_deg` | 1.5 / 40 | Pose-diversity admission thresholds. |
 | `room_view.object_conf_min` | 0.3 | Object-inventory confidence floor. |

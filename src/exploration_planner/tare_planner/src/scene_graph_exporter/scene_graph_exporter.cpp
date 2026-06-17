@@ -89,9 +89,10 @@ nlohmann::json SceneGraphExporter::BuildRoomJson(
     const representation_ns::RoomNodeRep& room,
     const std::map<int, representation_ns::RoomNodeRep>& rooms,
     const std::unordered_map<int, representation_ns::ObjectNodeRep>& objects,
-    const std::vector<representation_ns::ViewPointRep>& viewpoints,
+    const std::vector<const navgraph_ns::NavNode*>& room_nav_nodes,
     const pcl::PointCloud<pcl::PointXYZRGBL>& door_cloud,
-    const Eigen::Isometry3d& world_from_source) const
+    const Eigen::Isometry3d& world_from_source,
+    std::map<int, std::string>& nav_id_to_wpid) const
 {
   const std::string room_key = RoomKey(room);
 
@@ -124,34 +125,22 @@ nlohmann::json SceneGraphExporter::BuildRoomJson(
     });
   }
 
-  // --- waypoints: wp_0 = centroid, wp_1..N = the room's viewpoints ---
+  // --- waypoints: wp_0..N-1 = the room's NavGraph nodes ---
+  // The room centroid is intentionally not exported as a waypoint.
   nlohmann::json waypoints = nlohmann::json::array();
-  const Eigen::Vector3d centroid_world = ToWorld(
-      world_from_source, room.centroid_.x(), room.centroid_.y(),
-      room.centroid_.z());
-  waypoints.push_back(nlohmann::json{
-      {"id", room_key + "-wp_0"},
-      {"x", centroid_world.x()},
-      {"y", centroid_world.y()},
-      {"z", centroid_world.z()},
-  });
-  int wp_index = 1;
-  for (int viewpoint_id : room.viewpoint_indices_)  // std::set => ascending
+  int wp_index = 0;
+  for (const navgraph_ns::NavNode* node : room_nav_nodes)  // ascending node id
   {
-    if (viewpoint_id < 0 ||
-        viewpoint_id >= static_cast<int>(viewpoints.size()))
-    {
-      continue;
-    }
-    const auto& position = viewpoints[viewpoint_id].GetPosition();
-    const Eigen::Vector3d world =
-        ToWorld(world_from_source, position.x, position.y, position.z);
+    const Eigen::Vector3d world = ToWorld(world_from_source, node->position.x,
+                                          node->position.y, node->position.z);
+    const std::string wp_id = room_key + "-wp_" + std::to_string(wp_index);
     waypoints.push_back(nlohmann::json{
-        {"id", room_key + "-wp_" + std::to_string(wp_index)},
+        {"id", wp_id},
         {"x", world.x()},
         {"y", world.y()},
         {"z", world.z()},
     });
+    nav_id_to_wpid[node->id] = wp_id;  // so Build() can wire NavGraph edges
     ++wp_index;
   }
 
@@ -206,18 +195,36 @@ void SceneGraphExporter::ComputeDimensions(
 nlohmann::json SceneGraphExporter::Build(
     const std::map<int, representation_ns::RoomNodeRep>& rooms,
     const std::unordered_map<int, representation_ns::ObjectNodeRep>& objects,
-    const std::vector<representation_ns::ViewPointRep>& viewpoints,
+    const std::map<int, navgraph_ns::NavNode>& nav_nodes,
+    const std::vector<navgraph_ns::NavEdge>& nav_edges,
     const pcl::PointCloud<pcl::PointXYZRGBL>& door_cloud,
     const Eigen::Isometry3d& world_from_source) const
 {
   nlohmann::json rooms_json = nlohmann::json::object();
   nlohmann::json all_waypoints = nlohmann::json::array();
 
+  // Group NavGraph nodes by room id (ascending node id within each room, since
+  // nav_nodes is an ordered map). Nodes whose room_id is not an alive room are
+  // simply never emitted (and edges touching them are dropped below).
+  std::map<int, std::vector<const navgraph_ns::NavNode*>> nodes_by_room;
+  for (const auto& id_node : nav_nodes)
+  {
+    nodes_by_room[id_node.second.room_id].push_back(&id_node.second);
+  }
+  static const std::vector<const navgraph_ns::NavNode*> kNoNavNodes;
+
+  // nav node id -> its emitted waypoint id; populated per room, used for edges.
+  std::map<int, std::string> nav_id_to_wpid;
+
   for (const auto& id_room : rooms)
   {
     const auto& room = id_room.second;
-    nlohmann::json room_json = BuildRoomJson(room, rooms, objects, viewpoints,
-                                             door_cloud, world_from_source);
+    auto nodes_it = nodes_by_room.find(room.id_);
+    const std::vector<const navgraph_ns::NavNode*>& room_nav_nodes =
+        (nodes_it != nodes_by_room.end()) ? nodes_it->second : kNoNavNodes;
+    nlohmann::json room_json =
+        BuildRoomJson(room, rooms, objects, room_nav_nodes, door_cloud,
+                      world_from_source, nav_id_to_wpid);
     // Mirror every waypoint id into the flat top-level list.
     for (const auto& wp : room_json["waypoints"])
     {
@@ -226,37 +233,24 @@ nlohmann::json SceneGraphExporter::Build(
     rooms_json[RoomKey(room)] = std::move(room_json);
   }
 
-  // --- edges: door-adjacent room pairs only, deduplicated (a < b) ---
+  // --- edges: NavGraph edges only (traversable connectivity between nodes) ---
+  // Room-centroid (wp_0) adjacency edges are intentionally omitted: the centroid
+  // is no longer exported as a waypoint. Skip any edge whose endpoint was not
+  // placed in an alive room.
   nlohmann::json edges = nlohmann::json::array();
-  for (const auto& id_room : rooms)
+  for (const auto& edge : nav_edges)
   {
-    const auto& room = id_room.second;
-    for (int neighbor_id : room.neighbors_)
+    auto u_it = nav_id_to_wpid.find(edge.u);
+    auto v_it = nav_id_to_wpid.find(edge.v);
+    if (u_it == nav_id_to_wpid.end() || v_it == nav_id_to_wpid.end())
     {
-      if (neighbor_id <= room.id_)
-      {
-        continue;  // emit each undirected pair once
-      }
-      auto neighbor_it = rooms.find(neighbor_id);
-      if (neighbor_it == rooms.end())
-      {
-        continue;
-      }
-      const auto& neighbor = neighbor_it->second;
-      // Measure between world-frame centroids so edges match wp_0 coordinates.
-      const Eigen::Vector3d a = ToWorld(world_from_source, room.centroid_.x(),
-                                        room.centroid_.y(), room.centroid_.z());
-      const Eigen::Vector3d b =
-          ToWorld(world_from_source, neighbor.centroid_.x(),
-                  neighbor.centroid_.y(), neighbor.centroid_.z());
-      const double dx = a.x() - b.x();
-      const double dy = a.y() - b.y();
-      edges.push_back(nlohmann::json{
-          {"u", RoomKey(room) + "-wp_0"},
-          {"v", RoomKey(neighbor) + "-wp_0"},
-          {"meters", std::sqrt(dx * dx + dy * dy)},
-      });
+      continue;
     }
+    edges.push_back(nlohmann::json{
+        {"u", u_it->second},
+        {"v", v_it->second},
+        {"meters", edge.meters},
+    });
   }
 
   double width = 0.0;

@@ -55,6 +55,7 @@
 #include "exploration_path/exploration_path.h"
 #include "grid_world/grid_world.h"
 #include "keypose_graph/keypose_graph.h"
+#include "navgraph/navgraph.h"
 #include "local_coverage_planner/local_coverage_planner.h"
 #include "planning_env/planning_env.h"
 #include "rolling_occupancy_grid/rolling_occupancy_grid.h"
@@ -200,6 +201,7 @@ private:
   Eigen::Vector3d initial_position_;
 
   std::shared_ptr<keypose_graph_ns::KeyposeGraph> keypose_graph_;
+  std::shared_ptr<navgraph_ns::NavGraph> navgraph_;
   std::shared_ptr<planning_env_ns::PlanningEnv> planning_env_;
   std::shared_ptr<viewpoint_manager_ns::ViewPointManager> viewpoint_manager_;
   std::shared_ptr<local_coverage_planner_ns::LocalCoveragePlanner>
@@ -425,12 +427,13 @@ private:
   // whose floor the current LiDAR sweep observes most within the camera FOV,
   // and admit it into that room's best-3 by pose diversity.
   void UpdateRoomViews();
-  // World point -> front camera frame; returns false if behind the camera.
-  // range_out = horizontal range, azimuth_out = 0 on the optical axis.
+  // World point -> Go2 front pinhole camera. Returns true iff the point lands
+  // inside the image (in front + within 1280x720 after distortion). depth_out =
+  // forward distance along the optical axis (for the range gate).
   bool PointToCameraView(const Eigen::Vector3f &p_world,
                          float lidarX, float lidarY, float lidarZ,
                          float lidarRoll, float lidarPitch, float lidarYaw,
-                         float &range_out, float &azimuth_out) const;
+                         float &depth_out) const;
   // Emit a room-type query (best-3 image paths + object inventory) for each
   // room whose evidence changed since its last query (rate-limited). Separate
   // from UpdateRoomLabel so the navigation early-stop logic stays untouched.
@@ -498,7 +501,6 @@ private:
 
   // Per-room best-3 view buffer (stage one). Gated by room_type_query_log.enabled.
   std::string room_views_dir_;          // <run>/room_views
-  float room_view_horizontal_fov_rad_;  // camera horizontal FOV (param)
   float room_view_max_range_;           // max useful range for coverage (m)
   float room_view_min_coverage_m2_;     // reject frames seeing less than this
   float room_view_max_yaw_rate_;        // reject frames captured turning faster (rad/s)

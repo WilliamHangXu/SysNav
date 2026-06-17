@@ -7,7 +7,7 @@ tare_planner_node:
     # When true, every /room_type_query payload (scalar fields as JSON + the
     # crop and mask images) is dumped to <run_dir>/room_type_queries/. Off by
     # default; flip to true to debug room labeling.
-    room_type_query_log.enabled: true
+    room_type_query_log.enabled: false
 
     # --- behavior ---
     scene_graph_export.enabled: true

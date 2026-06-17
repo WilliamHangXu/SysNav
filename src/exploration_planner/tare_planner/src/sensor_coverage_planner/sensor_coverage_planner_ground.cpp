@@ -116,6 +116,12 @@ void SensorCoveragePlanner3D::ReadParameters() {
   this->declare_parameter<int>(
       "keypose_graph/kAddEdgeCollisionCheckPointNumThr", 1);
 
+  // navigation_graph
+  this->declare_parameter<double>("navigation_graph/kNavNodeMinDist", 1.25);
+  this->declare_parameter<int>("navigation_graph/kNavGraphUpdateInterval", 2);
+  this->declare_parameter<std::string>("navigation_graph/world_frame_id",
+                                       kWorldFrameID);
+
   // local_coverage_planner
   this->declare_parameter<int>("kGreedyViewPointSampleRange", 5);
   this->declare_parameter<int>("kLocalPathOptimizationItrMax", 10);
@@ -272,7 +278,8 @@ void SensorCoveragePlanner3D::ReadParameters() {
   room_type_answer_log_seq_ = 0;
 
   // Per-room best-3 view buffer (stage one). All have defaults so no yaml needed.
-  this->declare_parameter<double>("room_view.horizontal_fov_deg", 90.0);
+  // (Camera FOV is no longer a param: it comes from the pinhole intrinsics baked
+  // into PointToCameraView, so coverage uses the camera's true frame extent.)
   this->declare_parameter<double>("room_view.max_range_m", 8.0);
   this->declare_parameter<double>("room_view.pose_dist_m", 1.5);
   this->declare_parameter<double>("room_view.pose_yaw_deg", 40.0);
@@ -282,8 +289,6 @@ void SensorCoveragePlanner3D::ReadParameters() {
   this->declare_parameter<double>("room_view.max_yaw_rate_deg_s", 30.0);
   this->declare_parameter<double>("room_view.object_conf_min", 0.3);
   this->declare_parameter<double>("room_type_query.min_interval_s", 3.0);
-  room_view_horizontal_fov_rad_ =
-      this->get_parameter("room_view.horizontal_fov_deg").as_double() * M_PI / 180.0;
   room_view_max_range_ = this->get_parameter("room_view.max_range_m").as_double();
   room_view_pose_dist_thresh_ = this->get_parameter("room_view.pose_dist_m").as_double();
   room_view_yaw_thresh_rad_ =
@@ -428,6 +433,7 @@ void SensorCoveragePlanner3D::InitializeData() {
       shared_from_this());
   keypose_graph_ =
       std::make_shared<keypose_graph_ns::KeyposeGraph>(shared_from_this());
+  navgraph_ = std::make_shared<navgraph_ns::NavGraph>(shared_from_this());
   planning_env_ =
       std::make_shared<planning_env_ns::PlanningEnv>(shared_from_this());
   grid_world_ = std::make_shared<grid_world_ns::GridWorld>(shared_from_this());
@@ -3890,6 +3896,10 @@ void SensorCoveragePlanner3D::execute() {
 
     CheckDoorCloudInRange();
     UpdateKeyposeGraph();
+    // Derive the lightweight NavGraph from the freshly healed + connectivity-
+    // checked keypose graph (self-throttled to every Nth call). The room mask
+    // tags each NavGraph node with its room id.
+    navgraph_->Update(keypose_graph_, room_mask_, shift_, room_resolution_);
 
     int uncovered_point_num = 0;
     int uncovered_frontier_point_num = 0;
@@ -4071,13 +4081,28 @@ void SensorCoveragePlanner3D::UpdateViewpointRep(){
 
 bool SensorCoveragePlanner3D::PointToCameraView(
     const Eigen::Vector3f &p_world, float lidarX, float lidarY, float lidarZ,
-    float lidarRoll, float lidarPitch, float lidarYaw, float &range_out,
-    float &azimuth_out) const
+    float lidarRoll, float lidarPitch, float lidarYaw, float &depth_out) const
 {
-  // Camera pose relative to the LiDAR. Must match project_pcl_to_image.
-  const float camX = -0.12f, camY = -0.075f, camZ = 0.265f;
-  const float camRoll = -1.5707963f, camPitch = 0.0f, camYaw = -1.5707963f;
+  // Go2-W (go2w_005 office_building bag) forward-facing pinhole camera. Mirrors
+  // semantic_mapping/cloud_image_fusion.py:scan2pixels_go2w_bag exactly. The old
+  // (-0.12,-0.075,0.265 / -90,0,-90 / 1920x640 equirectangular) numbers were the
+  // mecanum-platform Ricoh Theta 360 mount, NOT this camera. Keep these in sync
+  // with scan2pixels_go2w_bag, the source of truth.
+  //
+  // base -> camera-optical (projection direction, p_cam = R_l2c * p_base + t):
+  const float R00 = 0.000800f, R01 = -1.000000f, R02 = 0.000000f;
+  const float R10 = 0.000800f, R11 = 0.000000f, R12 = -1.000000f;
+  const float R20 = 0.999999f, R21 = 0.000800f, R22 = 0.000800f;
+  const float t0 = -0.000262f, t1 = 0.042738f, t2 = -0.327134f;
+  // Intrinsics from /go2w_005/camera/camera_info (K == P; raw/distorted image).
+  const float fx = 806.0578f, fy = 805.5558f, cx = 632.4743f, cy = 346.8795f;
+  const int imgW = 1280, imgH = 720;
+  // plumb_bob distortion [k1, k2, p1, p2, k3]; k1 is large, so it must be applied.
+  const float k1 = -0.3899f, k2 = 0.17881f, p1 = 0.0002f, p2 = -0.00068f,
+              k3 = -0.04416f;
 
+  // World -> body (go2w_005/base): undo the LiDAR/state-estimation pose. This is
+  // the p_base that scan2pixels_go2w_bag receives.
   float x1 = p_world.x() - lidarX;
   float y1 = p_world.y() - lidarY;
   float z1 = p_world.z() - lidarZ;
@@ -4090,31 +4115,35 @@ bool SensorCoveragePlanner3D::PointToCameraView(
   float y3 = y2;
   float z3 = x2 * sin(lidarPitch) + z2 * cos(lidarPitch);
 
-  float x4 = x3;
-  float y4 = y3 * cos(lidarRoll) + z3 * sin(lidarRoll);
-  float z4 = -y3 * sin(lidarRoll) + z3 * cos(lidarRoll);
+  float xb = x3;
+  float yb = y3 * cos(lidarRoll) + z3 * sin(lidarRoll);
+  float zb = -y3 * sin(lidarRoll) + z3 * cos(lidarRoll);
 
-  float x5 = x4 - camX;
-  float y5 = y4 - camY;
-  float z5 = z4 - camZ;
+  // Body -> camera-optical.
+  float xc = R00 * xb + R01 * yb + R02 * zb + t0;
+  float yc = R10 * xb + R11 * yb + R12 * zb + t1;
+  float zc = R20 * xb + R21 * yb + R22 * zb + t2;
 
-  float x6 = x5 * cos(camYaw) + y5 * sin(camYaw);
-  float y6 = -x5 * sin(camYaw) + y5 * cos(camYaw);
-  float z6 = z5;
-
-  float x7 = x6 * cos(camPitch) - z6 * sin(camPitch);
-  float y7 = y6;
-  float z7 = x6 * sin(camPitch) + z6 * cos(camPitch);
-
-  float x8 = x7;
-  float z8 = -y7 * sin(camRoll) + z7 * cos(camRoll);
-
-  if (z8 <= 0.0f)  // behind the camera
+  if (zc <= 1e-3f)  // behind the camera
   {
     return false;
   }
-  range_out = std::sqrt(x8 * x8 + z8 * z8);
-  azimuth_out = std::atan2(x8, z8);  // 0 == optical axis
+
+  // Pinhole projection with plumb_bob (radtan) distortion.
+  float xn = xc / zc;
+  float yn = yc / zc;
+  float r2 = xn * xn + yn * yn;
+  float radial = 1.0f + k1 * r2 + k2 * r2 * r2 + k3 * r2 * r2 * r2;
+  float x_d = xn * radial + 2.0f * p1 * xn * yn + p2 * (r2 + 2.0f * xn * xn);
+  float y_d = yn * radial + p1 * (r2 + 2.0f * yn * yn) + 2.0f * p2 * xn * yn;
+  float u = fx * x_d + cx;
+  float v = fy * y_d + cy;
+
+  if (u < 0.0f || u >= imgW || v < 0.0f || v >= imgH)  // out of frame
+  {
+    return false;
+  }
+  depth_out = zc;  // forward distance along the optical axis
   return true;
 }
 
@@ -4183,14 +4212,15 @@ void SensorCoveragePlanner3D::UpdateRoomViews()
   for (const auto &pt : registered_cloud_->cloud_->points)
   {
     Eigen::Vector3f p(pt.x, pt.y, pt.z);
-    float range, azimuth;
+    float depth;
+    // The pinhole in-frame test (horizontal + vertical FOV) is done inside
+    // PointToCameraView; here we only drop points beyond the useful range.
     if (!PointToCameraView(p, lidarX, lidarY, lidarZ, lidarRoll, lidarPitch,
-                           lidarYaw, range, azimuth))
+                           lidarYaw, depth))
     {
       continue;
     }
-    if (range > room_view_max_range_ ||
-        std::fabs(azimuth) > room_view_horizontal_fov_rad_ / 2.0f)
+    if (depth > room_view_max_range_)
     {
       continue;
     }
@@ -5186,7 +5216,7 @@ void SensorCoveragePlanner3D::SaveSceneGraphSnapshot(const std::string &reason)
 
   json snapshot = scene_graph_exporter_->Build(
       representation_->GetRoomNodesMap(), representation_->GetObjectNodeRepMap(),
-      representation_->GetViewPointReps(), *door_cloud_,
+      navgraph_->GetNodes(), navgraph_->GetEdges(), *door_cloud_,
       scene_graph_world_from_map_);
 
   // "final" gets a stable name; everything else is a numbered, time-stamped file.

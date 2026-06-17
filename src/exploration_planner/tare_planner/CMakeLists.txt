@@ -132,6 +132,10 @@ add_library(keypose_graph STATIC src/keypose_graph/keypose_graph.cpp)
 ament_target_dependencies(keypose_graph rclcpp std_msgs nav_msgs geometry_msgs sensor_msgs tf2_ros tf2_geometry_msgs tf2)
 target_link_libraries(keypose_graph ${catkin_LIBRARIES} ${PCL_LIBRARIES} viewpoint_manager)
 
+add_library(navgraph STATIC src/navgraph/navgraph.cpp)
+ament_target_dependencies(navgraph rclcpp std_msgs nav_msgs geometry_msgs sensor_msgs visualization_msgs pcl_ros pcl_conversions OpenCV)
+target_link_libraries(navgraph ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBRARIES} keypose_graph misc_utils)
+
 add_library(rolling_occupancy_grid src/rolling_occupancy_grid/rolling_occupancy_grid.cpp)
 ament_target_dependencies(rolling_occupancy_grid rclcpp std_msgs nav_msgs geometry_msgs sensor_msgs tf2_ros tf2_geometry_msgs tf2 pcl_ros pcl_conversions visualization_msgs)
 target_link_libraries(rolling_occupancy_grid ${catkin_LIBRARIES} misc_utils rolling_grid)
@@ -166,7 +170,7 @@ rosidl_target_interfaces(scene_graph_exporter
 
 add_library(sensor_coverage_planner_ground src/sensor_coverage_planner/sensor_coverage_planner_ground.cpp)
 ament_target_dependencies(sensor_coverage_planner_ground rclcpp std_msgs nav_msgs geometry_msgs sensor_msgs tf2_ros tf2_geometry_msgs tf2 OpenCV visualization_msgs cv_bridge)
-target_link_libraries(sensor_coverage_planner_ground ${catkin_LIBRARIES} ${OpenCV_LIBRARIES} graph planning_env keypose_graph viewpoint_manager pointcloud_manager grid_world local_coverage_planner tare_visualizer misc_utils representation scene_graph_exporter misc_utils nlohmann_json::nlohmann_json)
+target_link_libraries(sensor_coverage_planner_ground ${catkin_LIBRARIES} ${OpenCV_LIBRARIES} graph planning_env keypose_graph navgraph viewpoint_manager pointcloud_manager grid_world local_coverage_planner tare_visualizer misc_utils representation scene_graph_exporter misc_utils nlohmann_json::nlohmann_json)
 
 rosidl_target_interfaces(sensor_coverage_planner_ground
   ${PROJECT_NAME}
