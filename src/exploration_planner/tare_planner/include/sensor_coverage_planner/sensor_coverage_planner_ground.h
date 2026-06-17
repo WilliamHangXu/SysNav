@@ -109,6 +109,7 @@ private:
   std::string sub_keypose_topic_;
   std::string sub_state_estimation_topic_;
   std::string sub_registered_scan_topic_;
+  std::string sub_camera_image_topic_;
   std::string sub_terrain_map_topic_;
   std::string sub_terrain_map_ext_topic_;
   std::string sub_coverage_boundary_topic_;
@@ -403,10 +404,10 @@ private:
   void GetPoseAtTime(double imageTime, float &lidarX, float &lidarY, float &lidarZ, 
                      float &lidarRoll, float &lidarPitch, float &lidarYaw);
   cv::Mat project_pcl_to_image(const pcl::PointCloud<pcl::PointXYZI>::Ptr &cloud_w,
-                                float &lidarX, float &lidarY, float &lidarZ, 
+                                float &lidarX, float &lidarY, float &lidarZ,
                                 float &lidarRoll, float &lidarPitch, float &lidarYaw,
                                 cv::Mat &image, pcl::PointXYZI &room_center, int &room_id);
-  
+
   // Visualization functions
   void CreateVisibilityMarkers();
   void PublishViewpointRoomIdMarkers();
@@ -420,6 +421,15 @@ private:
   void SetRoomPosition(const int &start_room_id, const int &end_room_id);
   void SetStartAndEndRoomId();
   void UpdateRoomLabel();
+  // Debug: dump a room-type query's full payload (scalar fields as JSON + the
+  // crop and mask images) to the per-run output dir. No-op unless enabled.
+  void LogRoomTypeQuery(const tare_planner::msg::RoomType &msg,
+                        const cv::Mat &image, const cv::Mat &room_mask);
+  // Debug: dump a room-type VLM answer plus the running vote histogram and the
+  // resulting label to the same per-run dir. No-op unless enabled.
+  void LogRoomTypeAnswer(const tare_planner::msg::RoomType &msg, int room_id,
+                         const std::string &previous_label,
+                         const std::string &current_label);
   void ResetRoomInfo();
   void GetToRoomState(bool &at_room, bool &near_room_1, bool &near_room_2);
   void GetDoorNormal(const int &start_room_id, const int &end_room_id, 
@@ -467,6 +477,12 @@ private:
   std::unique_ptr<scene_graph_exporter_ns::SceneGraphExporter> scene_graph_exporter_;
   std::string scene_graph_run_dir_;
   int scene_graph_snapshot_count_;
+
+  // Room-type query debug log (off by default; param room_type_query_log.enabled)
+  bool room_type_query_log_enabled_;
+  std::string room_type_query_log_dir_;
+  int room_type_query_log_seq_;
+  int room_type_answer_log_seq_;
   bool scene_graph_final_saved_;
   bool scene_graph_clock_started_;  // sim clock has advanced at least once (bag playing)
   rclcpp::Time scene_graph_last_sim_time_;

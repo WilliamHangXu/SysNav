@@ -421,19 +421,19 @@ class VLMNode(Node):
             room_mask = cv2.imencode('.jpg', cv_room_mask)[1]
             img_base64 = base64.b64encode(img_jpg).decode('utf-8')
             room_mask_base64 = base64.b64encode(room_mask).decode('utf-8')
-            # if msg.in_room:
-            #     room_type_prompt = self.ROOM_TYPE_PROMPT
-            #     room_types = self.room_types.copy()
-            #     for i, room_type in enumerate(room_types):
-            #         room_type_prompt += f"{i}. {room_type}\n"
-            # else:
-            #     room_type_prompt = self.ROOM_TYPE_PROMPT
-            #     room_types = self.room_types.copy()
-            #     if "Corridor" in room_types:
-            #         room_types.remove("Corridor")
-            #     for i, room_type in enumerate(room_types):
-            #         room_type_prompt += f"{i}. {room_type}\n"
-            room_type_prompt = self.ROOM_TYPE_PROMPT_FREE
+            if msg.in_room:
+                room_type_prompt = self.ROOM_TYPE_PROMPT
+                room_types = self.room_types.copy()
+                for i, room_type in enumerate(room_types):
+                    room_type_prompt += f"{i}. {room_type}\n"
+            else:
+                room_type_prompt = self.ROOM_TYPE_PROMPT
+                room_types = self.room_types.copy()
+                if "Corridor" in room_types:
+                    room_types.remove("Corridor")
+                for i, room_type in enumerate(room_types):
+                    room_type_prompt += f"{i}. {room_type}\n"
+            # room_type_prompt = self.ROOM_TYPE_PROMPT_FREE
 
             completion = self.vlm_model.beta.chat.completions.parse(
                 model=self.room_type_vlm_model, # Use the flash lite model for faster response

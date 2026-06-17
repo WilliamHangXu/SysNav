@@ -31,6 +31,8 @@ void SensorCoveragePlanner3D::ReadParameters() {
                                        "/state_estimation_at_scan");
   this->declare_parameter<std::string>("sub_registered_scan_topic_",
                                        "/registered_scan");
+  this->declare_parameter<std::string>("sub_camera_image_topic_",
+                                       "/camera/image");
   this->declare_parameter<std::string>("sub_terrain_map_topic_",
                                        "/terrain_map");
   this->declare_parameter<std::string>("sub_terrain_map_ext_topic_",
@@ -199,6 +201,7 @@ void SensorCoveragePlanner3D::ReadParameters() {
   this->get_parameter("sub_state_estimation_topic_",
                       sub_state_estimation_topic_);
   this->get_parameter("sub_registered_scan_topic_", sub_registered_scan_topic_);
+  this->get_parameter("sub_camera_image_topic_", sub_camera_image_topic_);
   this->get_parameter("sub_terrain_map_topic_", sub_terrain_map_topic_);
   this->get_parameter("sub_terrain_map_ext_topic_", sub_terrain_map_ext_topic_);
   this->get_parameter("sub_coverage_boundary_topic_",
@@ -260,6 +263,12 @@ void SensorCoveragePlanner3D::ReadParameters() {
   room_voxel_dimension_.x() = this->get_parameter("room_x").as_int();
   room_voxel_dimension_.y() = this->get_parameter("room_y").as_int();
   room_voxel_dimension_.z() = this->get_parameter("room_z").as_int();
+
+  // Room-type query debug log: dump every /room_type_query payload to disk.
+  this->declare_parameter<bool>("room_type_query_log.enabled", false);
+  this->get_parameter("room_type_query_log.enabled", room_type_query_log_enabled_);
+  room_type_query_log_seq_ = 0;
+  room_type_answer_log_seq_ = 0;
 
   // Scene-graph JSON export (see config/scene_graph_export.yaml)
   this->declare_parameter<bool>("scene_graph_export.enabled", scene_graph_cfg_.enabled);
@@ -686,6 +695,34 @@ bool SensorCoveragePlanner3D::initialize() {
     }
   }
 
+  // ---- Room-type query debug log setup ----
+  // Logs land in the per-run scene-graph folder when export is on, otherwise
+  // directly under the configured output root.
+  if (room_type_query_log_enabled_)
+  {
+    std::filesystem::path log_dir =
+        (!scene_graph_run_dir_.empty()
+             ? std::filesystem::path(scene_graph_run_dir_)
+             : std::filesystem::path(scene_graph_cfg_.output_root)) /
+        "room_type_queries";
+    std::error_code ec;
+    std::filesystem::create_directories(log_dir, ec);
+    if (ec)
+    {
+      RCLCPP_ERROR(this->get_logger(),
+                   "[room_type_log] failed to create %s: %s — logging disabled",
+                   log_dir.c_str(), ec.message().c_str());
+      room_type_query_log_enabled_ = false;
+    }
+    else
+    {
+      room_type_query_log_dir_ = log_dir.string();
+      RCLCPP_INFO(this->get_logger(),
+                  "[room_type_log] room-type query payloads -> %s",
+                  room_type_query_log_dir_.c_str());
+    }
+  }
+
   exploration_start_sub_ = this->create_subscription<std_msgs::msg::Bool>(
       sub_start_exploration_topic_, 5,
       std::bind(&SensorCoveragePlanner3D::ExplorationStartCallback, this,
@@ -752,9 +789,11 @@ bool SensorCoveragePlanner3D::initialize() {
       std::bind(&SensorCoveragePlanner3D::RoomMaskCallback, this,
                 std::placeholders::_1));
   camera_image_sub_ = this->create_subscription<sensor_msgs::msg::Image>(
-      "/camera/image", 5,
+      sub_camera_image_topic_, 5,
       std::bind(&SensorCoveragePlanner3D::CameraImageCallback, this,
                 std::placeholders::_1));
+  RCLCPP_INFO(this->get_logger(), "Room-type query crops use camera topic: %s",
+              sub_camera_image_topic_.c_str());
   room_type_sub_ = this->create_subscription<tare_planner::msg::RoomType>(
       "/room_type_answer", 10,
       std::bind(&SensorCoveragePlanner3D::RoomTypeCallback, this,
@@ -1402,6 +1441,8 @@ void SensorCoveragePlanner3D::RoomTypeCallback(
       }
     }
   }
+  LogRoomTypeAnswer(*room_type_msg, room_id, current_room_type_,
+                    current_room_type_new_);
 }
 
 void SensorCoveragePlanner3D::RoomNavigationAnswerCallback(
@@ -3940,6 +3981,121 @@ void SensorCoveragePlanner3D::UpdateViewpointRep(){
   covered_points_all_->Publish();
 }
 
+void SensorCoveragePlanner3D::LogRoomTypeQuery(
+    const tare_planner::msg::RoomType &msg, const cv::Mat &image,
+    const cv::Mat &room_mask)
+{
+  if (!room_type_query_log_enabled_ || room_type_query_log_dir_.empty())
+  {
+    return;
+  }
+
+  // Ordered, unique base name per query: query_<6-digit seq>_room<id>.
+  std::string seq_str = std::to_string(room_type_query_log_seq_);
+  seq_str = std::string(6 - std::min<size_t>(6, seq_str.size()), '0') + seq_str;
+  std::string base = "query_" + seq_str + "_room" + std::to_string(msg.room_id);
+  std::filesystem::path dir(room_type_query_log_dir_);
+  std::string image_file = base + "_image.png";
+  std::string mask_file = base + "_mask.png";
+
+  // The two images are part of the payload (sensor_msgs/Image) — save them.
+  if (!image.empty())
+  {
+    cv::imwrite((dir / image_file).string(), image);
+  }
+  if (!room_mask.empty())
+  {
+    cv::imwrite((dir / mask_file).string(), room_mask);
+  }
+
+  // The rest of the payload as JSON, alongside the images.
+  json j;
+  j["seq"] = room_type_query_log_seq_;
+  j["stamp_sec"] = msg.header.stamp.sec;
+  j["stamp_nanosec"] = msg.header.stamp.nanosec;
+  j["frame_id"] = msg.header.frame_id;
+  j["room_id"] = msg.room_id;
+  j["voxel_num"] = msg.voxel_num;
+  j["in_room"] = msg.in_room;
+  j["room_type"] = msg.room_type;  // empty on the outgoing query
+  j["anchor_point"] = {{"x", msg.anchor_point.x},
+                       {"y", msg.anchor_point.y},
+                       {"z", msg.anchor_point.z}};
+  j["image"] = {{"file", image.empty() ? "" : image_file},
+                {"width", msg.image.width},
+                {"height", msg.image.height},
+                {"encoding", msg.image.encoding}};
+  j["room_mask"] = {{"file", room_mask.empty() ? "" : mask_file},
+                    {"width", msg.room_mask.width},
+                    {"height", msg.room_mask.height},
+                    {"encoding", msg.room_mask.encoding}};
+
+  std::ofstream ofs((dir / (base + ".json")).string());
+  if (ofs)
+  {
+    ofs << j.dump(2) << std::endl;
+  }
+  else
+  {
+    RCLCPP_WARN(this->get_logger(),
+                "[room_type_log] could not write %s.json", base.c_str());
+  }
+
+  room_type_query_log_seq_++;
+}
+
+void SensorCoveragePlanner3D::LogRoomTypeAnswer(
+    const tare_planner::msg::RoomType &msg, int room_id,
+    const std::string &previous_label, const std::string &current_label)
+{
+  if (!room_type_query_log_enabled_ || room_type_query_log_dir_.empty())
+  {
+    return;
+  }
+
+  std::string seq_str = std::to_string(room_type_answer_log_seq_);
+  seq_str = std::string(6 - std::min<size_t>(6, seq_str.size()), '0') + seq_str;
+  std::string base = "answer_" + seq_str + "_room" + std::to_string(room_id);
+  std::filesystem::path dir(room_type_query_log_dir_);
+
+  json j;
+  j["seq"] = room_type_answer_log_seq_;
+  j["room_id"] = room_id;
+  j["answer"] = msg.room_type;       // the VLM's returned label for this query
+  j["vote_weight"] = msg.voxel_num;  // weight this answer added to the histogram
+  j["in_room"] = msg.in_room;
+  j["anchor_point"] = {{"x", msg.anchor_point.x},
+                       {"y", msg.anchor_point.y},
+                       {"z", msg.anchor_point.z}};
+  j["previous_label"] = previous_label;  // running argmax before this vote
+  j["current_label"] = current_label;    // running argmax after this vote
+  j["label_flipped"] = (previous_label != current_label);
+
+  // The full running vote histogram after applying this answer.
+  json votes = json::object();
+  if (representation_->HasRoomNode(room_id))
+  {
+    for (const auto &kv : representation_->GetRoomNode(room_id).GetLabels())
+    {
+      votes[kv.first] = kv.second;
+    }
+  }
+  j["votes"] = votes;
+
+  std::ofstream ofs((dir / (base + ".json")).string());
+  if (ofs)
+  {
+    ofs << j.dump(2) << std::endl;
+  }
+  else
+  {
+    RCLCPP_WARN(this->get_logger(),
+                "[room_type_log] could not write %s.json", base.c_str());
+  }
+
+  room_type_answer_log_seq_++;
+}
+
 void SensorCoveragePlanner3D::UpdateRoomLabel()
 {
   pcl::PointCloud<pcl::PointXYZI>::Ptr covered_cloud = planning_env_->GetUpdatedCloudInRange();
@@ -4004,23 +4160,12 @@ void SensorCoveragePlanner3D::UpdateRoomLabel()
       room_cloud_msg.header.stamp = this->now();
       room_cloud_pub_->publish(room_cloud_msg);
 
-      // pcl::copyPointCloud(*(keypose_cloud_->cloud_),
-      //                     *door_cloud);
-      float lidarRoll = 0, lidarPitch = 0, lidarYaw = 0;
-      float lidarX = 0, lidarY = 0, lidarZ = 0;
-      GetPoseAtTime(imageTime, lidarX, lidarY, lidarZ, lidarRoll, lidarPitch, lidarYaw);
-      cv::Mat camera_image_tmp = camera_image_.clone();
-      cv::Mat cropped_img = project_pcl_to_image(room_cloud_tmp, lidarX, lidarY, lidarZ,
-                                          lidarRoll, lidarPitch, lidarYaw,
-                                          camera_image_tmp, room_center, room_id);
-      // save the current camera_image_
-      std::string image_path = "debug/" + std::to_string(room_id) + ".png";
-      std::string mask_path = "debug/" + std::to_string(room_id) + "_mask.png";
-      // cv::imwrite(image_path, cropped_img);
-      // cv::imwrite(mask_path, room_node.room_mask_);
+      // Option 2: send the raw front-camera frame instead of the equirectangular
+      // projection + circular-wrap crop, which assumed a 360 panorama. The room
+      // is known to be in view (gated above), so the current frame shows it.
+      cv::Mat cropped_img = camera_image_.clone();
       room_node.SetImage(cropped_img);
-      // RCLCPP_INFO(this->get_logger(), "Saved room image to %s", image_path.c_str());
-      
+
       geometry_msgs::msg::Point anchor_point;
       anchor_point.x = room_center.x;
       anchor_point.y = room_center.y;
@@ -4043,6 +4188,7 @@ void SensorCoveragePlanner3D::UpdateRoomLabel()
       room_type_msg.voxel_num = room_counts[room_id];
 
       room_type_pub_->publish(room_type_msg);
+      LogRoomTypeQuery(room_type_msg, cropped_img, room_node.room_mask_);
       // -------- Early Stop 1 --------
       if (room_counts[room_id] > 100 && room_node.GetIsAsked() > 0 && !room_node.IsCovered() && !room_node.IsVisited() && !transit_across_room_)
       {
@@ -4088,16 +4234,8 @@ void SensorCoveragePlanner3D::UpdateRoomLabel()
       geometry_msgs::msg::Point anchor_point;
       if (flag1)
       {
-        float lidarRoll = 0, lidarPitch = 0, lidarYaw = 0;
-        float lidarX = 0, lidarY = 0, lidarZ = 0;
-        GetPoseAtTime(imageTime, lidarX, lidarY, lidarZ, lidarRoll, lidarPitch, lidarYaw);
-        cv::Mat camera_image_tmp = camera_image_.clone();
-        cropped_img = project_pcl_to_image(room_cloud_tmp, lidarX, lidarY, lidarZ,
-                                          lidarRoll, lidarPitch, lidarYaw,
-                                          camera_image_tmp, room_center, room_id);
-        // save the current camera_image_
-        std::string image_path = "debug/" + std::to_string(room_id) + ".png";
-        // cv::imwrite(image_path, cropped_img);
+        // Option 2: use the raw front-camera frame (the room is in view).
+        cropped_img = camera_image_.clone();
         room_node.SetImage(cropped_img);
 
         // choose the first point in the room_cloud_in_range[room_id - 1] as the anchor point
@@ -4128,6 +4266,7 @@ void SensorCoveragePlanner3D::UpdateRoomLabel()
       room_type_msg.voxel_num = room_counts[room_id];
 
       room_type_pub_->publish(room_type_msg);
+      LogRoomTypeQuery(room_type_msg, cropped_img, room_node.room_mask_);
       // -------- Early Stop 1 --------
       if (room_counts[room_id] > 200 && room_node.GetIsAsked() > 0 && flag1 && !room_node.IsCovered() && !room_node.IsVisited() && !transit_across_room_)
       {

@@ -6,6 +6,10 @@ tare_planner_node:
     # Fed directly from the bag's own LIO via bag_slam_bridge (no arise_slam).
     sub_state_estimation_topic_ : /state_estimation
     sub_registered_scan_topic_ : /registered_scan
+    # Front camera used for room-type query crops (same image the detector uses).
+    # The legacy default /camera/image is the Ricoh Theta panorama; this robot
+    # has only a front-facing camera. Verify with `ros2 topic list`.
+    sub_camera_image_topic_ : /go2w_005/camera/image_raw
     sub_coverage_boundary_topic_ : /navigation_boundary
     sub_viewpoint_boundary_topic_ : /navigation_boundary
     sub_viewpoint_room_boundary_topic_ : /room_boundary

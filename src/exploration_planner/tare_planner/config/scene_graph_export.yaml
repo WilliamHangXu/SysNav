@@ -3,6 +3,12 @@
 # same node name, so ROS merges them). See SceneGraphExportConfig.
 tare_planner_node:
   ros__parameters:
+    # --- room-type query debug log ---
+    # When true, every /room_type_query payload (scalar fields as JSON + the
+    # crop and mask images) is dumped to <run_dir>/room_type_queries/. Off by
+    # default; flip to true to debug room labeling.
+    room_type_query_log.enabled: false
+
     # --- behavior ---
     scene_graph_export.enabled: true
     scene_graph_export.output_root: "output/scene_graph"  # per-run subfolder created here
