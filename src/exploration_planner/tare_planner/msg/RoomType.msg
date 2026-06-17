@@ -1,7 +1,8 @@
 std_msgs/Header header
 geometry_msgs/Point anchor_point
-sensor_msgs/Image image
+string[] image_paths
 sensor_msgs/Image room_mask
+string objects
 string room_type
 int32 room_id
 int32 voxel_num

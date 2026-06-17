@@ -100,7 +100,7 @@ class VLMNode(Node):
         Identify the room type and respond strictly in valid JSON format.
 
         Use the key "room_type" and use your own knowledge to determine the room type.
-        The room type should be a single word or a short phrase that accurately describes the function or purpose of the room.
+        The room type should be a single word or a short phrase (no more than three words) that accurately describes the room.
         Do not use vague or generic terms like "room" or "area". 
         Do not use words like "undetermined" or "unknown". You can make a reasonable guess based on the visual features of the room.
         For example:
@@ -411,29 +411,60 @@ class VLMNode(Node):
             # Process the room type query
             # self.get_logger().info(f"Received room type query: {msg}")
             start_time = time.time()
-            # transform the sensor_msgs::msg::Image to a format suitable for VLM
-            image_data = msg.image  # Assuming msg.image contains the image data
-            if not image_data:
-                raise ValueError("No image data provided in the room type query")
-            cv_image = self.bridge.imgmsg_to_cv2(image_data, desired_encoding='bgr8')
-            cv_room_mask = self.bridge.imgmsg_to_cv2(msg.room_mask, desired_encoding='mono8')
-            img_jpg = cv2.imencode('.jpg', cv_image)[1]
-            room_mask = cv2.imencode('.jpg', cv_room_mask)[1]
-            img_base64 = base64.b64encode(img_jpg).decode('utf-8')
-            room_mask_base64 = base64.b64encode(room_mask).decode('utf-8')
-            if msg.in_room:
-                room_type_prompt = self.ROOM_TYPE_PROMPT
-                room_types = self.room_types.copy()
-                for i, room_type in enumerate(room_types):
-                    room_type_prompt += f"{i}. {room_type}\n"
-            else:
-                room_type_prompt = self.ROOM_TYPE_PROMPT
-                room_types = self.room_types.copy()
-                if "Corridor" in room_types:
-                    room_types.remove("Corridor")
-                for i, room_type in enumerate(room_types):
-                    room_type_prompt += f"{i}. {room_type}\n"
-            # room_type_prompt = self.ROOM_TYPE_PROMPT_FREE
+            # Load the best-3 room images from disk (paths set by the planner).
+            image_b64_list = []
+            for path in msg.image_paths:
+                cv_img = cv2.imread(path)
+                if cv_img is None:
+                    self.get_logger().warn(f"Could not read room image: {path}")
+                    continue
+                image_b64_list.append(
+                    base64.b64encode(cv2.imencode('.jpg', cv_img)[1]).decode('utf-8'))
+            cv_room_mask = None
+            room_mask_base64 = None
+            if msg.room_mask.data:
+                cv_room_mask = self.bridge.imgmsg_to_cv2(msg.room_mask, desired_encoding='mono8')
+                room_mask_base64 = base64.b64encode(
+                    cv2.imencode('.jpg', cv_room_mask)[1]).decode('utf-8')
+            if not image_b64_list and not msg.objects:
+                raise ValueError("Room type query has neither images nor objects")
+            # if msg.in_room:
+            #     room_type_prompt = self.ROOM_TYPE_PROMPT
+            #     room_types = self.room_types.copy()
+            #     for i, room_type in enumerate(room_types):
+            #         room_type_prompt += f"{i}. {room_type}\n"
+            # else:
+            #     room_type_prompt = self.ROOM_TYPE_PROMPT
+            #     room_types = self.room_types.copy()
+            #     if "Corridor" in room_types:
+            #         room_types.remove("Corridor")
+            #     for i, room_type in enumerate(room_types):
+            #         room_type_prompt += f"{i}. {room_type}\n"
+            room_type_prompt = self.ROOM_TYPE_PROMPT_FREE
+
+            # The object inventory is the primary signal; images are support.
+            if msg.objects:
+                room_type_prompt += f"\nObjects detected in the room: {msg.objects}\n"
+
+            # Label stability: keep the existing label unless the evidence clearly
+            # indicates a different room type, and never swap it for a synonym
+            # (e.g. do not relabel "meeting room" as "conference room").
+            if msg.room_type:
+                room_type_prompt += (
+                    f"\nThis room is currently labeled \"{msg.room_type}\". "
+                    "Return this exact same label unless the images and objects clearly "
+                    "indicate a different kind of room. Do not change it to a synonym or "
+                    "near-synonym of the current label.\n"
+                )
+
+            # Up to 3 room images followed by the top-down room-shape mask.
+            content = [
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+                for b64 in image_b64_list
+            ]
+            if room_mask_base64 is not None:
+                content.append(
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{room_mask_base64}"}})
 
             completion = self.vlm_model.beta.chat.completions.parse(
                 model=self.room_type_vlm_model, # Use the flash lite model for faster response
@@ -441,13 +472,8 @@ class VLMNode(Node):
                     "role": "system",
                     "content": room_type_prompt
                 }, {
-                    "role":
-                        "user",
-                    "content": [
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_base64}"}},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{room_mask_base64}"}},
-                        # {"type": "text", "text": prompt_info}
-                    ]
+                    "role": "user",
+                    "content": content,
                 }],
                 response_format=Result,
             )
@@ -470,11 +496,10 @@ class VLMNode(Node):
             end_time = time.time()
             self.get_logger().info(f"Room type query processed in {end_time - start_time:.2f} seconds")
 
-            # save the image and room mask for debugging
-            img_path = f"debug/room_type/{msg.room_id}_{room_type}.jpg"
-            mask_path = f"debug/room_type/{msg.room_id}_{room_type}_mask.jpg"
-            cv2.imwrite(img_path, cv_image)
-            cv2.imwrite(mask_path, cv_room_mask)
+            # The room images already live on disk (planner room_views/); just
+            # dump the mask for debugging if present.
+            if cv_room_mask is not None:
+                cv2.imwrite(f"debug/room_type/{msg.room_id}_{room_type}_mask.jpg", cv_room_mask)
             # save the answer to a text file for debugging
             answer_file_path = f"debug/room_type/{msg.room_id}_{room_type}.txt"
             with open(answer_file_path, 'w') as f:

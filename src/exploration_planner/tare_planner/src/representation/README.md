@@ -65,18 +65,22 @@ Fields split by who writes them:
 | `is_connected_` | `bool` | Reachable from the room currently containing the robot. |
 | `alive` | `bool` | Lifecycle flag set to `true` on update, set `false` by the planner before re-ingest (see `RoomNodeListCallback`). |
 
-**Written by the planner (VLM / room-typing pipeline):**
+**Written by the planner (VLM / room-typing pipeline):** see the room_segmentation README's [Room labeling](../room_segmentation/README.md#room-labeling--the-semantic-room-type) section for the full mechanism.
 | Field | Type | Meaning |
 |---|---|---|
-| `labels_` | `map<string, int>` | Vote histogram for room type, accumulated from `/room_type_answer` (`RoomTypeAnswerCallback`). `GetRoomLabel()` returns the argmax. |
-| `is_labeled_` | `bool` | True once any vote has arrived. |
+| `labels_` | `map<string, int>` | Room-type label store. **Latest answer wins**: `RoomTypeCallback` sets it to `{answer: 1}` (no vote accumulation), so `GetRoomLabel()` returns the most recent VLM answer. |
+| `best_views_` | `vector<RoomView>` | Up to 3 best camera observations of the room (`{image_path, camera_pos, camera_yaw, anchor_xy, coverage_m2}`); the jpgs live on disk, only paths are held. The query payload. |
+| `views_dirty_` | `bool` | `best_views_` changed since the last query → re-query. |
+| `last_query_time_` | `double` | Wall seconds of the last query (per-room rate limit). |
+| `objects_at_last_query_` | `int` | Object count at the last query (new-object re-query trigger). |
+| `is_labeled_` | `bool` | True once a room has been queried/answered. **Navigation** flag, not "we have a type". |
 | `is_visited_` | `bool` | Set by `UpdateGlobalRepresentation` / `SetIsVisited` when the robot has entered. |
 | `is_covered_` | `bool` | True when coverage planner has explored most of the room. |
 | `is_asked_` | `int` | Counts how many more times the room can be queried (default 2, decremented). Used by "early stop" logic. |
-| `voxel_num_` | `int` | Number of covered voxels assigned to this room (refreshed every `UpdateRoomLabel`). |
-| `anchor_point_` | `Point` | Camera location where the VLM was asked about this room — also the navigation goal for "enter this room". |
-| `image_` | `cv::Mat` | The cropped camera frame sent to the VLM for room typing. |
-| `last_area_` | `float` | Area at the moment the room was last (re-)queried, used to decide when to re-ask. |
+| `voxel_num_` | `int` | Number of covered voxels assigned to this room (refreshed every `UpdateRoomLabel`; navigation bookkeeping). |
+| `anchor_point_` | `Point` | Room centroid sent in the query, used to re-resolve the room when the answer returns — also the navigation goal for "enter this room". |
+| `image_` | `cv::Mat` | Legacy single-frame crop slot; no longer used by the best-3 pipeline. |
+| `last_area_` | `float` | Area at the moment the room was last (re-)queried (navigation bookkeeping). |
 
 **Written by the planner (graph crosslinks):**
 | Field | Type | Meaning |
@@ -220,9 +224,12 @@ The orchestration lives in the main planning loop, starting at `execute()` (line
 
 ```
 UpdateRoomLabel()                  // walks covered cloud, assigns to rooms via room_mask_;
-                                   // emits /room_type_query for unlabeled rooms with image+anchor.
+                                   // navigation bookkeeping + early-stop only (no query emission).
 
 SetCurrentRoomId()                 // updates current_room_id_ from room_mask_ at the robot pose.
+
+PublishRoomTypeQueries()           // per room: if best-3 views or object set changed (rate-limited),
+                                   // emits /room_type_query (image paths + object inventory + current label).
 
 (room transit / arrival bookkeeping)
 
@@ -248,7 +255,7 @@ Other callbacks plug in asynchronously:
 - `ObjectNodeListCallback` writes to `object_node_rep_map_` / queues deletes.
 - `RoomNodeListCallback` writes/sweeps `room_nodes_map_`.
 - `RoomMaskCallback` re-binds viewpoints to rooms.
-- `RoomTypeAnswerCallback` (line 1235): `room_node.labels_[room_type] += voxel_num`, and if the argmax changed, marks all objects in that room as `is_considered_=false` so they'll be re-evaluated.
+- `RoomTypeCallback`: **latest answer wins** — `room_node.labels_.clear(); labels_[room_type] = 1`, and if the label changed, marks all objects in that room as `is_considered_=false` so they'll be re-evaluated.
 - `RoomNavigationAnswerCallback` (line 1261): reads `room_node.anchor_point_` to set a goal, or reads a candidate room's anchor as the next exploration destination.
 - `TargetObjectInstructionCallback` (line 1342): when the operator names a new target, clears `is_considered*` on every object and resets `is_asked_=2` on every room.
 - `TargetObjectCallback` (line 1371) / `AnchorObjectCallback`: reads `representation_->GetObjectNodeRep(id).GetPosition()` / `.room_id_` to set `found_object_*` state.

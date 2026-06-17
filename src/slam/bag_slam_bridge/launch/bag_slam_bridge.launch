@@ -25,7 +25,7 @@ def generate_launch_description():
         # Clamped scan-to-map ICP polish (stage 2). Off by default: the
         # registered scan is deskew + body-filter only. Set true to recover
         # arise-level wall sharpness (~2.2 vs ~2.7 cm 1-sigma) at ~28% more CPU.
-        DeclareLaunchArgument('scan_to_map_refine', default_value='false'),
+        DeclareLaunchArgument('scan_to_map_refine', default_value='true'),
         Node(
             package='bag_slam_bridge',
             executable=LaunchConfiguration('executable'),

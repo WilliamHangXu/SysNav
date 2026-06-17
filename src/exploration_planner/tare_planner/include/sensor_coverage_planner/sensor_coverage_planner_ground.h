@@ -421,10 +421,22 @@ private:
   void SetRoomPosition(const int &start_room_id, const int &end_room_id);
   void SetStartAndEndRoomId();
   void UpdateRoomLabel();
-  // Debug: dump a room-type query's full payload (scalar fields as JSON + the
-  // crop and mask images) to the per-run output dir. No-op unless enabled.
-  void LogRoomTypeQuery(const tare_planner::msg::RoomType &msg,
-                        const cv::Mat &image, const cv::Mat &room_mask);
+  // Evaluate the latest camera frame (motion-gated): attribute it to the room
+  // whose floor the current LiDAR sweep observes most within the camera FOV,
+  // and admit it into that room's best-3 by pose diversity.
+  void UpdateRoomViews();
+  // World point -> front camera frame; returns false if behind the camera.
+  // range_out = horizontal range, azimuth_out = 0 on the optical axis.
+  bool PointToCameraView(const Eigen::Vector3f &p_world,
+                         float lidarX, float lidarY, float lidarZ,
+                         float lidarRoll, float lidarPitch, float lidarYaw,
+                         float &range_out, float &azimuth_out) const;
+  // Emit a room-type query (best-3 image paths + object inventory) for each
+  // room whose evidence changed since its last query (rate-limited). Separate
+  // from UpdateRoomLabel so the navigation early-stop logic stays untouched.
+  void PublishRoomTypeQueries();
+  // Debug: dump a room-type query's payload (paths + objects + scalars) as JSON.
+  void LogRoomTypeQuery(const tare_planner::msg::RoomType &msg);
   // Debug: dump a room-type VLM answer plus the running vote histogram and the
   // resulting label to the same per-run dir. No-op unless enabled.
   void LogRoomTypeAnswer(const tare_planner::msg::RoomType &msg, int room_id,
@@ -483,6 +495,21 @@ private:
   std::string room_type_query_log_dir_;
   int room_type_query_log_seq_;
   int room_type_answer_log_seq_;
+
+  // Per-room best-3 view buffer (stage one). Gated by room_type_query_log.enabled.
+  std::string room_views_dir_;          // <run>/room_views
+  float room_view_horizontal_fov_rad_;  // camera horizontal FOV (param)
+  float room_view_max_range_;           // max useful range for coverage (m)
+  float room_view_min_coverage_m2_;     // reject frames seeing less than this
+  float room_view_max_yaw_rate_;        // reject frames captured turning faster (rad/s)
+  float room_view_object_conf_min_;     // object inventory confidence floor
+  double room_type_query_min_interval_s_;  // per-room re-query rate limit
+  float room_view_pose_dist_thresh_;    // pose-diversity: min position separation (m)
+  float room_view_yaw_thresh_rad_;      // pose-diversity: min heading separation
+  float room_view_motion_dist_thresh_;  // intake gate: min move since last eval (m)
+  float room_view_motion_yaw_thresh_rad_;// intake gate: min turn since last eval
+  bool room_view_have_last_pose_;       // has a previous eval pose been recorded
+  float room_view_last_x_, room_view_last_y_, room_view_last_yaw_;
   bool scene_graph_final_saved_;
   bool scene_graph_clock_started_;  // sim clock has advanced at least once (bag playing)
   rclcpp::Time scene_graph_last_sim_time_;
