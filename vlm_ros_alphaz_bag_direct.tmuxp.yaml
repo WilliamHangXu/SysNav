@@ -58,43 +58,43 @@ windows:
             rviz2 -d /home/all/AlphaZ/SysNav/src/exploration_planner/tare_planner/tare_planner_ground.rviz
             --ros-args -p use_sim_time:=true
 
-  # - window_name: bag
-  #   panes:
-  #     - shell_command:
-  #         # Start paused so /clock is alive (at the bag's real start time) before the
-  #         # planner boots — this avoids the 0 -> bag-time clock jump that crashes TARE.
-  #         # Then auto-resume playback via the rosbag2 service once the stack is up.
-  #         # --disable-keyboard-controls (+ stdin from /dev/null) keeps the player from
-  #         # reading the tty; otherwise backgrounding it with & triggers SIGTTIN and the
-  #         # player is suspended, so its /rosbag2_player/resume service never responds.
-  #         - "# 9. Bag — starts paused (clock alive), then auto-resumes"
-  #         - >
-  #           ros2 bag play /home/all/AlphaZ/bags/multifloor_2_ros2
-  #           --clock --playback-duration 145 --start-paused --disable-keyboard-controls < /dev/null &
-  #         - sleep 15
-  #         - ros2 service call /rosbag2_player/resume rosbag2_interfaces/srv/Resume "{}"
-  #     - shell_command:
-  #         - "# 10. Probes / snapshot trigger — manual"
-  #         - "# ros2 topic hz /room_nodes_list"
-  #         - "# ros2 topic pub --once /gadm_snapshot_request tare_planner/msg/GadmSnapshotRequest \"{request_id: 'test_001'}\""
-
   - window_name: bag
-    layout: tiled
     panes:
       - shell_command:
-          - "# 9. main bag (50->80s, owns /clock): paused -> resume -> THEN tf_static primer"
+          # Start paused so /clock is alive (at the bag's real start time) before the
+          # planner boots — this avoids the 0 -> bag-time clock jump that crashes TARE.
+          # Then auto-resume playback via the rosbag2 service once the stack is up.
+          # --disable-keyboard-controls (+ stdin from /dev/null) keeps the player from
+          # reading the tty; otherwise backgrounding it with & triggers SIGTTIN and the
+          # player is suspended, so its /rosbag2_player/resume service never responds.
+          - "# 9. Bag — starts paused (clock alive), then auto-resumes"
           - >
             ros2 bag play /home/all/AlphaZ/bags/multifloor_2_ros2
-            --start-offset 232 --playback-duration 275
-            --clock --start-paused --disable-keyboard-controls < /dev/null &
+            --clock --playback-duration 145 --start-paused --disable-keyboard-controls < /dev/null &
           - sleep 15
           - ros2 service call /rosbag2_player/resume rosbag2_interfaces/srv/Resume "{}"
-          # Primer comes up AFTER resume -> at resume time only the main player
-          # offers /rosbag2_player/resume, so no service-name collision. No --clock here.
-          - >
-            ros2 bag play /home/all/AlphaZ/bags/multifloor_2_ros2
-            --topics /tf_static --loop --disable-keyboard-controls < /dev/null &
       - shell_command:
           - "# 10. Probes / snapshot trigger — manual"
           - "# ros2 topic hz /room_nodes_list"
           - "# ros2 topic pub --once /gadm_snapshot_request tare_planner/msg/GadmSnapshotRequest \"{request_id: 'test_001'}\""
+
+  # - window_name: bag
+  #   layout: tiled
+  #   panes:
+  #     - shell_command:
+  #         - "# 9. main bag (50->80s, owns /clock): paused -> resume -> THEN tf_static primer"
+  #         - >
+  #           ros2 bag play /home/all/AlphaZ/bags/multifloor_2_ros2
+  #           --start-offset 232 --playback-duration 275
+  #           --clock --start-paused --disable-keyboard-controls < /dev/null &
+  #         - sleep 15
+  #         - ros2 service call /rosbag2_player/resume rosbag2_interfaces/srv/Resume "{}"
+  #         # Primer comes up AFTER resume -> at resume time only the main player
+  #         # offers /rosbag2_player/resume, so no service-name collision. No --clock here.
+  #         - >
+  #           ros2 bag play /home/all/AlphaZ/bags/multifloor_2_ros2
+  #           --topics /tf_static --loop --disable-keyboard-controls < /dev/null &
+  #     - shell_command:
+  #         - "# 10. Probes / snapshot trigger — manual"
+  #         - "# ros2 topic hz /room_nodes_list"
+  #         - "# ros2 topic pub --once /gadm_snapshot_request tare_planner/msg/GadmSnapshotRequest \"{request_id: 'test_001'}\""

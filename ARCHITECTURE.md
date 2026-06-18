@@ -28,10 +28,16 @@ The `Representation` ties these together — *which objects and viewpoints belon
 which room, and how rooms connect* — and the **scene graph exporter** snapshots it
 to a **GADM-style JSON** document on disk. **That JSON is the deliverable.**
 
+A fourth structure, the **NavGraph**, is continuously derived from the keypose
+graph as a *sparse, room-tagged, LLM-friendly* waypoint graph. It — **not** the
+viewpoints — supplies the **waypoints and edges** in the exported JSON, giving the
+downstream LLM a coarse navigation graph with real walking distances.
+
 ```
  sensors ─► detection ─► 3D semantic objects ─┐
- sensors ─► TARE explore ─► viewpoints + keypose graph ─┼─► Representation ─► exporter ─► scene_graph.json
- sensors ─► room segmentation + VLM typing + doors ─────┘   (the scene graph)
+ sensors ─► TARE explore ─► viewpoints + keypose graph ─┼─► Representation ──┐
+ sensors ─► room segmentation + VLM typing + doors ─────┘  (the scene graph) ├─► exporter ─► scene_graph.json
+                          keypose graph ─► NavGraph (sparse waypoints+edges) ─┘
 ```
 
 ---
@@ -42,7 +48,7 @@ ROS 2 workspace; packages under `src/`:
 
 | Package | Role |
 |---|---|
-| `exploration_planner/tare_planner` | **The heart of this pipeline.** TARE exploration planner + keypose graph + grid world + room segmentation + the `Representation` (scene graph) + the scene-graph exporter. Most of this guide lives here. |
+| `exploration_planner/tare_planner` | **The heart of this pipeline.** TARE exploration planner + keypose graph + NavGraph + grid world + room segmentation + the `Representation` (scene graph) + the scene-graph exporter. Most of this guide lives here. |
 | `semantic_mapping` | 3D semantic **object** mapping: YOLO-World/NanoOWL detection + SAM2 + LiDAR-image fusion → persistent per-instance object clouds → object nodes. See its [README](src/semantic_mapping/README.md). |
 | `vlm_node` | Vision-Language reasoning: **room typing** (labels rooms), target-object / spatial-condition reasoning for navigation queries. |
 | `slam` | `arise_slam` LiDAR-inertial odometry. Often **bypassed** when a bag already carries its own odometry/TF (see *Coordinate frames*). See its [README](src/slam/arise_slam_mid360/README.md). |
@@ -110,12 +116,16 @@ Relations that make it a *graph*:
   which viewpoint), wired in `UpdateObjectNode`.
 - **Room ↔ Room** — adjacency via `neighbors_`, geometrically realized by doors.
 
+> **Navigation layer — built.** The "places" layer that was once planned now
+> exists as the **NavGraph** (`src/navgraph/`): a sparse, room-tagged contraction
+> of the keypose graph's connected component, exported as the per-room waypoints
+> and the edges. It is a separate structure, not part of the `Representation`.
+> See [`navgraph/README.md`](src/exploration_planner/tare_planner/src/navgraph/README.md).
+>
 > **Planned extensions (discussed, not yet built):**
 > - **Areas** — subdivide each room into four quadrants by axes through its
 >   centroid (system/map-frame aligned), and attach viewpoints/objects to the
 >   *area* instead of the room. Pure exporter-side geometric bucketing.
-> - **Navigation layer** — add the keypose graph's *connected* nodes + edges as a
->   "places" layer under rooms (additive; keeps viewpoints untouched).
 
 ---
 
@@ -158,13 +168,22 @@ See [`room_segmentation/README.md`](src/exploration_planner/tare_planner/src/roo
 **4. The keypose graph — the planner (parallel, mostly independent)**
 A global topological **roadmap** of the walkable world, built from the robot's
 trajectory plus connector waypoints. It answers "traversable distance / path
-between A and B" for the planner. It is **not** part of the scene graph today (only
-loosely coupled — the planner uses it for walking-distance queries to objects).
+between A and B" for the planner. It is **not** part of the scene graph (only
+loosely coupled — the planner uses it for walking-distance queries to objects),
+but it is the **source the NavGraph contracts** (item 5).
 Full details: [`keypose_graph/README.md`](src/exploration_planner/tare_planner/src/keypose_graph/README.md).
 
-**5. Export — `scene_graph_exporter`**
+**5. The NavGraph — the planner (derived from the keypose graph)**
+Once per planning cycle the planner calls `navgraph_->Update(...)`, which rebuilds
+a **sparse Voronoi contraction** of the keypose graph's connected component: a
+distance-gated set of waypoints (nodes), edges meaning *reachability* with real
+keypose walking distance, each node tagged with a room and a scene-graph waypoint
+id. This is the structure the exporter turns into the JSON waypoints + edges.
+Full details: [`navgraph/README.md`](src/exploration_planner/tare_planner/src/navgraph/README.md).
+
+**6. Export — `scene_graph_exporter`**
 On a timer / at end-of-bag / on manual trigger, the exporter snapshots the
-`Representation` into GADM-style JSON.
+`Representation` **plus the NavGraph** into GADM-style JSON.
 
 ---
 
@@ -177,8 +196,8 @@ obstacle." Two node kinds: **keypose nodes** (dropped along the trajectory) and
 connectivity flood-fill from the first keypose marks each node *connected* or not;
 in the `/keypose_graph_cloud` RViz cloud the **connected** component is one color
 and the stale/orphaned (often edgeless) majority is the other. The planner only
-routes over the **connected** component. This is the structure a future
-"navigation layer" in the scene graph would draw from. Read
+routes over the **connected** component — which is also exactly what the
+**NavGraph** contracts into the scene graph's navigation layer. Read
 [`keypose_graph/README.md`](src/exploration_planner/tare_planner/src/keypose_graph/README.md)
 before touching it.
 
@@ -197,12 +216,12 @@ state to `nlohmann::json`. Shape:
       "kitchen-room_1": {
         "type": "kitchen", "sgid": 1,
         "entrances": [ { "id", "connected_to", "x","y","z" } ],   // door centroids
-        "waypoints": [ { "id": "...-wp_0" (centroid), ... }, { "...-wp_1" (viewpoint) } ],
+        "waypoints": [ { "id": "...-wp_0" (centroid) }, { "...-wp_1" (NavGraph node) }, ... ],
         "objects":   [ { "object_id", "type", "sgid", "waypoint" } ]
       }
     } } },
     "waypoints": [ ...all waypoint ids... ],
-    "edges":     [ { "u": "...-wp_0", "v": "...-wp_0", "meters": N } ],   // room adjacency
+    "edges":     [ { "u": "...-wp_1", "v": "...-wp_3", "meters": N } ],   // NavGraph edges
     "metadata":  { "units", "building", "floor_level", "floor_id", "dimensions" }
   }
 }
@@ -228,11 +247,10 @@ Full schema, build logic, triggers, and gotchas:
   room. Exporter-side, additive; needs a schema decision on nesting + empty-area
   handling, and the JSON *consumer* must learn the new `room → area → object`
   nesting.
-- **Navigation/places layer** — export the keypose graph's **connected**
-  component (both node types, to preserve edges) as a places layer linked to
-  rooms; drop the disconnected/stale nodes. Needs small accessors on
-  `KeyposeGraph` and a decision on a separate `places` section vs. reusing
-  `waypoints`+`edges`.
+- **Navigation/places layer — done.** Built as the **NavGraph**
+  (`src/navgraph/`): a sparse contraction of the keypose graph's connected
+  component, exported as the per-room waypoints (`wp_1..N`) and the `edges`. See
+  [`navgraph/README.md`](src/exploration_planner/tare_planner/src/navgraph/README.md).
 
 ---
 
@@ -244,5 +262,6 @@ Full schema, build logic, triggers, and gotchas:
 | Rooms / doors / room labels | [`room_segmentation/README.md`](src/exploration_planner/tare_planner/src/room_segmentation/README.md), `vlm_node/` |
 | 3D objects / detection | [`semantic_mapping/README.md`](src/semantic_mapping/README.md) |
 | Traversability roadmap / routing distances | [`keypose_graph/README.md`](src/exploration_planner/tare_planner/src/keypose_graph/README.md) |
+| The exported waypoint/navigation graph (for the LLM) | [`navgraph/README.md`](src/exploration_planner/tare_planner/src/navgraph/README.md) |
 | The in-memory scene graph itself | `src/exploration_planner/tare_planner/src/representation/` |
 | The node that owns & wires it all | `src/exploration_planner/tare_planner/src/sensor_coverage_planner/sensor_coverage_planner_ground.cpp` |

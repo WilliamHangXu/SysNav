@@ -1,13 +1,19 @@
 # Scene Graph Exporter
 
 The scene graph exporter serializes the planner's **in-memory semantic scene
-graph** — rooms, the viewpoints and objects inside them, and the doors between
-them — into a single **GADM-style JSON document** on disk. It is the artifact
-that leaves the running system: a compact, frame-consistent description of *what
-rooms exist, what is in them, how they connect, and where everything is*.
+graph** — rooms, the **NavGraph waypoints** and objects inside them, and the doors
+between them — into a single **GADM-style JSON document** on disk. It is the
+artifact that leaves the running system: a compact, frame-consistent description of
+*what rooms exist, what is in them, how they connect, and where everything is*.
 
-Mental model: the live `Representation` (rooms / objects / viewpoints / doors) is
-the source of truth that the planner grows as it explores; the exporter is a
+> **NavGraph, not viewpoints.** The per-room `waypoints` and the `edges` come from
+> the [NavGraph](../navgraph/README.md) (a sparse contraction of the keypose
+> graph), **not** from the `Representation`'s viewpoints. The exporter takes the
+> NavGraph nodes/edges as plain data and reshapes them; it does not build them.
+
+Mental model: the live `Representation` (rooms / objects / doors) plus the
+`NavGraph` (waypoints + edges) are the source of truth the planner grows as it
+explores; the exporter is a
 **pure snapshot function** that freezes that graph at a moment in time, optionally
 re-expresses every coordinate in a stable `world` frame, and writes it out as
 JSON. It computes nothing semantic — no clustering, no segmentation — it only
@@ -42,11 +48,11 @@ write the result.
 ## Pipeline at a glance
 
 ```
-                       Representation (live, grown during exploration)
-            ┌──────────────┬───────────────┬───────────────┬──────────────┐
-            │   rooms      │   objects     │  viewpoints   │  door_cloud  │
-            │ (RoomNodeRep)│(ObjectNodeRep)│ (ViewPointRep)│ XYZRGBL pcl  │
-            └──────┬───────┴───────┬───────┴───────┬───────┴──────┬───────┘
+           Representation (live)                       NavGraph (live)
+            ┌──────────────┬───────────────┬──────────────┐  ┌──────────────┐
+            │   rooms      │   objects     │  door_cloud  │  │ nodes + edges│
+            │ (RoomNodeRep)│(ObjectNodeRep)│ XYZRGBL pcl  │  │ (NavNode/Edge)│
+            └──────┬───────┴───────┬───────┴──────┬───────┘  └──────┬───────┘
                    │               │               │              │
    SaveSceneGraphSnapshot()  ── reads live state at call time ────┤
                    │                                              │
@@ -69,28 +75,32 @@ watchdog**, and a **manual keyword** — all of which call the same
 
 ## What the exporter consumes
 
-`Build()` takes four data containers plus one transform
-(`scene_graph_exporter.h:95`):
+`Build()` takes five data containers plus one transform
+(`scene_graph_exporter.h`):
 
 | Parameter | Type | Meaning |
 |---|---|---|
 | `rooms` | `std::map<int, RoomNodeRep>` | Live rooms keyed by stable id. Ordered map ⇒ deterministic output order. |
 | `objects` | `std::unordered_map<int, ObjectNodeRep>` | Live objects keyed by primary object id. |
-| `viewpoints` | `std::vector<ViewPointRep>` | Viewpoints; **index == viewpoint id** (rooms/objects reference them by index). |
+| `nav_nodes` | `std::map<int, navgraph_ns::NavNode>` | NavGraph nodes keyed by stable id. Each carries a `room_id` (→ which room emits it) and a `name` (its `wp` id). |
+| `nav_edges` | `std::vector<navgraph_ns::NavEdge>` | NavGraph edges (`u`, `v` node ids, `meters` = traversable distance) → `layout.edges`. |
 | `door_cloud` | `pcl::PointCloud<pcl::PointXYZRGBL>` | One point per door pixel. `r`/`g` channels carry the **two room ids** the door joins (order-agnostic); `x/y/z` is its position. |
 | `world_from_source` | `Eigen::Isometry3d` | Rigid map→world transform applied to **every** emitted coordinate. Identity ⇒ coordinates stay in the `map` frame. |
 
-The relevant fields the exporter pulls from each `Representation` type:
+The relevant fields the exporter pulls:
 
 - **`RoomNodeRep`** — `id_`, `GetRoomLabel()`, `centroid_` (room waypoint `wp_0`),
-  `neighbors_` (connected room ids → entrances + edges), `viewpoint_indices_`
-  (this room's viewpoints → `wp_1..N`), `GetObjectIndices()` (objects in the
-  room), `polygon_` (room outline → map dimensions).
+  `neighbors_` (connected room ids → **entrances**; note edges now come from the
+  NavGraph, not `neighbors_`), `GetObjectIndices()` (objects in the room),
+  `polygon_` (room outline → map dimensions).
 - **`ObjectNodeRep`** — `object_id_` (vector; primary = `[0]`), `label_`.
-- **`ViewPointRep`** — `GetPosition()`.
+- **`NavNode`** — `position`, `room_id` (groups nodes under rooms), `name`
+  (emitted verbatim as the waypoint `id`). The ROS-free `NavNode`/`NavEdge` structs
+  live in [`navgraph/navgraph_types.h`](../navgraph/navgraph_types.h), so the
+  exporter stays rclcpp/PCL-free.
 
-> Each room/object reference is **validated** before use: a `neighbor_id` not in
-> `rooms`, an `object_id` not in `objects`, or an out-of-range `viewpoint_id` is
+> Each reference is **validated** before use: a `neighbor_id` not in `rooms`, an
+> `object_id` not in `objects`, or a NavGraph node/edge whose room is not alive is
 > silently skipped (stale-link tolerance). The snapshot never dangles.
 
 ---
@@ -138,9 +148,9 @@ Per-room object (`BuildRoomJson`, `scene_graph_exporter.cpp:88`):
       "x": ..., "y": ..., "z": ...      // door centroid, world frame
     }
   ],
-  "waypoints": [                        // wp_0 = room centroid, wp_1..N = the room's viewpoints
-    { "id": "kitchen-room_1-wp_0", "x": ..., "y": ..., "z": ... },
-    { "id": "kitchen-room_1-wp_1", "x": ..., "y": ..., "z": ... }
+  "waypoints": [                        // wp_0 = room centroid, wp_1..N = the room's NavGraph nodes
+    { "id": "kitchen-room_1-wp_0", "x": ..., "y": ..., "z": ... },  // centroid
+    { "id": "kitchen-room_1-wp_1", "x": ..., "y": ..., "z": ... }   // NavGraph node
   ],
   "objects": [                          // every object assigned to this room
     { "object_id": "refrigerator_7", "type": "refrigerator", "sgid": 7, "waypoint": {} }
@@ -152,8 +162,9 @@ Key naming conventions:
 
 - **`room_key`** = `"<label>-room_<id>"`, e.g. `kitchen-room_1`; label falls back
   to `"unknown"`.
-- **`wp_0`** is always the room **centroid**; `wp_1..N` are the room's viewpoints
-  in ascending viewpoint-id order (`viewpoint_indices_` is a `std::set`).
+- **`wp_0`** is always the room **centroid**; `wp_1..N` are the room's NavGraph
+  nodes in ascending node-id order. Each `wp` id is the NavGraph node's `name`,
+  emitted verbatim so the RViz labels and the JSON match.
 - **`object_id`** = `"<label>_<primary_id>"`; `sgid` is the numeric id.
 
 ---
@@ -165,29 +176,30 @@ Key naming conventions:
      exists, call `DoorCentroid()` to average the door pixels tagged with that
      room-pair `(r,g)`. No matching door pixels ⇒ no entrance for that neighbor.
    - **Waypoints** — emit `wp_0` from `room.centroid_`, then one waypoint per
-     valid `viewpoint_id` in `room.viewpoint_indices_`, pulling
-     `viewpoints[id].GetPosition()`.
+     NavGraph node whose `room_id` is this room (grouped via `nodes_by_room`),
+     using the node's `name` as the id and `position` as the coordinate.
    - **Objects** — emit one entry per id in `room.GetObjectIndices()` that exists
      in `objects` (`BuildObjectJson`).
 2. **Flatten waypoints** — every room waypoint id is mirrored into the top-level
    `layout.waypoints` list (`Build`, `scene_graph_exporter.cpp:222`).
-3. **Edges** — for every **door-adjacent room pair** (`room.neighbors_`),
-   deduplicated by emitting only `a < b`, add `{u, v, meters}` where `u`/`v` are
-   the two rooms' `wp_0` ids and `meters` is the distance between their
-   **world-frame centroids**.
+3. **Edges** — one per **NavGraph edge**: `{u, v, meters}` where `u`/`v` are the
+   two nodes' waypoint ids (recorded while emitting room waypoints) and `meters`
+   is the NavGraph edge weight (keypose-graph walking distance). An edge whose
+   endpoint was not placed in an alive room is skipped. (The old room-centroid
+   adjacency edges are no longer emitted.)
 4. **Dimensions** — `ComputeDimensions()` takes the world-space XY bounding box
    over **every room polygon vertex** → `width`/`height`.
 5. **Wrap** in the top-level identifiers + `layout.metadata` from the config.
 
-> **Entrances vs. edges are not the same set.** An edge is emitted for *any*
-> `neighbors_` pair; an entrance requires door pixels to exist for that pair. So a
-> room pair can have a graph **edge but no entrance geometry** (door not yet
-> observed). Edges describe topology; entrances describe geometry.
+> **Entrances vs. edges are different things now.** **Entrances** are per-room
+> door geometry (from `neighbors_` + door pixels). **Edges** are the NavGraph's
+> node-to-node reachability with real walking distances — a finer graph over the
+> waypoints, no longer derived from `neighbors_`.
 
 ### Coordinate transform
 
-Every coordinate written to the JSON — room centroids, viewpoint positions, door
-centroids, polygon extents — is passed through `ToWorld(world_from_source, …)`
+Every coordinate written to the JSON — room centroids, NavGraph node positions,
+door centroids, polygon extents — is passed through `ToWorld(world_from_source, …)`
 (`scene_graph_exporter.cpp:20`). For door centroids, **each pixel is transformed
 before averaging** so the centroid is correct in the world frame. Pass identity
 to leave everything in the source (`map`) frame.
@@ -284,16 +296,16 @@ parameters). Field meanings (`SceneGraphExportConfig`, `scene_graph_exporter.h:3
   coordinate-comparable.
 - **`scene_graph_snapshot_count_` is shared** across periodic and manual saves, so
   numbered file names interleave; only `final` has a stable name.
-- **Stale links vanish quietly.** Missing neighbor rooms, objects, or
-  out-of-range viewpoints are skipped, not errored — a snapshot can legitimately
-  omit a referenced neighbor/object.
+- **Stale links vanish quietly.** Missing neighbor rooms, missing objects, or
+  NavGraph nodes/edges with no alive room are skipped, not errored — a snapshot can
+  legitimately omit a referenced neighbor/object/node.
 - **End-of-bag save needs sim time.** The watchdog only arms when
   `use_sim_time == true`; under live/wall-clock operation there is no "final"
   snapshot, only periodic/manual ones.
-- **Edges are room-level only.** Today's `edges`/`waypoints` describe
-  room-centroid adjacency and per-room viewpoints — they are *not* a fine-grained
-  traversability graph. (A denser navigation layer sourced from the keypose graph
-  is a separate, additive idea — see `keypose_graph/README.md`.)
+- **Edges/waypoints are the NavGraph.** `edges` and `wp_1..N` are the NavGraph —
+  a fine-grained traversability graph with real walking distances (see
+  [`navgraph/README.md`](../navgraph/README.md)). The room centroid `wp_0` is an
+  isolated waypoint that no edge touches.
 
 ---
 
@@ -302,9 +314,10 @@ parameters). Field meanings (`SceneGraphExportConfig`, `scene_graph_exporter.h:3
 ```cpp
 // Pure build (no ROS): reshape live scene-graph state into JSON.
 nlohmann::json SceneGraphExporter::Build(
-    const std::map<int, RoomNodeRep>&            rooms,
+    const std::map<int, RoomNodeRep>&             rooms,
     const std::unordered_map<int, ObjectNodeRep>& objects,
-    const std::vector<ViewPointRep>&             viewpoints,
+    const std::map<int, navgraph_ns::NavNode>&    nav_nodes,
+    const std::vector<navgraph_ns::NavEdge>&      nav_edges,
     const pcl::PointCloud<pcl::PointXYZRGBL>&     door_cloud,
     const Eigen::Isometry3d& world_from_source = Identity) const;
 
@@ -320,5 +333,6 @@ void SceneGraphWatchdogCallback();                        // end-of-bag final sn
 | Change *when* snapshots are written | timers + `SaveSceneGraphSnapshot` (`sensor_coverage_planner_ground.cpp:611`, `:4645`) |
 | Change the output frame | `world_transform.*` in `scene_graph_export.yaml` + `TryFreezeWorldFromMap` |
 | Trigger a dump by hand | publish `manual_save_keyword` (default `"ssg"`) on `/keyboard_input` |
-| Find where rooms/objects/viewpoints come from | `Representation` (`src/representation/`), fed by room segmentation + semantic mapping |
+| Find where rooms/objects come from | `Representation` (`src/representation/`), fed by room segmentation + semantic mapping |
+| Find where waypoints/edges come from | [`NavGraph`](../navgraph/README.md) (`src/navgraph/`), contracted from the keypose graph |
 ```

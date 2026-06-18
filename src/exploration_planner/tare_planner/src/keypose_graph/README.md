@@ -14,12 +14,15 @@ Mental model: it is the *skeleton of the walkable world*. Nodes ≈ breadcrumbs 
 robot drops along its trajectory, plus extra connector waypoints; edges ≈
 collision-free straight segments between nearby, mutually-visible breadcrumbs.
 
-> **Not part of the scene graph.** Semantic mapping and room segmentation never
-> touch this structure. The only coupling to the scene-graph side is that the
-> planner calls `GetShortestPath(robot, object)` to get a *walking* distance to a
-> found target/anchor object, and the per-keypose accumulated scan
-> (`keypose_cloud_`) is reused when sampling viewpoint reps. The graph's own
-> nodes/edges never enter the `Representation`.
+> **Not part of the scene graph — but the NavGraph contracts it.** Semantic
+> mapping and room segmentation never touch this structure, and its own
+> nodes/edges never enter the `Representation`. Couplings to the scene-graph side:
+> the planner calls `GetShortestPath(robot, object)` for a *walking* distance to a
+> found target/anchor object; the per-keypose accumulated scan (`keypose_cloud_`)
+> is reused when sampling viewpoint reps; and the **[NavGraph](../navgraph/README.md)**
+> reads this graph each cycle (connected component + `GetNodeNeighbors` adjacency +
+> `GetShortestPath`) to build the sparse waypoint graph that *is* exported. The
+> NavGraph is the only consumer that turns this roadmap into scene-graph output.
 
 ---
 
