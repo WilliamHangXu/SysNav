@@ -7,6 +7,8 @@
 #ifndef NAVGRAPH_NAVGRAPH_TYPES_H
 #define NAVGRAPH_NAVGRAPH_TYPES_H
 
+#include <string>
+
 #include <geometry_msgs/msg/point.hpp>
 
 namespace navgraph_ns
@@ -18,6 +20,10 @@ struct NavNode
   int id;
   geometry_msgs::msg::Point position;
   int room_id = -1;  // room affiliation (-1 = unknown), tagged from the room mask
+  // Scene-graph waypoint id, e.g. "meeting room-room_4-wp_0". Assigned each
+  // reconcile from the node's room; this is exactly the id the exporter emits,
+  // so RViz labels and the JSON stay in lockstep. Empty if the node has no room.
+  std::string name;
 };
 
 // An undirected NavGraph edge. (u, v) is canonical with u < v. `meters` is the

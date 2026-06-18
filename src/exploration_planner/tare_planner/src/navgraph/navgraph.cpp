@@ -33,6 +33,7 @@ NavGraph::NavGraph(rclcpp::Node::SharedPtr nh)
   clock_ = nh->get_clock();
   node_marker_pub_ = nh->create_publisher<visualization_msgs::msg::Marker>("navgraph/node_marker", 2);
   edge_marker_pub_ = nh->create_publisher<visualization_msgs::msg::Marker>("navgraph/edge_marker", 2);
+  label_marker_pub_ = nh->create_publisher<visualization_msgs::msg::MarkerArray>("navgraph/label_marker", 2);
 }
 
 void NavGraph::ReadParameters(rclcpp::Node::SharedPtr nh)
@@ -47,7 +48,8 @@ void NavGraph::ReadParameters(rclcpp::Node::SharedPtr nh)
 }
 
 void NavGraph::Update(const std::shared_ptr<keypose_graph_ns::KeyposeGraph>& keypose_graph,
-                      const cv::Mat& room_mask, const Eigen::Vector3f& shift, float room_resolution)
+                      const cv::Mat& room_mask, const Eigen::Vector3f& shift, float room_resolution,
+                      const std::map<int, std::string>& room_keys)
 {
   if (!keypose_graph)
   {
@@ -61,6 +63,7 @@ void NavGraph::Update(const std::shared_ptr<keypose_graph_ns::KeyposeGraph>& key
   }
   Reconcile(keypose_graph);
   TagRooms(room_mask, shift, room_resolution);
+  AssignNames(room_keys);
   PublishVisualization();
 
   int with_room = 0;
@@ -275,6 +278,27 @@ void NavGraph::TagRooms(const cv::Mat& room_mask, const Eigen::Vector3f& shift, 
   }
 }
 
+void NavGraph::AssignNames(const std::map<int, std::string>& room_keys)
+{
+  // nodes_ is ordered by id, so iterating it yields ascending node ids within
+  // each room -- the same order the exporter emits, so the wp_<n> numbering
+  // matches. A node with no (alive) room gets an empty name and is not exported.
+  std::map<int, int> next_wp_index;  // room id -> next waypoint index
+  for (auto& kv : nodes_)
+  {
+    NavNode& node = kv.second;
+    auto key_it = room_keys.find(node.room_id);
+    if (node.room_id < 0 || key_it == room_keys.end())
+    {
+      node.name.clear();
+      continue;
+    }
+    // wp_0 is reserved for the room centroid, so NavGraph nodes start at wp_1.
+    const int idx = ++next_wp_index[node.room_id];
+    node.name = key_it->second + "-wp_" + std::to_string(idx);
+  }
+}
+
 void NavGraph::PublishVisualization()
 {
   const rclcpp::Time stamp = clock_->now();
@@ -321,5 +345,37 @@ void NavGraph::PublishVisualization()
     edge_marker.points.push_back(nodes_.at(edge.v).position);
   }
   edge_marker_pub_->publish(edge_marker);
+
+  // Per-node text labels = scene-graph waypoint id. DELETEALL first so labels of
+  // deleted nodes don't linger. A node with no room shows "(no room) #<id>".
+  visualization_msgs::msg::MarkerArray labels;
+  visualization_msgs::msg::Marker clear_marker;
+  clear_marker.header.frame_id = world_frame_id_;
+  clear_marker.header.stamp = stamp;
+  clear_marker.ns = "navgraph_labels";
+  clear_marker.action = visualization_msgs::msg::Marker::DELETEALL;
+  labels.markers.push_back(clear_marker);
+  for (const auto& kv : nodes_)
+  {
+    const NavNode& node = kv.second;
+    visualization_msgs::msg::Marker text;
+    text.header.frame_id = world_frame_id_;
+    text.header.stamp = stamp;
+    text.ns = "navgraph_labels";
+    text.id = node.id;  // stable, unique
+    text.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
+    text.action = visualization_msgs::msg::Marker::ADD;
+    text.pose.position = node.position;
+    text.pose.position.z += 0.3;  // float the label above the node
+    text.pose.orientation.w = 1.0;
+    text.scale.z = 0.3;  // text height
+    text.color.r = 1.0;
+    text.color.g = 1.0;
+    text.color.b = 1.0;
+    text.color.a = 1.0;
+    text.text = node.name.empty() ? ("(no room) #" + std::to_string(node.id)) : node.name;
+    labels.markers.push_back(text);
+  }
+  label_marker_pub_->publish(labels);
 }
 }  // namespace navgraph_ns

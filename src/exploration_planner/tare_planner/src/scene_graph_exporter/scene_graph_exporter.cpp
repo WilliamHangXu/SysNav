@@ -125,15 +125,27 @@ nlohmann::json SceneGraphExporter::BuildRoomJson(
     });
   }
 
-  // --- waypoints: wp_0..N-1 = the room's NavGraph nodes ---
-  // The room centroid is intentionally not exported as a waypoint.
+  // --- waypoints: wp_0 = room centroid, wp_1..N = the room's NavGraph nodes ---
   nlohmann::json waypoints = nlohmann::json::array();
-  int wp_index = 0;
+  const Eigen::Vector3d centroid_world =
+      ToWorld(world_from_source, room.centroid_.x(), room.centroid_.y(),
+              room.centroid_.z());
+  waypoints.push_back(nlohmann::json{
+      {"id", room_key + "-wp_0"},
+      {"x", centroid_world.x()},
+      {"y", centroid_world.y()},
+      {"z", centroid_world.z()},
+  });
+  int wp_index = 1;
   for (const navgraph_ns::NavNode* node : room_nav_nodes)  // ascending node id
   {
     const Eigen::Vector3d world = ToWorld(world_from_source, node->position.x,
                                           node->position.y, node->position.z);
-    const std::string wp_id = room_key + "-wp_" + std::to_string(wp_index);
+    // Use the node's precomputed name (kept in lockstep with RViz labels); fall
+    // back to recomputing the same id if it was somehow not assigned.
+    const std::string wp_id =
+        !node->name.empty() ? node->name
+                            : (room_key + "-wp_" + std::to_string(wp_index));
     waypoints.push_back(nlohmann::json{
         {"id", wp_id},
         {"x", world.x()},

@@ -25,6 +25,7 @@
 #include <geometry_msgs/msg/point.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <visualization_msgs/msg/marker.hpp>
+#include <visualization_msgs/msg/marker_array.hpp>
 
 #include <pcl/kdtree/kdtree_flann.h>
 #include <pcl/point_cloud.h>
@@ -47,8 +48,11 @@ public:
   // cycle; NavGraph self-throttles to every kNavGraphUpdateInterval-th call.
   // `room_mask`/`shift`/`room_resolution` are the planner's room-segmentation
   // mask used to tag each node with a room id (pass an empty mask to skip).
+  // `room_keys` maps room id -> scene-graph room key (e.g. "kitchen-room_1") so
+  // each node can be named with its eventual scene-graph waypoint id.
   void Update(const std::shared_ptr<keypose_graph_ns::KeyposeGraph>& keypose_graph,
-              const cv::Mat& room_mask, const Eigen::Vector3f& shift, float room_resolution);
+              const cv::Mat& room_mask, const Eigen::Vector3f& shift, float room_resolution,
+              const std::map<int, std::string>& room_keys);
 
   // Read API for downstream consumers (e.g. the scene-graph exporter).
   const std::map<int, NavNode>& GetNodes() const
@@ -76,6 +80,11 @@ private:
   // Tag every surviving node with a room id by voxelizing its position into the
   // room mask (mirrors Representation::UpdateViewpointRoomIdsFromMask).
   void TagRooms(const cv::Mat& room_mask, const Eigen::Vector3f& shift, float room_resolution);
+  // Assign each node its scene-graph waypoint id ("<room_key>-wp_<n>"), grouping
+  // by room and numbering wp_1..N in ascending node-id order -- exactly the order
+  // the exporter emits (wp_0 is reserved for the room centroid). Nodes with no
+  // room get an empty name.
+  void AssignNames(const std::map<int, std::string>& room_keys);
   // (Re)build the kdtree over current NavGraph node positions, smuggling the
   // stable node id through PCL's intensity channel (mirrors KeyposeGraph).
   void BuildKdtree();
@@ -97,6 +106,7 @@ private:
   rclcpp::Clock::SharedPtr clock_;
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr node_marker_pub_;
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr edge_marker_pub_;
+  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr label_marker_pub_;
 
   std::string world_frame_id_;
   double kNavNodeMinDist;          // node spacing (in-room granularity)

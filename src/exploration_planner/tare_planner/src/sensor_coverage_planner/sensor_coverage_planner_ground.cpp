@@ -3898,8 +3898,16 @@ void SensorCoveragePlanner3D::execute() {
     UpdateKeyposeGraph();
     // Derive the lightweight NavGraph from the freshly healed + connectivity-
     // checked keypose graph (self-throttled to every Nth call). The room mask
-    // tags each NavGraph node with its room id.
-    navgraph_->Update(keypose_graph_, room_mask_, shift_, room_resolution_);
+    // tags each NavGraph node with its room id; room_keys names each node with
+    // its eventual scene-graph waypoint id (same key the exporter uses).
+    std::map<int, std::string> navgraph_room_keys;
+    for (const auto& id_room : representation_->GetRoomNodesMap())
+    {
+      navgraph_room_keys[id_room.second.id_] =
+          scene_graph_exporter_ns::SceneGraphExporter::RoomKey(id_room.second);
+    }
+    navgraph_->Update(keypose_graph_, room_mask_, shift_, room_resolution_,
+                      navgraph_room_keys);
 
     int uncovered_point_num = 0;
     int uncovered_frontier_point_num = 0;

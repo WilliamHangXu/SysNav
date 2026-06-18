@@ -111,9 +111,11 @@ public:
       const Eigen::Isometry3d& world_from_source =
           Eigen::Isometry3d::Identity()) const;
 
-private:
-  // Stable, human-readable room key, e.g. "kitchen-room_1".
+  // Stable, human-readable room key, e.g. "kitchen-room_1". Public so the
+  // planner can name NavGraph nodes with the same key the exporter uses.
   static std::string RoomKey(const representation_ns::RoomNodeRep& room);
+
+private:
 
   // Average door-pixel position (x, y, z) shared by room id_a and id_b, already
   // expressed in world_frame via world_from_source. Returns false (leaving
