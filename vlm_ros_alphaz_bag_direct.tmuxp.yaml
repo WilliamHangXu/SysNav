@@ -1,12 +1,15 @@
 session_name: vlm_ros_alphaz_bag_direct
 start_directory: /home/all/AlphaZ/SysNav
 
-# Bag-direct variant of vlm_ros_alphaz.tmuxp.yaml: instead of running arise_slam
-# as a second estimator and reconciling its `map` frame with the bag's `world`,
-# the stack is fed straight from the bag's own LIO + TF via bag_slam_bridge.
-# /registered_scan and /state_estimation are therefore born in the bag's `world`
-# frame (published as "map", with a static identity world->map), so the scene
-# graph needs no map->world transform (scene_graph_export_bag_direct disables it).
+# Bag-direct variant of vlm_ros_alphaz.tmuxp.yaml for the go2w_016
+# multifloor_test_slam bag. This bag carries its OWN LIO products, so even
+# bag_slam_bridge is unnecessary: /go2w_016/cloud_registered (the LIO registered
+# scan) and /go2w_016/lio/odometry are remapped straight onto /registered_scan
+# and /state_estimation at bag-play time. Everything (those two, plus the bag's
+# /terrain_map[_ext]) is already in the start-anchored `go2w_016/odom` frame, so
+# we only publish a static identity go2w_016/odom->map for the stack's `map`
+# frame. The scene graph is therefore in odom coordinates
+# (scene_graph_export_bag_direct: frame="odom", world_transform disabled).
 
 shell_command_before:
   - source /home/all/AlphaZ/SysNav/install/setup.zsh
@@ -16,8 +19,12 @@ windows:
     layout: tiled
     panes:
       - shell_command:
-          - "# 1. SLAM bridge (bag LIO + TF -> /registered_scan + /state_estimation)"
-          - ros2 launch bag_slam_bridge bag_slam_bridge.launch use_sim_time:=true anchor_frame:=odom
+          # SLAM bridge DISABLED for this bag — the bag's own LIO topics are
+          # remapped onto /registered_scan + /state_estimation in the bag pane.
+          # Both are in go2w_016/odom; publish identity go2w_016/odom->map so the
+          # stack's `map` frame resolves (this is what the bridge used to latch).
+          - "# 1. Static anchor (replaces bag_slam_bridge): go2w_016/odom -> map"
+          - ros2 run tf2_ros static_transform_publisher --x 0 --y 0 --z 0 --yaw 0 --pitch 0 --roll 0 --frame-id go2w_016/odom --child-frame-id map --ros-args -p use_sim_time:=true
       - shell_command:
           - "# 2. Detection (YOLO)"
           - sleep 3
@@ -58,43 +65,48 @@ windows:
             rviz2 -d /home/all/AlphaZ/SysNav/src/exploration_planner/tare_planner/tare_planner_ground.rviz
             --ros-args -p use_sim_time:=true
 
-  - window_name: bag
-    panes:
-      - shell_command:
-          # Start paused so /clock is alive (at the bag's real start time) before the
-          # planner boots — this avoids the 0 -> bag-time clock jump that crashes TARE.
-          # Then auto-resume playback via the rosbag2 service once the stack is up.
-          # --disable-keyboard-controls (+ stdin from /dev/null) keeps the player from
-          # reading the tty; otherwise backgrounding it with & triggers SIGTTIN and the
-          # player is suspended, so its /rosbag2_player/resume service never responds.
-          - "# 9. Bag — starts paused (clock alive), then auto-resumes"
-          - >
-            ros2 bag play /home/all/AlphaZ/bags/multifloor_2_ros2
-            --clock --playback-duration 145 --start-paused --disable-keyboard-controls < /dev/null &
-          - sleep 15
-          - ros2 service call /rosbag2_player/resume rosbag2_interfaces/srv/Resume "{}"
-      - shell_command:
-          - "# 10. Probes / snapshot trigger — manual"
-          - "# ros2 topic hz /room_nodes_list"
-          - "# ros2 topic pub --once /gadm_snapshot_request tare_planner/msg/GadmSnapshotRequest \"{request_id: 'test_001'}\""
-
   # - window_name: bag
-  #   layout: tiled
   #   panes:
   #     - shell_command:
-  #         - "# 9. main bag (50->80s, owns /clock): paused -> resume -> THEN tf_static primer"
+  #         # Start paused so /clock is alive (at the bag's real start time) before the
+  #         # planner boots — this avoids the 0 -> bag-time clock jump that crashes TARE.
+  #         # Then auto-resume playback via the rosbag2 service once the stack is up.
+  #         # --disable-keyboard-controls (+ stdin from /dev/null) keeps the player from
+  #         # reading the tty; otherwise backgrounding it with & triggers SIGTTIN and the
+  #         # player is suspended, so its /rosbag2_player/resume service never responds.
+  #         - "# 9. Bag — starts paused (clock alive), then auto-resumes."
+  #         - "#    Remap the bag's own LIO outputs onto the stack interface topics."
   #         - >
-  #           ros2 bag play /home/all/AlphaZ/bags/multifloor_2_ros2
-  #           --start-offset 232 --playback-duration 275
-  #           --clock --start-paused --disable-keyboard-controls < /dev/null &
+  #           ros2 bag play /home/all/AlphaZ/bags/multifloor_test_slam_ros2
+  #           --clock --start-paused --disable-keyboard-controls
+  #           --remap /go2w_016/cloud_registered:=/registered_scan
+  #           /go2w_016/lio/odometry:=/state_estimation < /dev/null &
   #         - sleep 15
   #         - ros2 service call /rosbag2_player/resume rosbag2_interfaces/srv/Resume "{}"
-  #         # Primer comes up AFTER resume -> at resume time only the main player
-  #         # offers /rosbag2_player/resume, so no service-name collision. No --clock here.
-  #         - >
-  #           ros2 bag play /home/all/AlphaZ/bags/multifloor_2_ros2
-  #           --topics /tf_static --loop --disable-keyboard-controls < /dev/null &
   #     - shell_command:
   #         - "# 10. Probes / snapshot trigger — manual"
   #         - "# ros2 topic hz /room_nodes_list"
   #         - "# ros2 topic pub --once /gadm_snapshot_request tare_planner/msg/GadmSnapshotRequest \"{request_id: 'test_001'}\""
+
+  - window_name: bag
+    layout: tiled
+    panes:
+      - shell_command:
+          - "# 9. main bag (50->80s, owns /clock): paused -> resume -> THEN tf_static primer"
+          - >
+            ros2 bag play /home/all/AlphaZ/bags/multifloor_test_slam_ros2
+            --start-offset 232 --playback-duration 275
+            --clock --start-paused --disable-keyboard-controls 
+            --remap /go2w_016/cloud_registered:=/registered_scan
+            /go2w_016/lio/odometry:=/state_estimation < /dev/null &
+          - sleep 15
+          - ros2 service call /rosbag2_player/resume rosbag2_interfaces/srv/Resume "{}"
+          # Primer comes up AFTER resume -> at resume time only the main player
+          # offers /rosbag2_player/resume, so no service-name collision. No --clock here.
+          - >
+            ros2 bag play /home/all/AlphaZ/bags/multifloor_2_ros2
+            --topics /tf_static --loop --disable-keyboard-controls < /dev/null &
+      - shell_command:
+          - "# 10. Probes / snapshot trigger — manual"
+          - "# ros2 topic hz /room_nodes_list"
+          - "# ros2 topic pub --once /gadm_snapshot_request tare_planner/msg/GadmSnapshotRequest \"{request_id: 'test_001'}\""

@@ -208,8 +208,6 @@ scenario yaml next to `keypose_graph/*` (set in `config/go2w_bag_direct.yaml`).
 - **Frame.** Node positions are copied verbatim from keypose nodes, so the NavGraph
   inherits the keypose graph's frame (the bag's `odom`/`world`, still labelled
   `kWorldFrameID = "map"`). The NavGraph applies no transforms of its own.
-- **Temporary log.** `Update` logs `"NavGraph: N nodes (M with room), E edges"`
-  each reconcile — handy for verification, remove once settled.
 
 ---
 

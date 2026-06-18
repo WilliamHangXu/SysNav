@@ -65,17 +65,6 @@ void NavGraph::Update(const std::shared_ptr<keypose_graph_ns::KeyposeGraph>& key
   TagRooms(room_mask, shift, room_resolution);
   AssignNames(room_keys);
   PublishVisualization();
-
-  int with_room = 0;
-  for (const auto& kv : nodes_)
-  {
-    if (kv.second.room_id >= 0)
-    {
-      ++with_room;
-    }
-  }
-  RCLCPP_INFO(rclcpp::get_logger("navgraph"), "NavGraph: %d nodes (%d with room), %d edges", GetNodeNum(),
-              with_room, GetEdgeNum());
 }
 
 void NavGraph::BuildKdtree()
