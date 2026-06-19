@@ -456,7 +456,12 @@ class CloudImageFusion:
         else:
             self.platform = platform
             # self.scan2pixels = eval(f"scan2pixels_{platform}")
-        
+
+        # Runtime calibration (intrinsics + extrinsic) sourced from camera_info +
+        # tf for platforms that use the topic-driven projection. Set via
+        # set_calibration() before any projection; None until then.
+        self.calib = None
+
         if platform == 'wheelchair':
             self.scan2pixels = scan2pixels_wheelchair
         elif platform == 'mecanum' or platform == 'mecanum_bagfile':
@@ -470,11 +475,89 @@ class CloudImageFusion:
         elif platform == 'go2w':
             self.scan2pixels = scan2pixels_go2w
         elif platform == 'go2w_bag':
-            self.scan2pixels = scan2pixels_go2w_bag
+            # Calibration (rectified intrinsics + base->camera extrinsic) comes
+            # from camera_info + tf at runtime; see set_calibration().
+            self.scan2pixels = self._scan2pixels_calibrated
         else:
             print(f"Invalid platform: {platform}. Available platforms: [wheelchair, mecanum, mecanum_bagfile, mecanum_sim, scannet, diablo, go2w]")
             raise ValueError
     
+    def set_calibration(self, R_l2c, t_l2c, fx, fy, cx, cy, width, height, dist=None):
+        """Store the runtime camera calibration used by the topic-driven
+        projection (_scan2pixels_calibrated). R_l2c/t_l2c map a point from the
+        cloud's body frame to the camera-optical frame (p_cam = R_l2c @ p_body +
+        t_l2c). fx/fy/cx/cy are the projection intrinsics (the P matrix for a
+        rectified image). dist is the plumb_bob [k1,k2,p1,p2,k3] for a raw image,
+        or None for a rectified image (no distortion applied)."""
+        self.calib = {
+            'R_l2c': np.asarray(R_l2c, dtype=float).reshape(3, 3),
+            't_l2c': np.asarray(t_l2c, dtype=float).reshape(3),
+            'fx': float(fx), 'fy': float(fy), 'cx': float(cx), 'cy': float(cy),
+            'width': int(width), 'height': int(height),
+            'dist': None if dist is None else np.asarray(dist, dtype=float).reshape(5),
+        }
+
+    def _scan2pixels_calibrated(self, laserCloud):
+        """Pinhole projection using the runtime calibration set via
+        set_calibration(). Mirrors scan2pixels_go2w (z-buffer occlusion + depth
+        sort) but reads intrinsics/extrinsic from camera_info + tf instead of
+        hardcoded constants. Applies plumb_bob distortion only when dist is set
+        (raw image); rectified images pass dist=None."""
+        c = self.calib
+        if c is None:
+            raise RuntimeError(
+                "CloudImageFusion.set_calibration() must be called before "
+                "projection (camera_info + tf not yet available?)")
+        R_l2c, t_l2c = c['R_l2c'], c['t_l2c']
+        fx, fy, cx, cy = c['fx'], c['fy'], c['cx'], c['cy']
+        W, H, dist = c['width'], c['height'], c['dist']
+
+        xyz_cam = laserCloud[:, :3] @ R_l2c.T + t_l2c
+        z_cam = xyz_cam[:, 2]
+        behind = z_cam <= 1e-3
+        z_safe = np.where(behind, 1.0, z_cam)
+        xn = xyz_cam[:, 0] / z_safe
+        yn = xyz_cam[:, 1] / z_safe
+        if dist is not None:
+            k1, k2, p1, p2, k3 = dist
+            r2 = xn * xn + yn * yn
+            radial = 1.0 + k1 * r2 + k2 * r2 * r2 + k3 * r2 * r2 * r2
+            x_d = xn * radial + 2.0 * p1 * xn * yn + p2 * (r2 + 2.0 * xn * xn)
+            y_d = yn * radial + p1 * (r2 + 2.0 * yn * yn) + 2.0 * p2 * xn * yn
+        else:
+            x_d, y_d = xn, yn
+        u = fx * x_d + cx
+        v = fy * y_d + cy
+
+        horiPixelID = u.astype(int)
+        vertPixelID = v.astype(int)
+        pixelDepth = z_cam.astype(float).copy()
+
+        out_of_image = (horiPixelID < 0) | (horiPixelID >= W) | (vertPixelID < 0) | (vertPixelID >= H)
+        invalid = behind | out_of_image
+        horiPixelID[invalid] = -1
+        vertPixelID[invalid] = -1
+        pixelDepth[invalid] = np.inf
+
+        valid_mask = ~invalid
+        if np.any(valid_mask):
+            depth_map = np.full((H, W), np.inf)
+            idx = vertPixelID[valid_mask] * W + horiPixelID[valid_mask]
+            np.minimum.at(depth_map.ravel(), idx, pixelDepth[valid_mask])
+            neighborhood = 3
+            depth_map = minimum_filter(depth_map, size=(2 * neighborhood + 1), mode='nearest')
+            depth_at_pixel = np.full(pixelDepth.shape, np.inf)
+            depth_at_pixel[valid_mask] = depth_map[vertPixelID[valid_mask], horiPixelID[valid_mask]]
+            occluded = (pixelDepth >= depth_at_pixel + 0.15) & valid_mask
+            horiPixelID[occluded] = -1
+            vertPixelID[occluded] = -1
+
+        point_pixel_idx = np.stack([horiPixelID, vertPixelID, pixelDepth], axis=-1)
+        sort_idx = np.argsort(point_pixel_idx[:, 2])
+        point_pixel_idx = point_pixel_idx[sort_idx]
+        laserCloud[:] = laserCloud[sort_idx]
+        return point_pixel_idx
+
     def generate_seg_cloud(self, cloud: np.ndarray, masks, labels, confidences, R_b2w, t_b2w, image_src=None):
         # Project the cloud points to image pixels
 

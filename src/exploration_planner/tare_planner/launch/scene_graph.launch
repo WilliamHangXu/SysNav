@@ -1,0 +1,86 @@
+import os
+import yaml
+from ament_index_python.packages import get_package_share_directory
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.conditions import IfCondition
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
+
+# One bringup launch for the whole scene-graph pipeline. Scenario / export / vlm
+# config selection is baked in here so the tmux runner carries only per-run knobs
+# (which bag, start offset, playback duration). Starts:
+#   static <ns>/odom->map tf, detection_node, semantic_mapping_node,
+#   room_segmentation, vlm_node, planner (+ scene-graph exporter), and RViz.
+SCENARIO = 'go2w_bag_direct'
+SG_EXPORT_CONFIG = 'scene_graph_export'
+VLM_CONFIG = 'vlm_config'
+
+
+def _robot_namespace(tare_share):
+    # Single source for the namespace: the scenario yaml's /** block. Used only
+    # to build the static <ns>/odom -> map transform here; the nodes read
+    # robot_namespace from their own param files.
+    try:
+        with open(os.path.join(tare_share, SCENARIO + '.yaml')) as f:
+            return yaml.safe_load(f)['/**']['ros__parameters']['robot_namespace']
+    except Exception as e:
+        print(f"[scene_graph.launch] could not read robot_namespace ({e}); "
+              f"defaulting to 'go2w_016'")
+        return 'go2w_016'
+
+
+def generate_launch_description():
+    use_sim_time = LaunchConfiguration('use_sim_time')
+    rviz = LaunchConfiguration('rviz')
+
+    tare_share = get_package_share_directory('tare_planner')
+    sem_share = get_package_share_directory('semantic_mapping')
+    vlm_share = get_package_share_directory('vlm_node')
+    ns = _robot_namespace(tare_share)
+
+    # Curated package-root rviz config (the one the prior tmux loaded), NOT the
+    # larger rviz/ one that gets installed to share. The installed launch is a
+    # symlink back to src, so realpath(__file__) resolves into the source tree:
+    #   <pkg>/launch/scene_graph.launch -> <pkg>/tare_planner_ground.rviz
+    rviz_config = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
+        'tare_planner_ground.rviz')
+
+    def include(path, extra=None):
+        args = {'use_sim_time': use_sim_time}
+        if extra:
+            args.update(extra)
+        return IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(path), launch_arguments=args.items())
+
+    return LaunchDescription([
+        DeclareLaunchArgument('use_sim_time', default_value='true',
+                              description='Use sim (bag) clock'),
+        DeclareLaunchArgument('rviz', default_value='true',
+                              description='Launch RViz alongside the pipeline'),
+
+        # Static identity <ns>/odom -> map: pins the stack's `map` frame to the
+        # bag odom (RViz tf tree + the optional world<-odom export).
+        Node(package='tf2_ros', executable='static_transform_publisher',
+             name='odom_to_map_static',
+             arguments=['--x', '0', '--y', '0', '--z', '0',
+                        '--yaw', '0', '--pitch', '0', '--roll', '0',
+                        '--frame-id', ns + '/odom', '--child-frame-id', 'map'],
+             parameters=[{'use_sim_time': use_sim_time}], output='screen'),
+
+        include(os.path.join(sem_share, 'detection_node_go2w_bag.launch')),
+        include(os.path.join(sem_share, 'semantic_mapping_go2w_bag.launch')),
+        include(os.path.join(tare_share, 'room_segmentation.launch'),
+                {'scenario': SCENARIO}),
+        include(os.path.join(vlm_share, 'vlm_node.launch'),
+                {'config': VLM_CONFIG}),
+        include(os.path.join(tare_share, 'explore.launch'),
+                {'scenario': SCENARIO, 'sg_export_config': SG_EXPORT_CONFIG}),
+
+        Node(package='rviz2', executable='rviz2', name='rviz2',
+             arguments=['-d', rviz_config],
+             parameters=[{'use_sim_time': use_sim_time}],
+             condition=IfCondition(rviz), output='screen'),
+    ])

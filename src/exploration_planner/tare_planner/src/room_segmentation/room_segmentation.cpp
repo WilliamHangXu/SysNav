@@ -89,6 +89,30 @@ RoomSegmentationNode::RoomSegmentationNode()
     this->get_parameter("kViewPointCollisionMarginZMinus", kViewPointCollisionMarginZMinus_);
     this->get_parameter("isDebug", is_debug_);
 
+    // --- Multi-robot portability: one knob (robot_namespace) ---
+    // Robot-source inputs become /<robot_namespace>/<suffix>; /occupied_cloud,
+    // /freespace_cloud and /keyboard_input are internal and stay constant. Empty
+    // namespace falls back to the constant names (pre-namespace behavior). Set in
+    // the scenario yaml's /** block.
+    this->declare_parameter<std::string>("robot_namespace", "");
+    this->declare_parameter<std::string>("topic_suffix.registered_scan", "cloud_registered");
+    this->declare_parameter<std::string>("topic_suffix.odometry", "lio/odometry");
+    std::string registered_scan_topic = "/registered_scan";
+    std::string state_estimation_topic = "/state_estimation";
+    {
+        const std::string robot_ns = this->get_parameter("robot_namespace").as_string();
+        if (!robot_ns.empty()) {
+            registered_scan_topic = "/" + robot_ns + "/" +
+                this->get_parameter("topic_suffix.registered_scan").as_string();
+            state_estimation_topic = "/" + robot_ns + "/" +
+                this->get_parameter("topic_suffix.odometry").as_string();
+            RCLCPP_INFO(this->get_logger(),
+                "[robot_namespace=%s] registered_scan=%s state_estimation=%s",
+                robot_ns.c_str(), registered_scan_topic.c_str(),
+                state_estimation_topic.c_str());
+        }
+    }
+
     room_resolution_inv_ = 1.0f / room_resolution_;
     ceiling_height_ = ceiling_height_base_;
     wall_thres_height_ = wall_thres_height_base_;
@@ -147,11 +171,11 @@ RoomSegmentationNode::RoomSegmentationNode()
 
     // ==================== Create Subscriptions ====================
     sub_laser_cloud_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-        "/registered_scan", 20,
+        registered_scan_topic, 20,
         std::bind(&RoomSegmentationNode::laserCloudCallback, this, std::placeholders::_1));
 
     sub_state_estimation_ = this->create_subscription<nav_msgs::msg::Odometry>(
-        "/state_estimation", 20,
+        state_estimation_topic, 20,
         std::bind(&RoomSegmentationNode::stateEstimationCallback, this, std::placeholders::_1));
 
     sub_occupied_cloud_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(

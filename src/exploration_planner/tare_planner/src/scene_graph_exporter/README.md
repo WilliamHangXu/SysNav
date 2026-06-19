@@ -34,8 +34,7 @@ JSON. It computes nothing semantic — no clustering, no segmentation — it onl
 |---|---|
 | `include/scene_graph_exporter/scene_graph_exporter.h` | `SceneGraphExportConfig` struct, `SceneGraphExporter` class declaration |
 | `src/scene_graph_exporter/scene_graph_exporter.cpp` | All JSON-building logic (`Build` and its helpers) |
-| `config/scene_graph_export.yaml` | Runtime config (identifiers, save cadence, world transform). Loaded by `tare_planner_node` |
-| `config/scene_graph_export_bag_direct.yaml` | Variant config for the bag-direct setup (no arise SLAM; single gravity-aligned TF tree) |
+| `config/scene_graph_export.yaml` | Runtime config (identifiers, save cadence, world transform). Loaded by `tare_planner_node`. World transform defaults off => coordinates in the bag odom frame. |
 
 The exporter reads from the `Representation`
 (`src/representation/representation.cpp`) and is **driven** by the main planner
@@ -85,7 +84,7 @@ watchdog**, and a **manual keyword** — all of which call the same
 | `nav_nodes` | `std::map<int, navgraph_ns::NavNode>` | NavGraph nodes keyed by stable id. Each carries a `room_id` (→ which room emits it) and a `name` (its `wp` id). |
 | `nav_edges` | `std::vector<navgraph_ns::NavEdge>` | NavGraph edges (`u`, `v` node ids, `meters` = traversable distance) → `layout.edges`. |
 | `door_cloud` | `pcl::PointCloud<pcl::PointXYZRGBL>` | One point per door pixel. `r`/`g` channels carry the **two room ids** the door joins (order-agnostic); `x/y/z` is its position. |
-| `world_from_source` | `Eigen::Isometry3d` | Rigid map→world transform applied to **every** emitted coordinate. Identity ⇒ coordinates stay in the `map` frame. |
+| `world_from_source` | `Eigen::Isometry3d` | Rigid odom→world transform applied to **every** emitted coordinate. Identity ⇒ coordinates stay in the `odom` frame. |
 
 The relevant fields the exporter pulls:
 
@@ -234,30 +233,28 @@ The watchdog's two-phase arming deliberately ignores the pre-playback window: a
 clock that is `0` or held constant before the bag starts must **not** be mistaken
 for "bag finished."
 
-### World transform (`map` → `world`)
+### World transform (`odom` → `world`)
 
-The scene graph lives in arise's gravity-aligned **`map`** frame, which is a
-**disjoint TF tree** from the bag's **`world`** frame. They are bridged through
-the one physical object both trees see — the LiDAR (`livox_frame` in the bag tree,
-`sensor` in arise's tree) — composed in code (`TryFreezeWorldFromMap`, `:4590`):
+The scene graph is built entirely in the bag's **odom** frame (numerically
+`kWorldFrameID = "map"`, identity-pinned to the bag odom). To express a snapshot
+in a building-fixed **`world`** frame, the planner looks up the **single static
+transform** `world_T_source = lookupTransform(world_frame, source_frame)` once and
+freezes it (`TryFreezeWorldFromOdom`):
 
 ```
-world_T_map = world_T_livox · G · (map_T_sensor)⁻¹
+world_T_source   (= world ← odom; source_frame defaults to "map" = kWorldFrameID)
 ```
 
-where **`G` = the gravity rotation** (`gravity_matrix`, arise's per-run
-`imu_laser_R_Gravity`). The transform is **looked up once and frozen** (retried at
-1 Hz until both trees are flowing, then the timer cancels). If it is never
-available, snapshots are still written — **silently falling back to identity**,
-i.e. in the `map` frame.
+There is **no gravity bridge and no per-run constant** — the standardized
+direct-LIO stack publishes one coherent TF tree, so a single lookup suffices. The
+transform is retried at 1 Hz until tf is flowing, then the timer cancels. If it is
+never available, snapshots are still written — **falling back to identity** (odom
+frame), and `layout.metadata.frame` is set to `odom` accordingly (loud warning).
 
-> ⚠️ **`gravity_matrix` is a brittle per-run constant.** It must match the
-> `R_GRAVITY` arise used for *this* bag/IMU init (the same value as
-> `cloud_image_fusion.py`). A wrong matrix tilts/displaces every world-frame
-> coordinate in the snapshot. Re-read it for any new bag, IMU init, or sensor
-> remount. See the `object-mapping-and-map-frame` notes. The bag-direct setup
-> uses a single gravity-aligned tree (identity `G`); see
-> `scene_graph_export_bag_direct.yaml`.
+> The export-time single transform is exact **only because `world ← odom` is
+> static** per bag (no online global relocalization during the run). Many bags
+> (e.g. the go2w_016 multifloor_test_slam bag) have **no `world` frame at all** —
+> there `enabled: false` and coordinates stay in odom.
 
 ---
 
@@ -274,9 +271,9 @@ parameters). Field meanings (`SceneGraphExportConfig`, `scene_graph_exporter.h:3
 | | `end_of_bag_save` | Enable the final-snapshot watchdog (sim time only) |
 | | `bag_end_timeout_s` | Wall-clock stall before declaring "bag over" |
 | | `manual_save_keyword` | `/keyboard_input` string that triggers an on-demand dump |
-| World transform | `world_transform.enabled` | Re-express coordinates in `world`; else stay in `map` |
-| | `world_transform.{world,livox,map,sensor}_frame` | Frame names for the two-tree bridge (no leading `/`) |
-| | `world_transform.gravity_matrix` | Row-major 3×3 `G`; identity disables the rotation |
+| World transform | `world_transform.enabled` | Re-express coordinates in `world`; else stay in `odom` |
+| | `world_transform.world_frame` | Target (building-fixed) tf frame, no leading `/` |
+| | `world_transform.source_frame` | Frame the scene-graph coords are in (default `map` = kWorldFrameID), no leading `/` |
 | Identifiers | `zone`, `map_id`, `warehouse_id`, `name`, `client_id`, `uploaded_by` | Written verbatim into the JSON |
 | Metadata | `units`, `building`, `floor_level`, `floor_id` | Written into `layout.metadata` |
 
@@ -290,10 +287,10 @@ parameters). Field meanings (`SceneGraphExportConfig`, `scene_graph_exporter.h:3
 - **Snapshot semantics.** `Build()` reads the live `Representation` at call time;
   it copies nothing in advance. Each snapshot is an independent, self-contained
   view — later snapshots simply reflect a more-grown graph.
-- **Identity fallback is silent in the data.** If `world_T_map` isn't latched, the
-  snapshot is written in the `map` frame (a warning is logged, but the JSON looks
-  identical in shape). World-frame and map-frame snapshots are **not**
-  coordinate-comparable.
+- **Identity fallback is labeled.** If `world_T_odom` isn't latched, the snapshot
+  is written in the `odom` frame and `layout.metadata.frame` is set to `odom` (a
+  warning is logged). World-frame and odom-frame snapshots are **not**
+  coordinate-comparable, but the `frame` field always tells you which one it is.
 - **`scene_graph_snapshot_count_` is shared** across periodic and manual saves, so
   numbered file names interleave; only `final` has a stable name.
 - **Stale links vanish quietly.** Missing neighbor rooms, missing objects, or
@@ -323,7 +320,7 @@ nlohmann::json SceneGraphExporter::Build(
 
 // Planner-side entry points (sensor_coverage_planner_ground.cpp):
 void SaveSceneGraphSnapshot(const std::string& reason);  // "periodic" | "final" | "manual"
-bool TryFreezeWorldFromMap();                             // compose & latch world_T_map
+bool TryFreezeWorldFromOdom();                            // look up & latch world_T_odom
 void SceneGraphWatchdogCallback();                        // end-of-bag final snapshot
 ```
 
@@ -331,7 +328,7 @@ void SceneGraphWatchdogCallback();                        // end-of-bag final sn
 |---|---|
 | Change what fields land in the JSON | `BuildRoomJson` / `BuildObjectJson` / `Build` (`scene_graph_exporter.cpp`) |
 | Change *when* snapshots are written | timers + `SaveSceneGraphSnapshot` (`sensor_coverage_planner_ground.cpp:611`, `:4645`) |
-| Change the output frame | `world_transform.*` in `scene_graph_export.yaml` + `TryFreezeWorldFromMap` |
+| Change the output frame | `world_transform.*` in `scene_graph_export.yaml` + `TryFreezeWorldFromOdom` |
 | Trigger a dump by hand | publish `manual_save_keyword` (default `"ssg"`) on `/keyboard_input` |
 | Find where rooms/objects come from | `Representation` (`src/representation/`), fed by room segmentation + semantic mapping |
 | Find where waypoints/edges come from | [`NavGraph`](../navgraph/README.md) (`src/navgraph/`), contracted from the keypose graph |

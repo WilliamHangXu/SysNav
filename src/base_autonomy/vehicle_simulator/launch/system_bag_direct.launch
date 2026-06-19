@@ -34,7 +34,7 @@ def generate_launch_description():
   anchor_frame = LaunchConfiguration('anchor_frame')
 
   declare_exploration_planner_config = DeclareLaunchArgument('exploration_planner_config', default_value='go2w_bag_direct', description='')
-  declare_sg_export_config = DeclareLaunchArgument('sg_export_config', default_value='scene_graph_export_bag_direct', description='')
+  declare_sg_export_config = DeclareLaunchArgument('sg_export_config', default_value='scene_graph_export', description='')
   declare_world_name = DeclareLaunchArgument('world_name', default_value='real_world', description='')
   declare_sensorOffsetX = DeclareLaunchArgument('sensorOffsetX', default_value='0.05', description='')
   declare_sensorOffsetY = DeclareLaunchArgument('sensorOffsetY', default_value='0.0', description='')

@@ -209,6 +209,49 @@ void SensorCoveragePlanner3D::ReadParameters() {
                       sub_state_estimation_topic_);
   this->get_parameter("sub_registered_scan_topic_", sub_registered_scan_topic_);
   this->get_parameter("sub_camera_image_topic_", sub_camera_image_topic_);
+
+  // --- Multi-robot portability: one knob (robot_namespace) ---
+  // All robots run the same nav stack, so only the namespace differs. Robot-
+  // source inputs become /<robot_namespace>/<suffix>; internal stack topics stay
+  // constant. Empty namespace keeps the values read above (pre-namespace
+  // behavior, relying on a bag-play remap). Set in the scenario yaml's /** block.
+  this->declare_parameter<std::string>("robot_namespace", "");
+  this->declare_parameter<std::string>("topic_suffix.registered_scan",
+                                       "cloud_registered");
+  this->declare_parameter<std::string>("topic_suffix.odometry", "lio/odometry");
+  this->declare_parameter<std::string>("topic_suffix.camera_image",
+                                       "camera/image_raw");
+  this->declare_parameter<std::string>("topic_suffix.camera_info",
+                                       "camera_rect/camera_info");
+  this->declare_parameter<std::string>("base_frame_suffix", "base");
+  {
+    const std::string robot_ns =
+        this->get_parameter("robot_namespace").as_string();
+    if (!robot_ns.empty()) {
+      sub_registered_scan_topic_ =
+          "/" + robot_ns + "/" +
+          this->get_parameter("topic_suffix.registered_scan").as_string();
+      sub_state_estimation_topic_ =
+          "/" + robot_ns + "/" +
+          this->get_parameter("topic_suffix.odometry").as_string();
+      sub_camera_image_topic_ =
+          "/" + robot_ns + "/" +
+          this->get_parameter("topic_suffix.camera_image").as_string();
+      camera_info_topic_ =
+          "/" + robot_ns + "/" +
+          this->get_parameter("topic_suffix.camera_info").as_string();
+      base_frame_ =
+          robot_ns + "/" + this->get_parameter("base_frame_suffix").as_string();
+      uses_topic_calib_ = true;
+      RCLCPP_INFO(this->get_logger(),
+                  "[robot_namespace=%s] registered_scan=%s state_estimation=%s "
+                  "camera=%s camera_info=%s base_frame=%s",
+                  robot_ns.c_str(), sub_registered_scan_topic_.c_str(),
+                  sub_state_estimation_topic_.c_str(),
+                  sub_camera_image_topic_.c_str(), camera_info_topic_.c_str(),
+                  base_frame_.c_str());
+    }
+  }
   this->get_parameter("sub_terrain_map_topic_", sub_terrain_map_topic_);
   this->get_parameter("sub_terrain_map_ext_topic_", sub_terrain_map_ext_topic_);
   this->get_parameter("sub_coverage_boundary_topic_",
@@ -327,11 +370,7 @@ void SensorCoveragePlanner3D::ReadParameters() {
   this->declare_parameter<std::string>("scene_graph_export.floor_id", scene_graph_cfg_.floor_id);
   this->declare_parameter<bool>("scene_graph_export.world_transform.enabled", scene_graph_cfg_.enabled_world_transform);
   this->declare_parameter<std::string>("scene_graph_export.world_transform.world_frame", scene_graph_cfg_.world_frame);
-  this->declare_parameter<std::string>("scene_graph_export.world_transform.livox_frame", scene_graph_cfg_.livox_frame);
-  this->declare_parameter<std::string>("scene_graph_export.world_transform.map_frame", scene_graph_cfg_.map_frame);
-  this->declare_parameter<std::string>("scene_graph_export.world_transform.sensor_frame", scene_graph_cfg_.sensor_frame);
-  this->declare_parameter<std::vector<double>>("scene_graph_export.world_transform.gravity_matrix",
-      std::vector<double>(scene_graph_cfg_.gravity_matrix.begin(), scene_graph_cfg_.gravity_matrix.end()));
+  this->declare_parameter<std::string>("scene_graph_export.world_transform.source_frame", scene_graph_cfg_.source_frame);
 
   this->get_parameter("scene_graph_export.enabled", scene_graph_cfg_.enabled);
   this->get_parameter("scene_graph_export.output_root", scene_graph_cfg_.output_root);
@@ -352,23 +391,7 @@ void SensorCoveragePlanner3D::ReadParameters() {
   this->get_parameter("scene_graph_export.floor_id", scene_graph_cfg_.floor_id);
   this->get_parameter("scene_graph_export.world_transform.enabled", scene_graph_cfg_.enabled_world_transform);
   this->get_parameter("scene_graph_export.world_transform.world_frame", scene_graph_cfg_.world_frame);
-  this->get_parameter("scene_graph_export.world_transform.livox_frame", scene_graph_cfg_.livox_frame);
-  this->get_parameter("scene_graph_export.world_transform.map_frame", scene_graph_cfg_.map_frame);
-  this->get_parameter("scene_graph_export.world_transform.sensor_frame", scene_graph_cfg_.sensor_frame);
-  {
-    std::vector<double> g;
-    this->get_parameter("scene_graph_export.world_transform.gravity_matrix", g);
-    if (g.size() == 9)
-    {
-      std::copy(g.begin(), g.end(), scene_graph_cfg_.gravity_matrix.begin());
-    }
-    else
-    {
-      RCLCPP_WARN(this->get_logger(),
-                  "[scene_graph] gravity_matrix needs 9 values, got %zu; using identity",
-                  g.size());
-    }
-  }
+  this->get_parameter("scene_graph_export.world_transform.source_frame", scene_graph_cfg_.source_frame);
 }
 
 // void PlannerData::Initialize(rclcpp::Node::SharedPtr node_)
@@ -685,9 +708,9 @@ bool SensorCoveragePlanner3D::initialize() {
       RCLCPP_INFO(this->get_logger(), "[scene_graph] snapshots -> %s",
                   scene_graph_run_dir_.c_str());
 
-      // Bridge arise's `map` to the bag's `world` via the shared LiDAR; compose
-      // world_T_map once and freeze it. The single buffer hears /tf, which
-      // carries both (disjoint) trees, so each in-tree lookup resolves.
+      // Express the (odom-frame) scene graph in a building-fixed `world` frame
+      // by looking up the single static world_T_source transform once and
+      // freezing it. The buffer hears /tf + /tf_static.
       if (scene_graph_cfg_.enabled_world_transform)
       {
         scene_graph_tf_buffer_ =
@@ -695,15 +718,13 @@ bool SensorCoveragePlanner3D::initialize() {
         scene_graph_tf_listener_ =
             std::make_shared<tf2_ros::TransformListener>(*scene_graph_tf_buffer_);
         RCLCPP_INFO(this->get_logger(),
-                    "[scene_graph] world transform on: %s <- %s (via %s / %s)",
+                    "[scene_graph] world transform on: %s <- %s",
                     scene_graph_cfg_.world_frame.c_str(),
-                    scene_graph_cfg_.map_frame.c_str(),
-                    scene_graph_cfg_.livox_frame.c_str(),
-                    scene_graph_cfg_.sensor_frame.c_str());
-        // Retry until both trees are flowing, then freeze and stop retrying.
+                    scene_graph_cfg_.source_frame.c_str());
+        // Retry until tf is flowing, then freeze and stop retrying.
         scene_graph_world_tf_timer_ = this->create_wall_timer(
             std::chrono::duration<double>(1.0), [this]() {
-              if (TryFreezeWorldFromMap())
+              if (TryFreezeWorldFromOdom())
               {
                 scene_graph_world_tf_timer_->cancel();
               }
@@ -849,6 +870,18 @@ bool SensorCoveragePlanner3D::initialize() {
       sub_camera_image_topic_, 5,
       std::bind(&SensorCoveragePlanner3D::CameraImageCallback, this,
                 std::placeholders::_1));
+  // Topic-driven camera calibration for room-view coverage (rectified
+  // camera_info P + base->camera-optical extrinsic from tf). Only when a robot
+  // namespace is configured; otherwise PointToCameraView uses the legacy model.
+  if (uses_topic_calib_) {
+    camera_tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
+    camera_tf_listener_ =
+        std::make_shared<tf2_ros::TransformListener>(*camera_tf_buffer_);
+    camera_info_sub_ = this->create_subscription<sensor_msgs::msg::CameraInfo>(
+        camera_info_topic_, 5,
+        std::bind(&SensorCoveragePlanner3D::CameraInfoCallback, this,
+                  std::placeholders::_1));
+  }
   RCLCPP_INFO(this->get_logger(), "Room-type query crops use camera topic: %s",
               sub_camera_image_topic_.c_str());
   room_type_sub_ = this->create_subscription<tare_planner::msg::RoomType>(
@@ -4087,42 +4120,94 @@ void SensorCoveragePlanner3D::UpdateViewpointRep(){
   covered_points_all_->Publish();
 }
 
+void SensorCoveragePlanner3D::CameraInfoCallback(
+    const sensor_msgs::msg::CameraInfo::SharedPtr msg)
+{
+  latest_camera_info_ = msg;  // only the (static) intrinsics are used
+}
+
+bool SensorCoveragePlanner3D::TryCalibrateCamera()
+{
+  if (camera_calibrated_) return true;
+  if (!latest_camera_info_ || !camera_tf_buffer_) return false;
+  const std::string optical_frame = latest_camera_info_->header.frame_id;
+  if (optical_frame.empty()) return false;
+  geometry_msgs::msg::TransformStamped tf;
+  try {
+    tf = camera_tf_buffer_->lookupTransform(optical_frame, base_frame_,
+                                            tf2::TimePointZero);
+  } catch (const tf2::TransformException &e) {
+    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                         "[room_view] waiting for tf %s -> %s: %s",
+                         base_frame_.c_str(), optical_frame.c_str(), e.what());
+    return false;
+  }
+  const auto &q = tf.transform.rotation;
+  const auto &t = tf.transform.translation;
+  tf2::Matrix3x3 m(tf2::Quaternion(q.x, q.y, q.z, q.w));
+  for (int r = 0; r < 3; ++r)
+    for (int c = 0; c < 3; ++c)
+      cam_R_l2c_(r, c) = static_cast<float>(m[r][c]);
+  cam_t_l2c_ = Eigen::Vector3f(static_cast<float>(t.x), static_cast<float>(t.y),
+                               static_cast<float>(t.z));
+  const auto &P = latest_camera_info_->p;  // 3x4 row-major projection matrix
+  cam_fx_ = static_cast<float>(P[0]);
+  cam_fy_ = static_cast<float>(P[5]);
+  cam_cx_ = static_cast<float>(P[2]);
+  cam_cy_ = static_cast<float>(P[6]);
+  cam_img_w_ = static_cast<int>(latest_camera_info_->width);
+  cam_img_h_ = static_cast<int>(latest_camera_info_->height);
+  camera_calibrated_ = true;
+  RCLCPP_INFO(this->get_logger(),
+              "[room_view] calibration from topics: optical=%s base=%s fx=%.2f "
+              "fy=%.2f cx=%.2f cy=%.2f %dx%d",
+              optical_frame.c_str(), base_frame_.c_str(), cam_fx_, cam_fy_,
+              cam_cx_, cam_cy_, cam_img_w_, cam_img_h_);
+  return true;
+}
+
 bool SensorCoveragePlanner3D::PointToCameraView(
     const Eigen::Vector3f &p_world, float lidarX, float lidarY, float lidarZ,
     float lidarRoll, float lidarPitch, float lidarYaw, float &depth_out) const
 {
-  // Go2-W (go2w_005 office_building bag) forward-facing pinhole camera. Mirrors
-  // semantic_mapping/cloud_image_fusion.py:scan2pixels_go2w_bag exactly. The old
-  // (-0.12,-0.075,0.265 / -90,0,-90 / 1920x640 equirectangular) numbers were the
-  // mecanum-platform Ricoh Theta 360 mount, NOT this camera. Keep these in sync
-  // with scan2pixels_go2w_bag, the source of truth.
-  //
-  // base -> camera-optical (projection direction, p_cam = R_l2c * p_base + t):
-  const float R00 = 0.000800f, R01 = -1.000000f, R02 = 0.000000f;
-  const float R10 = 0.000800f, R11 = 0.000000f, R12 = -1.000000f;
-  const float R20 = 0.999999f, R21 = 0.000800f, R22 = 0.000800f;
-  const float t0 = -0.000262f, t1 = 0.042738f, t2 = -0.327134f;
-  // Intrinsics from /go2w_005/camera/camera_info (K == P; raw/distorted image).
-  const float fx = 806.0578f, fy = 805.5558f, cx = 632.4743f, cy = 346.8795f;
-  const int imgW = 1280, imgH = 720;
-  // plumb_bob distortion [k1, k2, p1, p2, k3]; k1 is large, so it must be applied.
-  const float k1 = -0.3899f, k2 = 0.17881f, p1 = 0.0002f, p2 = -0.00068f,
-              k3 = -0.04416f;
+  // Select calibration: topic-driven (rectified camera_info P + base->camera
+  // extrinsic from tf, no distortion) once latched; else the legacy hardcoded
+  // raw model, used only when no robot_namespace / not yet calibrated.
+  float R00, R01, R02, R10, R11, R12, R20, R21, R22, t0, t1, t2;
+  float fx, fy, cx, cy;
+  int imgW, imgH;
+  bool apply_dist;
+  float k1 = 0.f, k2 = 0.f, p1 = 0.f, p2 = 0.f, k3 = 0.f;
+  if (camera_calibrated_) {
+    R00 = cam_R_l2c_(0, 0); R01 = cam_R_l2c_(0, 1); R02 = cam_R_l2c_(0, 2);
+    R10 = cam_R_l2c_(1, 0); R11 = cam_R_l2c_(1, 1); R12 = cam_R_l2c_(1, 2);
+    R20 = cam_R_l2c_(2, 0); R21 = cam_R_l2c_(2, 1); R22 = cam_R_l2c_(2, 2);
+    t0 = cam_t_l2c_(0); t1 = cam_t_l2c_(1); t2 = cam_t_l2c_(2);
+    fx = cam_fx_; fy = cam_fy_; cx = cam_cx_; cy = cam_cy_;
+    imgW = cam_img_w_; imgH = cam_img_h_;
+    apply_dist = false;  // rectified image: no distortion
+  } else {
+    // Legacy hardcoded go2w raw model; no-namespace / pre-calibration fallback.
+    R00 = 0.000800f; R01 = -1.000000f; R02 = 0.000000f;
+    R10 = 0.000800f; R11 = 0.000000f; R12 = -1.000000f;
+    R20 = 0.999999f; R21 = 0.000800f; R22 = 0.000800f;
+    t0 = -0.000262f; t1 = 0.042738f; t2 = -0.327134f;
+    fx = 806.0578f; fy = 805.5558f; cx = 632.4743f; cy = 346.8795f;
+    imgW = 1280; imgH = 720;
+    apply_dist = true;
+    k1 = -0.3899f; k2 = 0.17881f; p1 = 0.0002f; p2 = -0.00068f; k3 = -0.04416f;
+  }
 
-  // World -> body (go2w_005/base): undo the LiDAR/state-estimation pose. This is
-  // the p_base that scan2pixels_go2w_bag receives.
+  // World -> body (the robot's base frame): undo the state-estimation pose.
   float x1 = p_world.x() - lidarX;
   float y1 = p_world.y() - lidarY;
   float z1 = p_world.z() - lidarZ;
-
   float x2 = x1 * cos(lidarYaw) + y1 * sin(lidarYaw);
   float y2 = -x1 * sin(lidarYaw) + y1 * cos(lidarYaw);
   float z2 = z1;
-
   float x3 = x2 * cos(lidarPitch) - z2 * sin(lidarPitch);
   float y3 = y2;
   float z3 = x2 * sin(lidarPitch) + z2 * cos(lidarPitch);
-
   float xb = x3;
   float yb = y3 * cos(lidarRoll) + z3 * sin(lidarRoll);
   float zb = -y3 * sin(lidarRoll) + z3 * cos(lidarRoll);
@@ -4131,26 +4216,23 @@ bool SensorCoveragePlanner3D::PointToCameraView(
   float xc = R00 * xb + R01 * yb + R02 * zb + t0;
   float yc = R10 * xb + R11 * yb + R12 * zb + t1;
   float zc = R20 * xb + R21 * yb + R22 * zb + t2;
+  if (zc <= 1e-3f) return false;  // behind the camera
 
-  if (zc <= 1e-3f)  // behind the camera
-  {
-    return false;
-  }
-
-  // Pinhole projection with plumb_bob (radtan) distortion.
   float xn = xc / zc;
   float yn = yc / zc;
-  float r2 = xn * xn + yn * yn;
-  float radial = 1.0f + k1 * r2 + k2 * r2 * r2 + k3 * r2 * r2 * r2;
-  float x_d = xn * radial + 2.0f * p1 * xn * yn + p2 * (r2 + 2.0f * xn * xn);
-  float y_d = yn * radial + p1 * (r2 + 2.0f * yn * yn) + 2.0f * p2 * xn * yn;
+  float x_d, y_d;
+  if (apply_dist) {
+    float r2 = xn * xn + yn * yn;
+    float radial = 1.0f + k1 * r2 + k2 * r2 * r2 + k3 * r2 * r2 * r2;
+    x_d = xn * radial + 2.0f * p1 * xn * yn + p2 * (r2 + 2.0f * xn * xn);
+    y_d = yn * radial + p1 * (r2 + 2.0f * yn * yn) + 2.0f * p2 * xn * yn;
+  } else {
+    x_d = xn;
+    y_d = yn;
+  }
   float u = fx * x_d + cx;
   float v = fy * y_d + cy;
-
-  if (u < 0.0f || u >= imgW || v < 0.0f || v >= imgH)  // out of frame
-  {
-    return false;
-  }
+  if (u < 0.0f || u >= imgW || v < 0.0f || v >= imgH) return false;  // out of frame
   depth_out = zc;  // forward distance along the optical axis
   return true;
 }
@@ -4164,6 +4246,15 @@ void SensorCoveragePlanner3D::UpdateRoomViews()
   if (camera_image_.empty() || room_mask_.empty() || !registered_cloud_ ||
       registered_cloud_->cloud_->empty())
   {
+    return;
+  }
+
+  // Gate until topic-driven camera calibration (camera_info + tf) is ready, so
+  // PointToCameraView never runs with a mismatched (raw vs rect) model.
+  if (uses_topic_calib_ && !TryCalibrateCamera())
+  {
+    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                         "[room_view] waiting for camera_info + tf calibration...");
     return;
   }
 
@@ -5140,11 +5231,11 @@ void SensorCoveragePlanner3D::to_json(json &j, const representation_ns::Represen
   RCLCPP_INFO(this->get_logger(), "Representation JSON:\n%s", json_str.c_str());
 }
 
-bool SensorCoveragePlanner3D::TryFreezeWorldFromMap()
+bool SensorCoveragePlanner3D::TryFreezeWorldFromOdom()
 {
   if (!scene_graph_cfg_.enabled_world_transform)
   {
-    return true;  // disabled: identity, export stays in the map frame
+    return true;  // disabled: identity, export stays in the odom frame
   }
   if (!scene_graph_tf_buffer_)
   {
@@ -5152,50 +5243,34 @@ bool SensorCoveragePlanner3D::TryFreezeWorldFromMap()
   }
   try
   {
-    // Two lookups, each within its own (disjoint) tree; compose in code. The
-    // shared physical LiDAR is `livox_frame` in the bag tree and `sensor` in
-    // arise's tree, related by the gravity rotation G = livox_T_sensor.
-    const geometry_msgs::msg::TransformStamped world_T_livox_msg =
+    // Single static transform world_T_source (= world<-odom): the scene graph is
+    // built entirely in odom, so this is the only transform needed to express it
+    // in the building-fixed world frame. No gravity bridge, no per-run constant.
+    const geometry_msgs::msg::TransformStamped world_T_source_msg =
         scene_graph_tf_buffer_->lookupTransform(
-            scene_graph_cfg_.world_frame, scene_graph_cfg_.livox_frame,
-            tf2::TimePointZero);
-    const geometry_msgs::msg::TransformStamped map_T_sensor_msg =
-        scene_graph_tf_buffer_->lookupTransform(
-            scene_graph_cfg_.map_frame, scene_graph_cfg_.sensor_frame,
+            scene_graph_cfg_.world_frame, scene_graph_cfg_.source_frame,
             tf2::TimePointZero);
 
-    const auto to_iso = [](const geometry_msgs::msg::TransformStamped& m) {
-      Eigen::Isometry3d iso = Eigen::Isometry3d::Identity();
-      const auto& t = m.transform.translation;
-      const auto& r = m.transform.rotation;
-      iso.translation() = Eigen::Vector3d(t.x, t.y, t.z);
-      iso.linear() =
-          Eigen::Quaterniond(r.w, r.x, r.y, r.z).normalized().toRotationMatrix();
-      return iso;
-    };
-    const Eigen::Isometry3d world_T_livox = to_iso(world_T_livox_msg);
-    const Eigen::Isometry3d map_T_sensor = to_iso(map_T_sensor_msg);
-
-    // G = livox_T_sensor (gravity rotation), row-major 3x3 from config.
-    const auto& gm = scene_graph_cfg_.gravity_matrix;
-    Eigen::Matrix3d g_rot;
-    g_rot << gm[0], gm[1], gm[2], gm[3], gm[4], gm[5], gm[6], gm[7], gm[8];
-    Eigen::Isometry3d G = Eigen::Isometry3d::Identity();
-    G.linear() = g_rot;
-
-    scene_graph_world_from_map_ = world_T_livox * G * map_T_sensor.inverse();
+    const auto& t = world_T_source_msg.transform.translation;
+    const auto& r = world_T_source_msg.transform.rotation;
+    scene_graph_world_from_map_ = Eigen::Isometry3d::Identity();
+    scene_graph_world_from_map_.translation() = Eigen::Vector3d(t.x, t.y, t.z);
+    scene_graph_world_from_map_.linear() =
+        Eigen::Quaterniond(r.w, r.x, r.y, r.z).normalized().toRotationMatrix();
     scene_graph_world_from_map_valid_ = true;
 
     const Eigen::Vector3d trans = scene_graph_world_from_map_.translation();
     RCLCPP_INFO(this->get_logger(),
-                "[scene_graph] world_T_map frozen: t=(%.3f, %.3f, %.3f)",
-                trans.x(), trans.y(), trans.z());
+                "[scene_graph] world<-odom frozen (%s <- %s): t=(%.3f, %.3f, %.3f)",
+                scene_graph_cfg_.world_frame.c_str(),
+                scene_graph_cfg_.source_frame.c_str(), trans.x(), trans.y(),
+                trans.z());
     return true;
   }
   catch (const tf2::TransformException& ex)
   {
     RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-                         "[scene_graph] world_T_map lookup pending (%s)",
+                         "[scene_graph] world<-odom lookup pending (%s)",
                          ex.what());
     return false;
   }
@@ -5208,24 +5283,34 @@ void SensorCoveragePlanner3D::SaveSceneGraphSnapshot(const std::string &reason)
     return;
   }
 
-  // world_T_map is composed once and frozen (TryFreezeWorldFromMap). If it isn't
-  // latched yet (e.g. an early snapshot before TF is flowing), try now; on
-  // failure fall back to identity and write the snapshot in the map frame.
+  // world_T_odom is looked up once and frozen (TryFreezeWorldFromOdom). If it
+  // isn't latched yet (e.g. an early snapshot before TF is flowing), try now; on
+  // failure fall back to identity and write the snapshot in the odom frame.
   if (scene_graph_cfg_.enabled_world_transform && !scene_graph_world_from_map_valid_)
   {
-    if (!TryFreezeWorldFromMap())
+    if (!TryFreezeWorldFromOdom())
     {
       RCLCPP_WARN(this->get_logger(),
-                  "[scene_graph] world_T_map not available yet; writing %s "
-                  "snapshot in map frame",
+                  "[scene_graph] world<-odom not available yet; writing %s "
+                  "snapshot in odom frame",
                   reason.c_str());
     }
   }
+
+  // Identity unless a world transform was actually latched (so the fallback
+  // stays in odom); the metadata frame below is set to match.
+  const bool world_applied =
+      scene_graph_cfg_.enabled_world_transform && scene_graph_world_from_map_valid_;
 
   json snapshot = scene_graph_exporter_->Build(
       representation_->GetRoomNodesMap(), representation_->GetObjectNodeRepMap(),
       navgraph_->GetNodes(), navgraph_->GetEdges(), *door_cloud_,
       scene_graph_world_from_map_);
+
+  // The exporter writes config_.frame as a default; set the true coordinate
+  // frame based on whether the world transform was actually applied.
+  snapshot["layout"]["metadata"]["frame"] =
+      world_applied ? scene_graph_cfg_.world_frame : scene_graph_cfg_.frame;
 
   // "final" gets a stable name; everything else is a numbered, time-stamped file.
   std::string filename;

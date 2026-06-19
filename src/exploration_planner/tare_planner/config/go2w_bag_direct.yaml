@@ -1,3 +1,28 @@
+# Shared room-grid definition for the top-down room map. Applied to every node
+# (tare_planner_node + room_segmentation) via the /** wildcard so the two cannot
+# drift — they were previously hand-duplicated and HAD drifted (room_z 20 vs 80).
+# The room mask exchanged between the nodes is 2D (x,y), so room_x/room_y/
+# room_resolution MUST match for world-frame alignment. room_z only sizes the 3D
+# voxel grid height: 80 (= 8 m at 0.1 m/voxel) spans a multifloor building; the
+# planner's room ops are purely 2D so its old room_z=20 was inconsequential there.
+/**:
+  ros__parameters:
+    # Single per-platform switch: all robots run the same nav stack, so only the
+    # namespace differs (go2w_016, go2_003, ...). Each consumer composes its
+    # robot-source input topics as /<robot_namespace>/<suffix>; internal stack
+    # topics stay constant. Empty => fall back to constant names (old behavior).
+    robot_namespace: go2w_016
+    # Image contract = rectified (Phase 4): planner room-view crops use
+    # image_rect_color; PointToCameraView projects with the rectified camera_info
+    # P matrix (no distortion) + base->camera extrinsic from tf.
+    topic_suffix.camera_image: camera/image_rect_color
+    topic_suffix.camera_info: camera_rect/camera_info
+    base_frame_suffix: base
+    room_resolution: 0.1
+    room_x: 3000
+    room_y: 3000
+    room_z: 80
+
 tare_planner_node:
   ros__parameters:
     sub_start_exploration_topic_ : /start_exploration
@@ -45,7 +70,7 @@ tare_planner_node:
     kUseFrontier : true
     kFrontierClusterTolerance : 0.5
     kFrontierClusterMinSize : 5
-    kUseCoverageBoundaryOnFrontier : false # 没有合适的覆盖边界
+    kUseCoverageBoundaryOnFrontier : false # no suitable coverage boundary available
     kUseCoverageBoundaryOnObjectSurface : false
 
     # Rolling occupancy grid
@@ -142,11 +167,8 @@ tare_planner_node:
     rep_threshold_: 0.75
     kRepSensorRange : 5.0
 
-    # remeber to change in both room_segmentation and tare_planner
-    room_resolution: 0.1
-    room_x: 3000
-    room_y: 3000
-    room_z: 20
+    # room_resolution / room_x / room_y / room_z are defined once in the shared
+    # /** block at the top of this file.
 
     kDoorCollisionCheckRadius : 0.35
     kDoorCollisionCheckPointNumThr : 1
@@ -158,11 +180,8 @@ room_segmentation:
     exploredAreaVoxelSize: 0.1
     dilation_iteration: 3 # nsh: 3, gates: 2
 
-    # remeber to change in both room_segmentation and tare_planner
-    room_resolution: 0.1
-    room_x: 3000
-    room_y: 3000
-    room_z: 80
+    # room_resolution / room_x / room_y / room_z come from the shared /** block
+    # at the top of this file.
 
     outward_distance_0: 0.5
     distance_threshold: 2.0

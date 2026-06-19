@@ -71,27 +71,27 @@ pose is the origin `(0,0,0)`. The frame is **gravity-aligned**. There is no
 positions, door pixels, and keypose-graph nodes are all directly comparable in
 this one frame.
 
-A separate wrinkle exists only at **export** time: a recorded bag may publish its
-own `world` TF tree that is **disjoint** from arise's `map` tree. The exporter can
-optionally bridge them via the one physical object both trees see — the LiDAR —
-composing `world_T_map = world_T_livox · G · (map_T_sensor)⁻¹`, where `G` is a
-per-run **gravity rotation** (`R_GRAVITY`). This is **frozen once** and applied to
-every emitted coordinate. If you don't need world-frame output, leave it off and
-the JSON stays in the `map` frame. Details + caveats:
+A separate wrinkle exists only at **export** time: by default coordinates are
+emitted in the bag's **odom** frame. To express them in a building-fixed `world`
+frame instead, the exporter applies a **single static** `world_T_odom` transform
+looked up once from tf (`source_frame` defaults to `map` = `kWorldFrameID`). There
+is **no gravity bridge and no per-run constant** — the standardized direct-LIO
+stack publishes one coherent TF tree, so a single lookup suffices. If you don't
+need world-frame output, leave it off and the JSON stays in `odom`. Details +
+caveats:
 [`scene_graph_exporter/README.md`](src/exploration_planner/tare_planner/src/scene_graph_exporter/README.md).
 
-> ⚠️ `G`/`R_GRAVITY` is a **brittle per-run constant** that must match the value
-> arise used for *this* bag's IMU init. Wrong value ⇒ tilted/displaced world
-> coordinates. For the bag-direct setup (no arise SLAM) the tree is already a
-> single gravity-aligned tree and `G` is identity.
+> ⚠️ The single export-time transform is exact **only because `world ← odom` is
+> static** per bag (no online global relocalization mid-run). Many bags have no
+> `world` frame at all — there the export falls back to `odom`, and
+> `layout.metadata.frame` is set to `odom` to match.
 
-In the bag-direct setup, `bag_slam_bridge` decides which bag frame `map` is
-pinned to via its `anchor_frame` parameter: `world` (default,
-building-anchored — the bag's static `world←odom` is composed onto every LIO
-pose) or `odom` (start-anchored: origin at the robot start, +x = its initial
-heading). The scene graph and the exported JSON inherit that choice verbatim;
-record it by setting `scene_graph_export.frame` to match, which is written into
-`layout.metadata.frame`.
+In the bag-direct setup the bag's own LIO feeds `/state_estimation` +
+`/registered_scan` directly, and a static identity `<ns>/odom → map` pins the
+stack's `map` frame to the bag odom. The scene graph is therefore in odom; the
+exporter sets `layout.metadata.frame` automatically to `odom` (or `world`, when
+the optional `world_transform` is enabled and its `world ← odom` lookup
+succeeds).
 
 ---
 
@@ -233,7 +233,7 @@ state to `nlohmann::json`. Shape:
   stalls), and **manual** (publish the keyword, default `"ssg"`, on
   `/keyboard_input`).
 - Config: `config/scene_graph_export.yaml` (identifiers, cadence, world
-  transform). Bag-direct variant: `config/scene_graph_export_bag_direct.yaml`.
+  transform). Default world transform is off (coordinates stay in odom).
 
 Full schema, build logic, triggers, and gotchas:
 [`scene_graph_exporter/README.md`](src/exploration_planner/tare_planner/src/scene_graph_exporter/README.md).

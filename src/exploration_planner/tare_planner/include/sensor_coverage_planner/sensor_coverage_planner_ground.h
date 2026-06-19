@@ -26,6 +26,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/joy.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
+#include <sensor_msgs/msg/camera_info.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/empty.hpp>
 #include <std_msgs/msg/float32.hpp>
@@ -481,7 +482,7 @@ private:
   // GADM-style scene-graph snapshot export
   void SaveSceneGraphSnapshot(const std::string &reason);
   void SceneGraphWatchdogCallback();
-  bool TryFreezeWorldFromMap();  // compose & latch world_T_map once
+  bool TryFreezeWorldFromOdom();  // look up & latch world_T_odom once
 
   // ========== VLM-Related Data Members ==========
   // Representation core
@@ -525,6 +526,26 @@ private:
   Eigen::Isometry3d scene_graph_world_from_map_ = Eigen::Isometry3d::Identity();
   bool scene_graph_world_from_map_valid_ = false;
   rclcpp::TimerBase::SharedPtr scene_graph_world_tf_timer_;
+
+  // --- Camera calibration for room-view coverage (PointToCameraView) ---
+  // Mirror of semantic_mapping's topic-driven calibration: intrinsics from the
+  // rectified camera_info (P matrix, no distortion) + base->camera-optical
+  // extrinsic from tf. Falls back to the legacy hardcoded raw model when not
+  // calibrated (e.g. empty robot_namespace).
+  bool uses_topic_calib_ = false;
+  bool camera_calibrated_ = false;
+  std::string camera_info_topic_;
+  std::string base_frame_;  // <ns>/base, source frame for the camera tf lookup
+  rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_sub_;
+  sensor_msgs::msg::CameraInfo::SharedPtr latest_camera_info_;
+  std::shared_ptr<tf2_ros::Buffer> camera_tf_buffer_;
+  std::shared_ptr<tf2_ros::TransformListener> camera_tf_listener_;
+  Eigen::Matrix3f cam_R_l2c_ = Eigen::Matrix3f::Identity();
+  Eigen::Vector3f cam_t_l2c_ = Eigen::Vector3f::Zero();
+  float cam_fx_ = 0.f, cam_fy_ = 0.f, cam_cx_ = 0.f, cam_cy_ = 0.f;
+  int cam_img_w_ = 0, cam_img_h_ = 0;
+  void CameraInfoCallback(const sensor_msgs::msg::CameraInfo::SharedPtr msg);
+  bool TryCalibrateCamera();
 
   // Viewpoint representation parameters
   double rep_threshold_;

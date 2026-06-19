@@ -18,21 +18,16 @@ tare_planner_node:
     scene_graph_export.manual_save_keyword: "ssg"       # /keyboard_input trigger for on-demand dump
 
     # --- world-frame transform ---
-    # The scene graph lives in arise's `map` frame, a disjoint TF tree from the
-    # bag's `world`. We bridge them via the shared physical LiDAR (frozen once):
-    #   world_T_map = world_T_livox * G * (map_T_sensor)^-1
-    # tf2 strips a leading '/', so give frame names without one. On lookup
-    # failure the snapshot is still written, untransformed (map frame).
-    scene_graph_export.world_transform.enabled: true
+    # The scene graph is built in odom. Set enabled: true to also express it in a
+    # building-fixed `world` frame via the single static world_T_source
+    # (= world<-odom) transform, looked up once from tf at export time. On lookup
+    # failure the snapshot is still written, untransformed (odom frame). Default
+    # off: enable per-bag only when a static world<-odom transform exists.
+    scene_graph_export.world_transform.enabled: false
     scene_graph_export.world_transform.world_frame: "world"
-    scene_graph_export.world_transform.livox_frame: "go2w_005/livox_frame"
-    scene_graph_export.world_transform.map_frame: "map"
-    scene_graph_export.world_transform.sensor_frame: "sensor"
-    # G = arise's per-run imu_laser_R_Gravity (row-major 3x3). MUST match
-    # cloud_image_fusion.py:411 and arise's stdout for THIS bag; identity
-    # disables the rotation. Re-read it for any new bag / IMU init / remount.
-    scene_graph_export.world_transform.gravity_matrix:
-      [0.978664, 0.0, -0.205469, 0.00283797, 0.999905, 0.0135174, 0.205449, -0.0138121, 0.97857]
+    # Frame the scene-graph coordinates are in (kWorldFrameID, identity-pinned to
+    # the bag odom). Looked up as world_frame <- source_frame.
+    scene_graph_export.world_transform.source_frame: "map"
 
     # --- single zone bucket for all rooms ---
     scene_graph_export.zone: "all"
@@ -46,6 +41,9 @@ tare_planner_node:
 
     # --- layout.metadata ---
     scene_graph_export.units: "meters"
+    # Frame label when not applying the world transform (the planner sets it to
+    # world_frame at snapshot time if the transform was actually applied).
+    scene_graph_export.frame: "odom"
     scene_graph_export.building: "HomeBuilding"
     scene_graph_export.floor_level: 1
     scene_graph_export.floor_id: "floor_04"

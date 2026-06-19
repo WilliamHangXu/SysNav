@@ -1,12 +1,22 @@
-# go2w bag replayed *without* arise_slam. For the go2w_016 multifloor_test_slam
-# bag the registered scan + odometry come straight from the bag's own LIO topics
-# (/go2w_016/cloud_registered + /go2w_016/lio/odometry, remapped at bag play),
-# so bag_slam_bridge is not needed. Body frame is go2w_016/base; cloud_image_fusion
-# uses platform 'go2w_bag' (base->camera-optical extrinsic + intrinsics + distortion
-# are byte-identical to go2w_005, verified from this bag's /tf_static, R_GRAVITY=I).
-semantic_mapping_node:
+# go2w bag replayed *without* arise_slam. The registered scan + odometry come
+# straight from the bag's own LIO topics (remapped at bag play), so bag_slam_bridge
+# is not needed. cloud_image_fusion uses platform 'go2w_bag' (base->camera-optical
+# extrinsic + intrinsics + distortion, R_GRAVITY=I).
+#
+# Shared params live under the /** wildcard so semantic_mapping_node and
+# detection_node cannot drift; only the node-specific image_topic stays per-node.
+/**:
   ros__parameters:
+    # Single per-platform switch (see go2w_bag_direct.yaml). Composes the camera
+    # (and cloud/odom) source topics as /<robot_namespace>/<suffix>.
+    robot_namespace: go2w_016
     platform: go2w_bag
+    # Image contract = rectified: the detector consumes image_rect_color and the
+    # cloud projection uses the rectified camera_info P matrix (no distortion) +
+    # the base->camera extrinsic from tf. See cloud_image_fusion.set_calibration().
+    topic_suffix.camera_image: camera/image_rect_color
+    topic_suffix.camera_info: camera_rect/camera_info
+    base_frame_suffix: base
     detection_linear_state_time_bias: 0.0
     detection_angular_state_time_bias: 0.0
     image_processing_interval: 0.5
@@ -19,14 +29,4 @@ semantic_mapping_node:
 
 detection_node:
   ros__parameters:
-    platform: go2w_bag
-    detection_linear_state_time_bias: 0.0
-    detection_angular_state_time_bias: 0.0
-    image_processing_interval: 0.5
-    visualize: false
-    vis_interval: 0.5
-    annotate_image: true
-    grounding_score_thresh: 0.35
-    target_object: refrigerator
-    object_file: src/semantic_mapping/semantic_mapping/config/objects_office.yaml
     image_topic: /go2w_016/camera/image_raw
