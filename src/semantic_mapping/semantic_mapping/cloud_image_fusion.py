@@ -311,10 +311,10 @@ def scan2pixels_go2w(laserCloud):
     return point_pixel_idx
 
 def scan2pixels_go2w_bag(laserCloud):
-    # go2w_005 office_building bag, fed *directly* from the bag's own LIO (no
-    # arise_slam). The cloud reaching generate_seg_cloud is in the body frame of
-    # /state_estimation, i.e. go2w_005/base (R_GRAVITY = identity for this
-    # platform), so the projection extrinsic is base -> camera-optical.
+    # Direct LIO (no arise_slam). The cloud reaching generate_seg_cloud is in the
+    # body frame of /state_estimation (the robot base), so the projection
+    # extrinsic is base -> camera-optical. NOTE: superseded by the topic-driven
+    # _scan2pixels_calibrated (camera_info + tf); kept for reference only.
     #
     # Extrinsic from the bag's /tf_static chain (go2w_005):
     #   base -> front_cam:    t=(0.3271, 0, 0.0430), q=identity
@@ -559,25 +559,10 @@ class CloudImageFusion:
         return point_pixel_idx
 
     def generate_seg_cloud(self, cloud: np.ndarray, masks, labels, confidences, R_b2w, t_b2w, image_src=None):
-        # Project the cloud points to image pixels
-
-        # arise_slam pre-rotates every input point by imu_laser_R_Gravity at
-        # feature_extraction (see featureExtraction.cpp:1585-1589), so cloud_body
-        # lands in arise_slam's gravity-aligned frame, not the bag's livox_frame.
-        # Undo it: cloud_lidar = cloud_body @ R_gravity.T (column-form rotation
-        # by R_gravity). Matrix read from arise_slam stdout on this bag.
-        # Lift back to world reuses R_GRAVITY (inverse of R_GRAVITY.T) to undo
-        # this rotation before applying R_b2w, which is the pose of arise's
-        # gravity-aligned body frame in world.
-        R_GRAVITY = np.eye(3)
-        if self.platform == 'go2w':
-            R_GRAVITY = np.array([
-                [ 0.978664,    0.0,         -0.205469 ],
-                [ 0.00283797,  0.999905,     0.0135174],
-                [ 0.205449,   -0.0138121,    0.97857  ],
-            ])
-            cloud = cloud @ R_GRAVITY.T
-
+        # Project the cloud points to image pixels. `cloud` is in the body frame
+        # of /state_estimation and is lifted to world via R_b2w/t_b2w below. No
+        # gravity rotation: the stack is standardized on direct LIO, so the body
+        # frame is already the bag's frame.
         point_pixel_idx = self.scan2pixels(cloud) # [N, 3] array of pixel coordinates (x, y, depth)
 
         if masks is None or len(masks) == 0:
@@ -607,7 +592,7 @@ class CloudImageFusion:
             obj_cloud = cloud[cloud_mask]
 
             if obj_depth.shape[0] <=1:
-                obj_cloud_world = obj_cloud[:, :3] @ R_GRAVITY @ R_b2w.T + t_b2w
+                obj_cloud_world = obj_cloud[:, :3] @ R_b2w.T + t_b2w
                 obj_cloud_world_list.append(obj_cloud_world)
                 continue
             # 错位相减obj_depth
@@ -671,7 +656,7 @@ class CloudImageFusion:
                 all_obj_cloud_mask_ori = np.logical_or(all_obj_cloud_mask_ori, cloud_mask)
                 # obj_cloud_list.append(obj_cloud)
         
-            obj_cloud_world = obj_cloud[:, :3] @ R_GRAVITY @ R_b2w.T + t_b2w
+            obj_cloud_world = obj_cloud[:, :3] @ R_b2w.T + t_b2w
             obj_cloud_world_list.append(obj_cloud_world)
 
         # if image_src is not None:

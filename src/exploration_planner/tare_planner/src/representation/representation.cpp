@@ -401,7 +401,9 @@ namespace representation_ns {
             return;
         }
         if (room_nodes_map_.find(new_room_id) == room_nodes_map_.end()) {
-            RCLCPP_ERROR(nh_->get_logger(), "Room ID %d is out of bounds for room_nodes_", new_room_id);
+            if (new_room_id != 0) {
+                RCLCPP_ERROR(nh_->get_logger(), "Room ID %d is out of bounds for room_nodes_", new_room_id);
+            }
             return;
         }
         int old_room_id = viewpoint_reps_[viewpoint_id].GetRoomId();

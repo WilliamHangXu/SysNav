@@ -115,7 +115,7 @@ Locks (`cloud_cbk_lock`, `odom_cbk_lock`, `rgb_cbk_lock`, `detection_result_lock
 
 ## `CloudImageFusion` – mask → 3D cloud
 
-`CloudImageFusion(platform)` picks a `scan2pixels_<platform>` function. Supported: `wheelchair`, `mecanum`, `mecanum_bagfile`, `mecanum_sim`, `scannet`, `diablo`, `go2w`. Each one encodes the platform‑specific LiDAR‑to‑camera extrinsics + camera intrinsics (panoramic or pinhole). The Go2‑W path additionally applies a gravity rotation `R_GRAVITY` because `arise_slam` pre‑rotates points at feature extraction.
+`CloudImageFusion(platform)` picks a `scan2pixels_<platform>` function. Supported: `wheelchair`, `mecanum`, `mecanum_bagfile`, `mecanum_sim`, `scannet`, `diablo`, `go2w`. Each one encodes the platform‑specific LiDAR‑to‑camera extrinsics + camera intrinsics (panoramic or pinhole). The `go2w_bag` path (direct LIO) sources its calibration from `camera_info` + tf at runtime and applies no gravity rotation.
 
 `generate_seg_cloud(cloud, masks, labels, confidences, R_b2w, t_b2w, image_src)`:
 
@@ -123,7 +123,7 @@ Locks (`cloud_cbk_lock`, `odom_cbk_lock`, `rgb_cbk_lock`, `detection_result_lock
 2. Drop points outside the image.
 3. For each detection mask, gather the cloud points whose projection falls inside the mask.
 4. **Depth‑jump filter** (anti‑bleeding through the mask onto a wall behind): the cloud is depth‑sorted; if the largest consecutive depth gap exceeds 0.3 m, keep only the near segment before the jump. This is the main mechanism preventing background points from being lifted as part of the object.
-5. Transform survivors to world frame: `pts @ R_GRAVITY @ R_b2w.T + t_b2w`.
+5. Transform survivors to world frame: `pts @ R_b2w.T + t_b2w`.
 6. Return the per‑object world‑frame point lists.
 
 ---

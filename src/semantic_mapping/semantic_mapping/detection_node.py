@@ -137,7 +137,7 @@ class DetectNode(Node):
 
         # 如果没有ID信息，直接返回空结果
         if boxes.id is None:
-            self.log_info("No track IDs found in the results.")
+            # self.log_info("No track IDs found in the results.")
             return {
                 "bboxes": np.empty((0, 4), dtype=float),
                 "labels": np.array([], dtype=str),
