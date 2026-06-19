@@ -4,12 +4,13 @@
 # extrinsic + intrinsics + distortion, R_GRAVITY=I).
 #
 # Shared params live under the /** wildcard so semantic_mapping_node and
-# detection_node cannot drift; only the node-specific image_topic stays per-node.
+# detection_node cannot drift. The camera/cloud/odom topic names are composed
+# from robot_namespace (robot.yaml) + the topic_suffix.* below.
 /**:
   ros__parameters:
-    # Single per-platform switch (see go2w_bag_direct.yaml). Composes the camera
-    # (and cloud/odom) source topics as /<robot_namespace>/<suffix>.
-    robot_namespace: go2w_016
+    # robot_namespace lives in the per-robot robot.yaml (loaded by this launch),
+    # so it is NOT duplicated here. It composes the camera/cloud/odom source
+    # topics as /<robot_namespace>/<suffix>.
     platform: go2w_bag
     # Image contract = rectified: the detector consumes image_rect_color and the
     # cloud projection uses the rectified camera_info P matrix (no distortion) +
@@ -26,7 +27,3 @@
     grounding_score_thresh: 0.35
     target_object: refrigerator
     object_file: src/semantic_mapping/semantic_mapping/config/objects_office.yaml
-
-detection_node:
-  ros__parameters:
-    image_topic: /go2w_016/camera/image_raw

@@ -1,0 +1,14 @@
+# Per-robot / per-platform switch. All robots run the same nav stack, so only
+# the namespace differs between platforms (go2w_016, go2_003, ...). This is the
+# ONE file to edit when moving to a different robot or bag; the scenario tuning
+# (go2w_bag_direct.yaml) and semantic config (mapping_go2w_bag.yaml) are reused
+# unchanged across robots.
+#
+# Every scene-graph node composes its robot-source input topics as
+# /<robot_namespace>/<suffix> and its tf frames as <robot_namespace>/<frame>;
+# internal stack topics stay constant. Loaded for the planner / room_segmentation
+# via the bringup launch's robot_config arg, and directly by the go2w
+# semantic_mapping / detection launches.
+/**:
+  ros__parameters:
+    robot_namespace: go2w_016

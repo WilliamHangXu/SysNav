@@ -7,11 +7,8 @@
 # planner's room ops are purely 2D so its old room_z=20 was inconsequential there.
 /**:
   ros__parameters:
-    # Single per-platform switch: all robots run the same nav stack, so only the
-    # namespace differs (go2w_016, go2_003, ...). Each consumer composes its
-    # robot-source input topics as /<robot_namespace>/<suffix>; internal stack
-    # topics stay constant. Empty => fall back to constant names (old behavior).
-    robot_namespace: go2w_016
+    # robot_namespace lives in the per-robot robot.yaml (loaded via the bringup
+    # launch's robot_config arg), so it is NOT duplicated here.
     # Image contract = rectified (Phase 4): planner room-view crops use
     # image_rect_color; PointToCameraView projects with the rectified camera_info
     # P matrix (no distortion) + base->camera extrinsic from tf.
@@ -28,13 +25,9 @@ tare_planner_node:
     sub_start_exploration_topic_ : /start_exploration
     sub_terrain_map_topic_ : /terrain_map
     sub_terrain_map_ext_topic_ : /terrain_map_ext
-    # Fed directly from the bag's own LIO via bag_slam_bridge (no arise_slam).
-    sub_state_estimation_topic_ : /state_estimation
-    sub_registered_scan_topic_ : /registered_scan
-    # Front camera used for room-type query crops (same image the detector uses).
-    # The legacy default /camera/image is the Ricoh Theta panorama; this robot
-    # has only a front-facing camera. Verify with `ros2 topic list`.
-    sub_camera_image_topic_ : /go2w_016/camera/image_raw
+    # Robot-source inputs (state estimation, registered scan, camera image) are
+    # composed from robot_namespace (robot.yaml) + the topic_suffix.* in the /**
+    # block above, so they are NOT set here. The sub_*/pub_* below are internal.
     sub_coverage_boundary_topic_ : /navigation_boundary
     sub_viewpoint_boundary_topic_ : /navigation_boundary
     sub_viewpoint_room_boundary_topic_ : /room_boundary

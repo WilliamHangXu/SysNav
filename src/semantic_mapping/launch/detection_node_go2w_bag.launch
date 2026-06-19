@@ -13,6 +13,9 @@ def launch_detection_node(context):
 
     semantic_mapping_dir = os.path.join(ros_ws, "src", "semantic_mapping", "semantic_mapping")
     config_yaml = get_package_share_directory('semantic_mapping') + '/' + "mapping_go2w_bag" + '.yaml'
+    # Per-robot namespace config (single source, lives in tare_planner). Provides
+    # robot_namespace for the camera topic composition; merged after the mapping yaml.
+    robot_yaml = get_package_share_directory('tare_planner') + '/robot.yaml'
 
     detection_node = Node(
         package='semantic_mapping',
@@ -27,6 +30,7 @@ def launch_detection_node(context):
             'use_sim_time': LaunchConfiguration('use_sim_time'),
         },
         config_yaml,
+        robot_yaml,
         ]
     )
     return [detection_node]

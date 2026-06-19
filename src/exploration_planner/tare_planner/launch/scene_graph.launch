@@ -19,16 +19,21 @@ VLM_CONFIG = 'vlm_config'
 
 
 def _robot_namespace(tare_share):
-    # Single source for the namespace: the scenario yaml's /** block. Used only
-    # to build the static <ns>/odom -> map transform here; the nodes read
-    # robot_namespace from their own param files.
+    # The single per-robot knob lives in robot.yaml. Read here only to build the
+    # static <ns>/odom -> map transform; the nodes get robot_namespace from the
+    # same robot.yaml (passed to the planner/room_seg includes via robot_config,
+    # loaded directly by the go2w semantic/detection launches).
+    robot_yaml = os.path.join(tare_share, 'robot.yaml')
     try:
-        with open(os.path.join(tare_share, SCENARIO + '.yaml')) as f:
+        with open(robot_yaml) as f:
             return yaml.safe_load(f)['/**']['ros__parameters']['robot_namespace']
     except Exception as e:
-        print(f"[scene_graph.launch] could not read robot_namespace ({e}); "
-              f"defaulting to 'go2w_016'")
-        return 'go2w_016'
+        # robot.yaml is the single per-robot config; fail loudly rather than
+        # silently assuming a particular robot.
+        raise RuntimeError(
+            f"[scene_graph.launch] could not read robot_namespace from "
+            f"{robot_yaml}: {e}. It must define "
+            f"'/**: ros__parameters: robot_namespace: <ns>'.") from e
 
 
 def generate_launch_description():
@@ -39,6 +44,7 @@ def generate_launch_description():
     sem_share = get_package_share_directory('semantic_mapping')
     vlm_share = get_package_share_directory('vlm_node')
     ns = _robot_namespace(tare_share)
+    robot_yaml = os.path.join(tare_share, 'robot.yaml')
 
     # Curated package-root rviz config (the one the prior tmux loaded), NOT the
     # larger rviz/ one that gets installed to share. The installed launch is a
@@ -73,11 +79,12 @@ def generate_launch_description():
         include(os.path.join(sem_share, 'detection_node_go2w_bag.launch')),
         include(os.path.join(sem_share, 'semantic_mapping_go2w_bag.launch')),
         include(os.path.join(tare_share, 'room_segmentation.launch'),
-                {'scenario': SCENARIO}),
+                {'scenario': SCENARIO, 'robot_config': robot_yaml}),
         include(os.path.join(vlm_share, 'vlm_node.launch'),
                 {'config': VLM_CONFIG}),
         include(os.path.join(tare_share, 'explore.launch'),
-                {'scenario': SCENARIO, 'sg_export_config': SG_EXPORT_CONFIG}),
+                {'scenario': SCENARIO, 'sg_export_config': SG_EXPORT_CONFIG,
+                 'robot_config': robot_yaml}),
 
         Node(package='rviz2', executable='rviz2', name='rviz2',
              arguments=['-d', rviz_config],
