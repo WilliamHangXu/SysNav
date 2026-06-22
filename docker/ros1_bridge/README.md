@@ -98,6 +98,7 @@ docker run --rm -it --network host --ipc host \
   -e FASTDDS_DEFAULT_PROFILES_FILE=/fastdds_udp_only.xml \
   -v $(pwd)/docker/ros1_bridge/fastdds_udp_only.xml:/fastdds_udp_only.xml:ro \
   -v $(pwd)/docker/ros1_bridge/bridge_topics.yaml:/bridge_topics.yaml:ro \
+  -v $(pwd)/src/exploration_planner/tare_planner/config/robot.yaml:/robot.yaml:ro \
   sysnav-ros1-bridge:latest param-bridge
 ```
 
@@ -105,8 +106,11 @@ docker run --rm -it --network host --ipc host \
   (e.g. `192.168.123.190`); without it the robot's ROS 1 publishers can't send data
   back. The UDP-only profile is needed for the same root-container ↔ host-pipeline
   reason as the bag test.
-- **Edit `bridge_topics.yaml`** so the namespace + topic list match the robot
-  (`go2w_026`, …). Nothing is hardcoded beyond topic names + QoS.
+- **No robot name to edit.** `bridge_topics.yaml` uses a `__NS__` placeholder; the
+  `param-bridge` entrypoint reads `robot_namespace` from the mounted `robot.yaml`
+  (the one place the robot name lives) and renders it before loading. So switching
+  robots is a one-line edit in `robot.yaml` — same as the rest of the pipeline.
+  Nothing else in the allowlist is hardcoded beyond topic names + QoS.
 
 Then on the host:
 
@@ -161,9 +165,10 @@ if you like; it just waits until the bridge is up, then snaps to calibrated).
 **Caveats:** `parameter_bridge` bridges each topic **bidirectionally** (no per-topic
 direction), so the laptop's `/tf`,`/tf_static` (incl. the synthetic `odom→map`) also
 go to the robot — harmless (the robot gains an unused frame; selective does this too).
-Types in the allowlist must be exact, and the robot namespace appears there too (a
-per-robot seam, like `robot.yaml`). No transforms/intrinsics are hardcoded — only
-topic names + QoS.
+Types in the allowlist must be exact. The robot namespace is **not** in the allowlist —
+it uses a `__NS__` placeholder that the entrypoint fills from `robot.yaml` (mounted),
+so `robot.yaml` stays the single source of the robot name. Nothing else is hardcoded —
+only topic names + QoS.
 
 ## Verify the bridge
 
@@ -222,7 +227,7 @@ docker run --rm --network host sysnav-ros1-bridge:latest \
 |---|---|
 | `Dockerfile` | Thin runtime layer over the upstream builder image. |
 | `entrypoint.sh` | Subcommands: `bridge` (default), `param-bridge`, `roscore`, `play`, `shell`. |
-| `bridge_topics.yaml` | Explicit topic allowlist + QoS for `param-bridge` (recommended live). |
+| `bridge_topics.yaml` | Explicit topic allowlist + QoS for `param-bridge` (recommended live); `__NS__` placeholder filled from `robot.yaml`. |
 | `docker-compose.yml` | Bag-test topology: Noetic master+bag + bridge. |
 
 ## Sources

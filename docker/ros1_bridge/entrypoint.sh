@@ -5,7 +5,9 @@
 #   bridge [extra dynamic_bridge args]   dynamic_bridge (selective; BRIDGE_ALL=1 = all)
 #   param-bridge [extra args]            parameter_bridge over an explicit allowlist
 #                                        (BRIDGE_TOPICS_FILE); eager + per-topic QoS,
-#                                        removes the startup calibration lag (see README)
+#                                        removes the startup calibration lag (see README).
+#                                        Namespace comes from robot.yaml (ROBOT_CONFIG_FILE),
+#                                        rendered into the allowlist's __NS__ token.
 #   roscore                              start a ROS 1 (Noetic) roscore
 #   play <rosbag play args>              rosbag play (Noetic); pass --clock for sim time
 #   shell                                interactive bash
@@ -64,17 +66,39 @@ case "$cmd" in
     # calibration lag on the live robot. See bridge_topics.yaml + README.
     : "${ROS_MASTER_URI:=http://localhost:11311}"; export ROS_MASTER_URI
     : "${BRIDGE_TOPICS_FILE:=/bridge_topics.yaml}"
+    : "${ROBOT_CONFIG_FILE:=/robot.yaml}"
     if [ ! -f "$BRIDGE_TOPICS_FILE" ]; then
       echo "ERROR: topic allowlist not found at $BRIDGE_TOPICS_FILE." >&2
       echo "       Mount it (-v .../bridge_topics.yaml:/bridge_topics.yaml:ro)" >&2
       echo "       or set BRIDGE_TOPICS_FILE to its path." >&2
       exit 1
     fi
-    # rosparam is a ROS 1 tool; load the allowlist onto the master as /topics.
+    # The allowlist is robot-agnostic: it uses a __NS__ token instead of a robot
+    # name. robot.yaml is the SINGLE source of the namespace, so derive it from the
+    # mounted robot.yaml and render __NS__ before loading -- no robot name lives in
+    # this scaffold. Mount it: -v .../config/robot.yaml:/robot.yaml:ro
+    if [ ! -f "$ROBOT_CONFIG_FILE" ]; then
+      echo "ERROR: robot config not found at $ROBOT_CONFIG_FILE." >&2
+      echo "       Mount it (-v .../tare_planner/config/robot.yaml:/robot.yaml:ro)" >&2
+      echo "       or set ROBOT_CONFIG_FILE to its path." >&2
+      exit 1
+    fi
+    ROBOT_NS="$(grep -E '^[[:space:]]*robot_namespace:' "$ROBOT_CONFIG_FILE" \
+                 | head -1 \
+                 | sed -E 's/.*robot_namespace:[[:space:]]*//; s/#.*$//; s/[[:space:]]*$//' \
+                 || true)"
+    if [ -z "$ROBOT_NS" ]; then
+      echo "ERROR: no 'robot_namespace:' in $ROBOT_CONFIG_FILE." >&2
+      exit 1
+    fi
+    rendered="$(mktemp)"
+    sed "s|__NS__|$ROBOT_NS|g" "$BRIDGE_TOPICS_FILE" > "$rendered"
+    # rosparam is a ROS 1 tool; load the rendered allowlist onto the master as /topics.
     # shellcheck disable=SC1090
     source "$NOETIC_SETUP"
+    echo "[param-bridge] robot_namespace=$ROBOT_NS (from $ROBOT_CONFIG_FILE)"
     echo "[param-bridge] loading allowlist $BRIDGE_TOPICS_FILE -> $ROS_MASTER_URI"
-    rosparam load "$BRIDGE_TOPICS_FILE"
+    rosparam load "$rendered"
     # Then the ROS 2 side + the compiled bridge (install local_setup, NOT the build
     # hook -- find_bridge_setup tries the install path first).
     # shellcheck disable=SC1090

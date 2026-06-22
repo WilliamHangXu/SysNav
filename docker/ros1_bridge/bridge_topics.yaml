@@ -9,27 +9,31 @@
 #   - /tf_static is published with transient_local durability, so the latched
 #     static transforms (e.g. base->front_cam_ar) reach the pipeline's tf listener
 #     INSTANTLY on subscribe -- no latched-delivery race, no ~30s wait.
-# NOTHING is hardcoded here (no transforms/intrinsics); values flow live.
+# NOTHING is hardcoded here -- no transforms/intrinsics, and NO robot name. The
+# `__NS__` token below is the per-robot namespace; the `param-bridge` entrypoint
+# substitutes it from `robot_namespace` in robot.yaml (the single source of truth,
+# mounted into the container) before `rosparam load`. So robot.yaml stays the ONE
+# place the robot name lives -- this file is robot-agnostic.
 #
 # NOTE: parameter_bridge bridges every listed topic BIDIRECTIONALLY (no per-topic
 # direction). For these inputs only the robot publishes, so 2->1 carries nothing,
 # except /tf,/tf_static where the laptop's odom->map static also goes to the robot
 # (harmless -- the selective bridge already does this).
 #
-# Usage: `rosparam load bridge_topics.yaml` onto the robot's ROS 1 master, then
-# run `parameter_bridge` (reads this as /topics). go2w_026 mirrors robot_namespace
-# in robot.yaml (per-robot seam). Live config: no /clock (use_sim_time:=false).
+# Usage: the entrypoint renders __NS__ -> <robot_namespace>, `rosparam load`s the
+# result onto the robot's ROS 1 master, then runs `parameter_bridge` (reads it as
+# /topics). Live config: no /clock (use_sim_time:=false).
 topics:
-  - topic: /go2w_026/cloud_registered
+  - topic: /__NS__/cloud_registered
     type: sensor_msgs/msg/PointCloud2
     queue_size: 10
-  - topic: /go2w_026/lio/odometry
+  - topic: /__NS__/lio/odometry
     type: nav_msgs/msg/Odometry
     queue_size: 50
-  - topic: /go2w_026/camera/image_rect_color
+  - topic: /__NS__/camera/image_rect_color
     type: sensor_msgs/msg/Image
     queue_size: 5
-  - topic: /go2w_026/camera_rect/camera_info
+  - topic: /__NS__/camera_rect/camera_info
     type: sensor_msgs/msg/CameraInfo
     queue_size: 5
   - topic: /tf
