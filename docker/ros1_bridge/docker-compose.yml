@@ -1,0 +1,77 @@
+# Bag-test topology for the SysNav ROS 1 <-> ROS 2 bridge.
+#
+#   [ros1 container]              [bridge container]            [HOST, native Jazzy]
+#   roscore + rosbag --clock   →  dynamic_bridge --all-topics → scene_graph.launch
+#   (official Noetic on Focal)    (Jazzy + compiled bridge)     use_sim_time:=true
+#
+# Everything runs on the host network so DDS (bridge -> host pipeline) and the
+# ROS 1 master (localhost:11311) work without extra wiring. The host pipeline is
+# launched separately (see README) — it is NOT a service here.
+#
+# Using a separate official Noetic container for the master + bag (rather than the
+# bridge image) mirrors the live setup: the bridge always connects to an EXTERNAL
+# ROS 1 master, which on the robot is the robot itself.
+#
+# Usage:
+#   ROS1_BAG_DIR=/home/all/AlphaZ/bags/multifloor_test_slam \
+#   ROS_DOMAIN_ID=0 \
+#   docker compose -f docker/ros1_bridge/docker-compose.yml up
+#
+# Then, on the host (native Jazzy), with robot_namespace: go2w_016 in robot.yaml:
+#   ros2 launch tare_planner scene_graph.launch use_sim_time:=true
+
+services:
+  # ROS 1 master + bag playback. Official Noetic image on its native Focal —
+  # rock-solid; no cross-Ubuntu issues because nothing ROS 2 runs here.
+  ros1:
+    image: osrf/ros:noetic-desktop-full
+    network_mode: host
+    environment:
+      - ROS_MASTER_URI=http://localhost:11311
+      # With network_mode host + separate containers, ROS 1 nodes otherwise
+      # advertise their (unresolvable) container hostname, so the bridge can reach
+      # the master but never receives messages. Pin everything to loopback.
+      - ROS_IP=127.0.0.1
+    volumes:
+      - ${ROS1_BAG_DIR:-/home/all/AlphaZ/bags/multifloor_test_slam}:/bags/ros1:ro
+    # roscore, then play every split .bag merged by timestamp. --clock publishes
+    # /clock so the whole stack (incl. the host pipeline) runs on bag sim time.
+    command: >
+      bash -lc "source /opt/ros/noetic/setup.bash &&
+                roscore & sleep 4 &&
+                rosbag play --clock /bags/ros1/*.bag"
+
+  bridge:
+    image: sysnav-ros1-bridge:latest
+    network_mode: host
+    # Share the host's /dev/shm so FastDDS shared-memory transport can move data
+    # between the bridge (container) and the pipeline (host). Without this, DDS
+    # discovers across host-net but data never arrives.
+    ipc: host
+    environment:
+      - ROS_MASTER_URI=http://localhost:11311
+      - ROS_IP=127.0.0.1
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+      # Force the bridge's DDS to UDP-only (disable shared memory). SHM between a
+      # root container and the non-root host pipeline fails even with ipc: host,
+      # which looks like "topic listed on the host but echo hangs". UDP loopback
+      # works across the boundary. See fastdds_udp_only.xml.
+      - FASTRTPS_DEFAULT_PROFILES_FILE=/fastdds_udp_only.xml
+      - FASTDDS_DEFAULT_PROFILES_FILE=/fastdds_udp_only.xml
+      # Selective (0) by default: only topics the ROS 2 pipeline subscribes to.
+      # For the localhost BAG TEST run with BRIDGE_ALL=1 -- bandwidth is free on
+      # loopback, and it primes /clock before the planner boots (see README clock
+      # note). Live robot keeps the default 0.
+      - BRIDGE_ALL=${BRIDGE_ALL:-0}
+    volumes:
+      - ./fastdds_udp_only.xml:/fastdds_udp_only.xml:ro
+    depends_on:
+      - ros1
+    # dynamic_bridge tolerates the master coming up slightly later; if it ever
+    # races ahead, just restart this service.
+    #
+    # This bag test uses selective `bridge` (dynamic_bridge). The LIVE robot uses
+    # `param-bridge` instead -- an explicit allowlist that removes the ~30s startup
+    # calibration lag (eager bridges + transient_local /tf_static). See README
+    # "Bridging modes" and the live `docker run ... param-bridge` command there.
+    command: ["bridge"]

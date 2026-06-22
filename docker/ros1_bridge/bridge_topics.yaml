@@ -1,0 +1,43 @@
+# Explicit allowlist for ros1_bridge `parameter_bridge` — the only topics that
+# cross between the robot's ROS 1 master and the ROS 2 scene-graph pipeline.
+#
+# Why this instead of dynamic_bridge (selective):
+#   - Bridges are created EAGERLY at startup (no discovery over the robot's 300+
+#     topic graph) and eagerly subscribe on the ROS 1 side, which wakes the lazy
+#     image_proc rectify nodelet immediately -> camera_info flows before the
+#     pipeline boots.
+#   - /tf_static is published with transient_local durability, so the latched
+#     static transforms (e.g. base->front_cam_ar) reach the pipeline's tf listener
+#     INSTANTLY on subscribe -- no latched-delivery race, no ~30s wait.
+# NOTHING is hardcoded here (no transforms/intrinsics); values flow live.
+#
+# NOTE: parameter_bridge bridges every listed topic BIDIRECTIONALLY (no per-topic
+# direction). For these inputs only the robot publishes, so 2->1 carries nothing,
+# except /tf,/tf_static where the laptop's odom->map static also goes to the robot
+# (harmless -- the selective bridge already does this).
+#
+# Usage: `rosparam load bridge_topics.yaml` onto the robot's ROS 1 master, then
+# run `parameter_bridge` (reads this as /topics). go2w_026 mirrors robot_namespace
+# in robot.yaml (per-robot seam). Live config: no /clock (use_sim_time:=false).
+topics:
+  - topic: /go2w_026/cloud_registered
+    type: sensor_msgs/msg/PointCloud2
+    queue_size: 10
+  - topic: /go2w_026/lio/odometry
+    type: nav_msgs/msg/Odometry
+    queue_size: 50
+  - topic: /go2w_026/camera/image_rect_color
+    type: sensor_msgs/msg/Image
+    queue_size: 5
+  - topic: /go2w_026/camera_rect/camera_info
+    type: sensor_msgs/msg/CameraInfo
+    queue_size: 5
+  - topic: /tf
+    type: tf2_msgs/msg/TFMessage
+    queue_size: 100
+  - topic: /tf_static
+    type: tf2_msgs/msg/TFMessage
+    queue_size: 100
+    qos:
+      reliability: reliable
+      durability: transient_local
