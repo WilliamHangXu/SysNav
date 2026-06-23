@@ -1,0 +1,46 @@
+# Build-context filter for docker/Dockerfile (BuildKit uses <dockerfile>.dockerignore
+# in preference to the root .dockerignore). This image COPYs ONLY the native-dep
+# sources (src/slam/dependency/*, src/utilities/.../Livox-SDK2) + requirement.txt;
+# the application source + model weights are MOUNTED at runtime, never baked, so
+# keep the heavy/irrelevant stuff out of the context entirely.
+#
+# Patterns are TARGETED (file extensions / specific dirs), never blanket dir-name
+# globs like **/build — those would sweep up vendored source dirs (vehicle_simulator/
+# log, absl/log). See the .dockerignore-blanket-pattern lesson.
+
+# Model weights live under src/ and are mounted, not baked (GBs each).
+**/*.pt
+**/*.pth
+**/*.engine
+**/*.onnx
+**/*.ts
+**/sam2/checkpoints/
+
+# Top-level colcon artifacts (anchored — only the repo-root dirs, not vendored ones).
+/build/
+/install/
+/log/
+/logs/
+/runlogs/
+/output/
+/debug/
+
+# Stale local build artifacts inside the vendored native deps (rebuilt in-image).
+src/slam/dependency/*/build/
+src/slam/dependency/*/log/
+src/utilities/livox_ros_driver2/Livox-SDK2/build/
+
+# Bags are huge inputs, never part of the build.
+bags/
+*.bag
+
+# Git / editor / caches / scratch outputs.
+.git/
+.gitignore
+.vscode/
+.claude/
+*.png
+img/
+video/
+**/__pycache__/
+**/*.pyc

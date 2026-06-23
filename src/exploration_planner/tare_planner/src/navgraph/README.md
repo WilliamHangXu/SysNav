@@ -9,8 +9,9 @@ the *planner* uses, the NavGraph is a sparse (~1.25 m spacing) version meant to 
 - **Nodes** are a distance-spread subset of keypose-node positions — "in-room
   waypoints" — each tagged with a room and a scene-graph waypoint id.
 - **Edges** mean *reachability* (you can walk from one node to the other), with
-  weight = the keypose-graph shortest-path distance. They are **not** straight-line
-  segments — there is zero geometry/collision checking in the NavGraph itself.
+  weight = the keypose-graph traversable distance across the corridor that joins
+  the two regions. They are **not** straight-line segments — there is zero
+  geometry/collision checking in the NavGraph itself.
 
 Mental model: take the keypose graph, drop a sparse set of representative nodes
 over it, and collapse the dense mesh between them into single edges that carry the
@@ -46,7 +47,7 @@ per planning cycle (`.cpp:3909`). Consumed by the
                  KeyposeGraph (dense, planner's roadmap)
                           │   read-only each cycle
    GetConnectedGraphNodeIndices / GetNodePosition /
-   GetNodeNeighbors / GetShortestPath
+   GetNodeNeighbors / GetNeighborDistances
                           ▼
    execute(): after UpdateKeyposeGraph()  ──►  navgraph_->Update(...)
                           │
@@ -80,7 +81,7 @@ per planning cycle (`.cpp:3909`). Consumed by the
 | Field | Meaning |
 |---|---|
 | `u`, `v` | The two node ids (canonical `u < v`). |
-| `meters` | Keypose-graph shortest-path distance between the two nodes (honest traversable distance, summed keypose edge lengths). |
+| `meters` | Traversable distance between the two nodes: the shortest crossing distance over the keypose edges joining their regions (summed keypose edge lengths, not straight-line). |
 
 ### `NavGraph` (navgraph.h)
 
@@ -122,9 +123,14 @@ never enters the NavGraph. Four phases:
    members this pass is erased. (Newly seeded nodes always keep ≥ 1 member — their
    own seed — so they survive.) Ids are retired, never reused.
 4. **Edges** (`:203`) — region adjacency. For each connected keypose edge `(a, b)`,
-   if `region(a) ≠ region(b)` those two NavGraph nodes are adjacent. Each unique
-   pair gets one edge, weighted by `keypose_graph->GetShortestPath(pos_u, pos_v,
-   …, use_connected_nodes=true)`. Edges that return no path (≥ `INF`) are skipped.
+   if `region(a) ≠ region(b)` those two NavGraph nodes are adjacent. The weight is
+   the shortest **crossing distance** `‖navnode_u − a‖ + len(a,b) + ‖b − navnode_v‖`
+   over all keypose edges that cross that region pair (`len(a,b)` read from
+   `GetNeighborDistances`). Both endpoints sit within `kNavNodeMinDist` of their nav
+   node (Phase-1 invariant), so for adjacent regions this is a tight estimate of the
+   traversable distance — computed with **no per-edge A\* search**. (This used to
+   call `GetShortestPath` once per nav edge, which is `O(nav_edges × keypose_nodes)`
+   per reconcile and stalled the planning loop as the map grew; see the gotchas.)
 
 ### `TagRooms()` (`navgraph.cpp:253`)
 
@@ -208,6 +214,16 @@ scenario yaml next to `keypose_graph/*` (set in `config/go2w_bag_direct.yaml`).
 - **Frame.** Node positions are copied verbatim from keypose nodes, so the NavGraph
   inherits the keypose graph's frame (the bag's `odom`/`world`, still labelled
   `kWorldFrameID = "map"`). The NavGraph applies no transforms of its own.
+- **Edge weighting must stay A\*-free.** `Update()` runs synchronously inside the
+  planner's `execute()` loop, so anything it does delays planning *and* every viz
+  marker the loop publishes (keypose + navgraph markers, room labels) — room masks
+  keep flowing only because segmentation is a separate node. The original Phase 4
+  called `GetShortestPath` once per nav edge — `O(nav_edges × keypose_nodes)` per
+  reconcile (each call does an `O(N)` endpoint scan + a full position-vector copy +
+  A\*) — which grew with the map and froze the loop for seconds (long stalls, then a
+  burst). Edge weights are now accumulated from crossing keypose-edge lengths in one
+  `O(total keypose edges)` pass. Keep it that way; don't reintroduce a per-edge
+  graph search.
 
 ---
 

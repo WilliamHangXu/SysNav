@@ -11,4 +11,4 @@
 # semantic_mapping / detection launches.
 /**:
   ros__parameters:
-    robot_namespace: go2w_026
+    robot_namespace: go2w_016

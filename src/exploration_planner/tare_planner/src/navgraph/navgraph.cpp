@@ -7,11 +7,9 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
-#include <set>
 #include <unordered_map>
 #include <utility>
 
-#include <nav_msgs/msg/path.hpp>
 #include <opencv2/core.hpp>
 
 #include <utils/misc_utils.h>
@@ -190,22 +188,50 @@ void NavGraph::Reconcile(const std::shared_ptr<keypose_graph_ns::KeyposeGraph>& 
   }
 
   // --- Phase 4: rederive edges (region adjacency) ---------------------------
-  // An edge u-v exists iff some connected keypose edge crosses from region u
-  // into region v. Weight = keypose-graph shortest-path distance between the
-  // two nodes (honest traversable distance, summed keypose edge lengths).
+  // An edge u-v exists iff some connected keypose edge crosses from region u into
+  // region v. Weight = the shortest such crossing distance, accumulated directly
+  // from keypose edge lengths: for a crossing keypose edge a(in u)->b(in v),
+  //   ||navnode_u - a|| + len(a,b) + ||b - navnode_v||
+  // is a tight estimate of the traversable u->v distance -- both endpoints lie
+  // within kNavNodeMinDist of their nav node (Phase-1 invariant), and for
+  // adjacent regions the direct crossing is essentially the shortest path. We
+  // keep the minimum over all crossing edges. This is O(total keypose edges) and
+  // does NO per-edge A* search; the old GetShortestPath-per-edge approach was
+  // O(edges x keypose-node-count) and stalled the planning loop as the map grew.
   edges_.clear();
-  std::set<std::pair<int, int>> seen;
-  for (int a : connected_inds)
+
+  // keypose node index -> its position (needed for the b endpoint below). region
+  // only ever holds connected indices, so every b we touch is present here.
+  std::unordered_map<int, geometry_msgs::msg::Point> pos_by_ind;
+  pos_by_ind.reserve(connected_inds.size());
+  for (size_t k = 0; k < connected_inds.size(); ++k)
   {
+    pos_by_ind[connected_inds[k]] = connected_pos[k];
+  }
+
+  auto euclid = [](const geometry_msgs::msg::Point& p, const geometry_msgs::msg::Point& q) {
+    const double dx = p.x - q.x;
+    const double dy = p.y - q.y;
+    const double dz = p.z - q.z;
+    return std::sqrt(dx * dx + dy * dy + dz * dz);
+  };
+
+  std::map<std::pair<int, int>, double> edge_weight;  // canonical (u<v) -> min meters
+  for (size_t k = 0; k < connected_inds.size(); ++k)
+  {
+    const int a = connected_inds[k];
     const auto ra = region.find(a);
     if (ra == region.end())
     {
       continue;
     }
     const int u = ra->second;
+    const geometry_msgs::msg::Point& pos_a = connected_pos[k];
     const std::vector<int>& neighbors = keypose_graph->GetNodeNeighbors(a);
-    for (int b : neighbors)
+    const std::vector<double>& neighbor_dists = keypose_graph->GetNeighborDistances(a);
+    for (size_t i = 0; i < neighbors.size(); ++i)
     {
+      const int b = neighbors[i];
       const auto rb = region.find(b);
       if (rb == region.end())  // neighbor not in the connected/labeled set
       {
@@ -216,26 +242,29 @@ void NavGraph::Reconcile(const std::shared_ptr<keypose_graph_ns::KeyposeGraph>& 
       {
         continue;
       }
+      const geometry_msgs::msg::Point& pos_b = pos_by_ind.at(b);
+      // dist_ is parallel to graph_; fall back to the straight-line gap if a
+      // length is ever missing (defensive -- they are always parallel).
+      const double edge_len = (i < neighbor_dists.size()) ? neighbor_dists[i] : euclid(pos_a, pos_b);
+      const double crossing =
+          euclid(nodes_.at(u).position, pos_a) + edge_len + euclid(pos_b, nodes_.at(v).position);
       const std::pair<int, int> key = (u < v) ? std::make_pair(u, v) : std::make_pair(v, u);
-      if (!seen.insert(key).second)
+      auto it = edge_weight.find(key);
+      if (it == edge_weight.end() || crossing < it->second)
       {
-        continue;  // already added this region pair
+        edge_weight[key] = crossing;
       }
-      nav_msgs::msg::Path dummy_path;
-      const double meters = keypose_graph->GetShortestPath(nodes_.at(key.first).position,
-                                                           nodes_.at(key.second).position,
-                                                           /*get_path=*/false, dummy_path,
-                                                           /*use_connected_nodes=*/true);
-      if (meters >= keypose_graph_ns::INF)
-      {
-        continue;  // no traversable path found (should not happen within a component)
-      }
-      NavEdge edge;
-      edge.u = key.first;
-      edge.v = key.second;
-      edge.meters = meters;
-      edges_.push_back(edge);
     }
+  }
+
+  edges_.reserve(edge_weight.size());
+  for (const auto& kv : edge_weight)
+  {
+    NavEdge edge;
+    edge.u = kv.first.first;
+    edge.v = kv.first.second;
+    edge.meters = kv.second;
+    edges_.push_back(edge);
   }
 }
 

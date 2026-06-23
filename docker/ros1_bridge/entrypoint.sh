@@ -57,62 +57,12 @@ case "$cmd" in
     exec ros2 run ros1_bridge dynamic_bridge $flags "$@"
     ;;
   param-bridge)
-    # Explicit-allowlist bridge: load BRIDGE_TOPICS_FILE onto the ROS 1 master,
-    # then run parameter_bridge. Unlike selective dynamic_bridge it creates the
-    # bridges EAGERLY (no discovery over the robot's 300+ topic graph) and honours
-    # per-topic QoS -- notably durability: transient_local on /tf_static, so latched
-    # static transforms (e.g. base->camera) reach the pipeline instantly instead of
-    # after the ~30s latched-delivery race. This is what removes the startup
-    # calibration lag on the live robot. See bridge_topics.yaml + README.
-    : "${ROS_MASTER_URI:=http://localhost:11311}"; export ROS_MASTER_URI
-    : "${BRIDGE_TOPICS_FILE:=/bridge_topics.yaml}"
-    : "${ROBOT_CONFIG_FILE:=/robot.yaml}"
-    if [ ! -f "$BRIDGE_TOPICS_FILE" ]; then
-      echo "ERROR: topic allowlist not found at $BRIDGE_TOPICS_FILE." >&2
-      echo "       Mount it (-v .../bridge_topics.yaml:/bridge_topics.yaml:ro)" >&2
-      echo "       or set BRIDGE_TOPICS_FILE to its path." >&2
-      exit 1
-    fi
-    # The allowlist is robot-agnostic: it uses a __NS__ token instead of a robot
-    # name. robot.yaml is the SINGLE source of the namespace, so derive it from the
-    # mounted robot.yaml and render __NS__ before loading -- no robot name lives in
-    # this scaffold. Mount it: -v .../config/robot.yaml:/robot.yaml:ro
-    if [ ! -f "$ROBOT_CONFIG_FILE" ]; then
-      echo "ERROR: robot config not found at $ROBOT_CONFIG_FILE." >&2
-      echo "       Mount it (-v .../tare_planner/config/robot.yaml:/robot.yaml:ro)" >&2
-      echo "       or set ROBOT_CONFIG_FILE to its path." >&2
-      exit 1
-    fi
-    ROBOT_NS="$(grep -E '^[[:space:]]*robot_namespace:' "$ROBOT_CONFIG_FILE" \
-                 | head -1 \
-                 | sed -E 's/.*robot_namespace:[[:space:]]*//; s/#.*$//; s/[[:space:]]*$//' \
-                 || true)"
-    if [ -z "$ROBOT_NS" ]; then
-      echo "ERROR: no 'robot_namespace:' in $ROBOT_CONFIG_FILE." >&2
-      exit 1
-    fi
-    rendered="$(mktemp)"
-    sed "s|__NS__|$ROBOT_NS|g" "$BRIDGE_TOPICS_FILE" > "$rendered"
-    # rosparam is a ROS 1 tool; load the rendered allowlist onto the master as /topics.
-    # shellcheck disable=SC1090
-    source "$NOETIC_SETUP"
-    echo "[param-bridge] robot_namespace=$ROBOT_NS (from $ROBOT_CONFIG_FILE)"
-    echo "[param-bridge] loading allowlist $BRIDGE_TOPICS_FILE -> $ROS_MASTER_URI"
-    rosparam load "$rendered"
-    # Then the ROS 2 side + the compiled bridge (install local_setup, NOT the build
-    # hook -- find_bridge_setup tries the install path first).
-    # shellcheck disable=SC1090
-    source "$JAZZY_SETUP"
-    BR="$(find_bridge_setup)"
-    if [ -z "$BR" ]; then
-      echo "ERROR: could not locate ros1_bridge local_setup.bash in this image." >&2
-      echo "       Is this built FROM ros-jazzy-ros1-bridge-builder? See README." >&2
-      exit 1
-    fi
-    # shellcheck disable=SC1090
-    source "$BR"
-    echo "[param-bridge] ROS_MASTER_URI=$ROS_MASTER_URI  ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}  sourced: $BR"
-    exec ros2 run ros1_bridge parameter_bridge "$@"
+    # Explicit-allowlist bridge -- eager bridges + per-topic QoS (transient_local
+    # /tf_static) remove the live startup calibration lag. The logic lives in the
+    # shared helper so the unified container's supervisor reuses it verbatim;
+    # robot.yaml stays the single source of the namespace (rendered into __NS__).
+    # See start_bridge.sh + bridge_topics.yaml + README.
+    exec /usr/local/bin/start_bridge.sh "$@"
     ;;
   roscore)
     # shellcheck disable=SC1090

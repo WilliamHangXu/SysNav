@@ -28,8 +28,9 @@
 ARG BUILDER_IMAGE=ros-jazzy-ros1-bridge-builder:latest
 FROM ${BUILDER_IMAGE}
 
+COPY start_bridge.sh /usr/local/bin/start_bridge.sh
 COPY entrypoint.sh /usr/local/bin/bridge-entrypoint.sh
-RUN chmod +x /usr/local/bin/bridge-entrypoint.sh
+RUN chmod +x /usr/local/bin/bridge-entrypoint.sh /usr/local/bin/start_bridge.sh
 
 # Must match the host pipeline's ROS_DOMAIN_ID (override at run time).
 ENV ROS_DOMAIN_ID=0

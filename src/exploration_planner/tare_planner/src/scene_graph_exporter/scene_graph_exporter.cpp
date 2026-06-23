@@ -73,15 +73,29 @@ bool SceneGraphExporter::DoorCentroid(
 }
 
 nlohmann::json SceneGraphExporter::BuildObjectJson(
-    const representation_ns::ObjectNodeRep& object)
+    const representation_ns::ObjectNodeRep& object,
+    const Eigen::Isometry3d& world_from_source)
 {
   std::string label = object.label_.empty() ? kUnknownLabel : object.label_;
   int primary_id = object.object_id_.empty() ? -1 : object.object_id_[0];
+  const std::string object_id = label + "_" + std::to_string(primary_id);
+
+  // Object centroid, transformed into world_frame like every other coordinate.
+  const geometry_msgs::msg::Point& pos = object.GetPosition();
+  const Eigen::Vector3d world =
+      ToWorld(world_from_source, pos.x, pos.y, pos.z);
+
   return nlohmann::json{
-      {"object_id", label + "_" + std::to_string(primary_id)},
+      {"object_id", object_id},
       {"type", label},
       {"sgid", primary_id},
-      {"waypoint", nlohmann::json::object()},
+      {"waypoint",
+       nlohmann::json{
+           {"id", object_id + "_wp"},
+           {"x", world.x()},
+           {"y", world.y()},
+           {"z", world.z()},
+       }},
   };
 }
 
@@ -165,7 +179,8 @@ nlohmann::json SceneGraphExporter::BuildRoomJson(
     {
       continue;  // stale link; object no longer present
     }
-    object_array.push_back(BuildObjectJson(object_it->second));
+    object_array.push_back(
+        BuildObjectJson(object_it->second, world_from_source));
   }
 
   return nlohmann::json{

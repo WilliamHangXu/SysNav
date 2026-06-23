@@ -134,8 +134,12 @@ private:
       const Eigen::Isometry3d& world_from_source,
       std::map<int, std::string>& nav_id_to_wpid) const;
 
+  // Emits one object's JSON. Its centroid (ObjectNodeRep::GetPosition) is
+  // transformed into world_frame via world_from_source and written as the
+  // object's waypoint ("<object_id>_wp").
   static nlohmann::json BuildObjectJson(
-      const representation_ns::ObjectNodeRep& object);
+      const representation_ns::ObjectNodeRep& object,
+      const Eigen::Isometry3d& world_from_source);
 
   // World-space bounding box (width, height) over every room polygon.
   static void ComputeDimensions(

@@ -36,6 +36,12 @@ topics:
   - topic: /__NS__/camera_rect/camera_info
     type: sensor_msgs/msg/CameraInfo
     queue_size: 5
+  # /clock — only carries data in bag mode (rosbag --clock on the ROS 1 side, so
+  # the ROS 2 pipeline can run use_sim_time:=true). Idle/harmless on the live
+  # robot (wall clock). Not namespaced.
+  - topic: /clock
+    type: rosgraph_msgs/msg/Clock
+    queue_size: 10
   - topic: /tf
     type: tf2_msgs/msg/TFMessage
     queue_size: 100

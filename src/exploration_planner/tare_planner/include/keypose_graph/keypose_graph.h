@@ -128,6 +128,14 @@ public:
     static const std::vector<int> kEmptyNeighbors;
     return (node_ind >= 0 && node_ind < static_cast<int>(graph_.size())) ? graph_[node_ind] : kEmptyNeighbors;
   }
+  // Edge lengths parallel to GetNodeNeighbors(node_ind): dist_[node_ind][i] is the
+  // traversable length of the edge to GetNodeNeighbors(node_ind)[i]. Lets NavGraph
+  // weight its contracted edges directly from keypose edge lengths (no per-edge A*).
+  const std::vector<double>& GetNeighborDistances(int node_ind) const
+  {
+    static const std::vector<double> kEmptyDistances;
+    return (node_ind >= 0 && node_ind < static_cast<int>(dist_.size())) ? dist_[node_ind] : kEmptyDistances;
+  }
   int GetConnectedNodeNum();
   void GetMarker(visualization_msgs::msg::Marker& node_marker, visualization_msgs::msg::Marker& edge_marker);
   void GetVisualizationCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr cloud);
