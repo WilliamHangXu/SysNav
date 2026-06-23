@@ -5,6 +5,7 @@
 #include <navgraph/navgraph.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <unordered_map>
@@ -59,10 +60,28 @@ void NavGraph::Update(const std::shared_ptr<keypose_graph_ns::KeyposeGraph>& key
   {
     return;
   }
+  using nav_clock = std::chrono::steady_clock;
+  const auto t0 = nav_clock::now();
   Reconcile(keypose_graph);
+  const auto t1 = nav_clock::now();
   TagRooms(room_mask, shift, room_resolution);
+  const auto t2 = nav_clock::now();
   AssignNames(room_keys);
+  const auto t3 = nav_clock::now();
   PublishVisualization();
+  const auto t4 = nav_clock::now();
+
+  // TEMP timing instrumentation: per-reconcile-cycle wall-clock cost. This whole
+  // body runs synchronously inside the planner's execute() loop, so it directly
+  // bounds how often the planner can publish. Remove once perf is confirmed.
+  auto ms = [](nav_clock::time_point a, nav_clock::time_point b) {
+    return std::chrono::duration<double, std::milli>(b - a).count();
+  };
+  RCLCPP_INFO(rclcpp::get_logger("navgraph"),
+              "[navgraph] Update %.2f ms total | reconcile %.2f, tag_rooms %.2f, "
+              "assign_names %.2f, publish %.2f | nav_nodes=%zu nav_edges=%zu",
+              ms(t0, t4), ms(t0, t1), ms(t1, t2), ms(t2, t3), ms(t3, t4),
+              nodes_.size(), edges_.size());
 }
 
 void NavGraph::BuildKdtree()
@@ -107,6 +126,10 @@ int NavGraph::NearestNode(const geometry_msgs::msg::Point& p, double& dist_out) 
 
 void NavGraph::Reconcile(const std::shared_ptr<keypose_graph_ns::KeyposeGraph>& keypose_graph)
 {
+  // TEMP timing: phase-by-phase wall-clock of the reconcile (see Update()).
+  using nav_clock = std::chrono::steady_clock;
+  const auto t_start = nav_clock::now();
+
   // --- Gather the keypose graph's connected component -----------------------
   const std::vector<int> connected_inds = keypose_graph->GetConnectedGraphNodeIndices();
   std::vector<geometry_msgs::msg::Point> connected_pos;
@@ -115,6 +138,7 @@ void NavGraph::Reconcile(const std::shared_ptr<keypose_graph_ns::KeyposeGraph>& 
   {
     connected_pos.push_back(keypose_graph->GetNodePosition(ind));
   }
+  const auto t_gather = nav_clock::now();
 
   // --- Phase 1: seed (greedy distance-gated coverage) -----------------------
   // Append a new node wherever a connected keypose node is farther than
@@ -152,6 +176,7 @@ void NavGraph::Reconcile(const std::shared_ptr<keypose_graph_ns::KeyposeGraph>& 
       new_node_positions.push_back(p);
     }
   }
+  const auto t_seed = nav_clock::now();
 
   // --- Phase 2: label (nearest-node Voronoi) + member tally -----------------
   // After Phase 1 every connected keypose node is within kNavNodeMinDist of some
@@ -171,6 +196,7 @@ void NavGraph::Reconcile(const std::shared_ptr<keypose_graph_ns::KeyposeGraph>& 
     region[connected_inds[k]] = nav_id;
     member_count[nav_id]++;
   }
+  const auto t_label = nav_clock::now();
 
   // --- Phase 3: hard-delete nodes with no connected support this pass --------
   // Newly seeded nodes always have >=1 member (their own seed keypose node), so
@@ -186,6 +212,7 @@ void NavGraph::Reconcile(const std::shared_ptr<keypose_graph_ns::KeyposeGraph>& 
       ++it;
     }
   }
+  const auto t_delete = nav_clock::now();
 
   // --- Phase 4: rederive edges (region adjacency) ---------------------------
   // An edge u-v exists iff some connected keypose edge crosses from region u into
@@ -266,6 +293,17 @@ void NavGraph::Reconcile(const std::shared_ptr<keypose_graph_ns::KeyposeGraph>& 
     edge.meters = kv.second;
     edges_.push_back(edge);
   }
+  const auto t_edges = nav_clock::now();
+
+  auto ms = [](nav_clock::time_point a, nav_clock::time_point b) {
+    return std::chrono::duration<double, std::milli>(b - a).count();
+  };
+  RCLCPP_INFO(rclcpp::get_logger("navgraph"),
+              "[navgraph]   Reconcile %.2f ms | gather %.2f, seed %.2f, label %.2f, "
+              "delete %.2f, edges %.2f | connected_keypose=%zu",
+              ms(t_start, t_edges), ms(t_start, t_gather), ms(t_gather, t_seed),
+              ms(t_seed, t_label), ms(t_label, t_delete), ms(t_delete, t_edges),
+              connected_inds.size());
 }
 
 void NavGraph::TagRooms(const cv::Mat& room_mask, const Eigen::Vector3f& shift, float room_resolution)
