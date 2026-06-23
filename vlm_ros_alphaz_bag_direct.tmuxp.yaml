@@ -34,7 +34,8 @@ windows:
           # stack boots), then auto-resumes once the stack is up.
           - >
             ros2 bag play /home/all/AlphaZ/bags/multifloor_test_slam_ros2
-            --start-offset 200 --playback-duration 230
+            --start-offset 200
+            --playback-duration 230
             --clock --start-paused --disable-keyboard-controls < /dev/null &
           - sleep 15
           - ros2 service call /rosbag2_player/resume rosbag2_interfaces/srv/Resume "{}"

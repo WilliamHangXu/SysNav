@@ -14,17 +14,31 @@ def generate_launch_description():
         DeclareLaunchArgument('use_sim_time', default_value='true'),
         # 'bag_slam_bridge' (C++) or 'bag_slam_bridge_py' (Python reference).
         DeclareLaunchArgument('executable', default_value='bag_slam_bridge'),
+        # --- inputs (raw lidar + the bag/robot LIO odometry) ---
         DeclareLaunchArgument('lidar_msg_type', default_value='livox'),
         DeclareLaunchArgument('lidar_topic', default_value='/go2w_005/livox/lidar'),
         DeclareLaunchArgument('odom_topic', default_value='/go2w_005/lio/odometry'),
+        # --- outputs (registered cloud + matching refined odometry) ---
+        # Defaults match the un-namespaced single-robot wiring; scene_graph.launch
+        # overrides both to /<ns>/cloud_registered + /<ns>/state_estimation so the
+        # scene-graph nodes consume them as the registered_scan_source: slam_bridge pair.
+        DeclareLaunchArgument('registered_scan_topic', default_value='/registered_scan'),
+        DeclareLaunchArgument('state_estimation_topic', default_value='/state_estimation'),
+        # --- frames (fallbacks; message header frame_ids win when present) ---
+        DeclareLaunchArgument('lidar_frame', default_value='go2w_005/livox_frame'),
+        DeclareLaunchArgument('base_frame', default_value='go2w_005/base'),
+        DeclareLaunchArgument('odom_frame', default_value='go2w_005/odom'),
         DeclareLaunchArgument('world_frame', default_value='world'),
         DeclareLaunchArgument('output_frame', default_value='map'),
         # 'world': building-anchored (compose the bag's static world<-odom).
-        # 'odom': start-anchored (LIO poses pass through untouched).
+        # 'odom': start-anchored (LIO poses pass through untouched). The scene-graph
+        # pipeline uses 'odom' so the published cloud + odometry share one trajectory.
         DeclareLaunchArgument('anchor_frame', default_value='world'),
         # Clamped scan-to-map ICP polish (stage 2). Off by default: the
         # registered scan is deskew + body-filter only. Set true to recover
         # arise-level wall sharpness (~2.2 vs ~2.7 cm 1-sigma) at ~28% more CPU.
+        # NOTE: refinement nudges only the cloud, not the published odometry, so
+        # keep it false whenever a consumer relies on the cloud+odometry pair.
         DeclareLaunchArgument('scan_to_map_refine', default_value='true'),
         Node(
             package='bag_slam_bridge',
@@ -36,6 +50,11 @@ def generate_launch_description():
                 'lidar_msg_type': LaunchConfiguration('lidar_msg_type'),
                 'lidar_topic': LaunchConfiguration('lidar_topic'),
                 'odom_topic': LaunchConfiguration('odom_topic'),
+                'registered_scan_topic': LaunchConfiguration('registered_scan_topic'),
+                'state_estimation_topic': LaunchConfiguration('state_estimation_topic'),
+                'lidar_frame': LaunchConfiguration('lidar_frame'),
+                'base_frame': LaunchConfiguration('base_frame'),
+                'odom_frame': LaunchConfiguration('odom_frame'),
                 'world_frame': LaunchConfiguration('world_frame'),
                 'output_frame': LaunchConfiguration('output_frame'),
                 'anchor_frame': LaunchConfiguration('anchor_frame'),

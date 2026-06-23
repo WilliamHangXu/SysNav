@@ -11,27 +11,27 @@ from launch_ros.actions import Node
 # One bringup launch for the whole scene-graph pipeline. Scenario / export / vlm
 # config selection is baked in here so the tmux runner carries only per-run knobs
 # (which bag, start offset, playback duration). Starts:
-#   static <ns>/odom->map tf, detection_node, semantic_mapping_node,
-#   room_segmentation, vlm_node, planner (+ scene-graph exporter), and RViz.
+#   <ns>/odom->map source (static tf in 'bag' mode, bag_slam_bridge in
+#   'slam_bridge' mode), detection_node, semantic_mapping_node, room_segmentation,
+#   vlm_node, planner (+ scene-graph exporter), and RViz.
 SCENARIO = 'go2w_bag_direct'
 SG_EXPORT_CONFIG = 'scene_graph_export'
 VLM_CONFIG = 'vlm_config'
 
 
-def _robot_namespace(tare_share):
-    # The single per-robot knob lives in robot.yaml. Read here only to build the
-    # static <ns>/odom -> map transform; the nodes get robot_namespace from the
-    # same robot.yaml (passed to the planner/room_seg includes via robot_config,
-    # loaded directly by the go2w semantic/detection launches).
+def _robot_params(tare_share):
+    # The single per-robot config lives in robot.yaml. Read here (at launch-build
+    # time) to compose the static <ns>/odom -> map tf and to pick the registered-
+    # cloud source; the nodes themselves read the same robot.yaml for their params.
     robot_yaml = os.path.join(tare_share, 'robot.yaml')
     try:
         with open(robot_yaml) as f:
-            return yaml.safe_load(f)['/**']['ros__parameters']['robot_namespace']
+            return yaml.safe_load(f)['/**']['ros__parameters']
     except Exception as e:
         # robot.yaml is the single per-robot config; fail loudly rather than
         # silently assuming a particular robot.
         raise RuntimeError(
-            f"[scene_graph.launch] could not read robot_namespace from "
+            f"[scene_graph.launch] could not read robot.yaml params from "
             f"{robot_yaml}: {e}. It must define "
             f"'/**: ros__parameters: robot_namespace: <ns>'.") from e
 
@@ -43,7 +43,16 @@ def generate_launch_description():
     tare_share = get_package_share_directory('tare_planner')
     sem_share = get_package_share_directory('semantic_mapping')
     vlm_share = get_package_share_directory('vlm_node')
-    ns = _robot_namespace(tare_share)
+
+    robot_params = _robot_params(tare_share)
+    ns = robot_params['robot_namespace']
+    scan_source = robot_params.get('registered_scan_source', 'bag')
+    if scan_source not in ('bag', 'slam_bridge'):
+        raise RuntimeError(
+            f"[scene_graph.launch] registered_scan_source must be 'bag' or "
+            f"'slam_bridge', got '{scan_source}' (robot.yaml).")
+    slam_mode = scan_source == 'slam_bridge'
+
     robot_yaml = os.path.join(tare_share, 'robot.yaml')
 
     # Curated package-root rviz config (the one the prior tmux loaded), NOT the
@@ -61,21 +70,56 @@ def generate_launch_description():
         return IncludeLaunchDescription(
             PythonLaunchDescriptionSource(path), launch_arguments=args.items())
 
-    return LaunchDescription([
+    entries = [
         DeclareLaunchArgument('use_sim_time', default_value='true',
                               description='Use sim (bag) clock'),
         DeclareLaunchArgument('rviz', default_value='true',
                               description='Launch RViz alongside the pipeline'),
+    ]
 
-        # Static identity <ns>/odom -> map: pins the stack's `map` frame to the
-        # bag odom (RViz tf tree + the optional world<-odom export).
-        Node(package='tf2_ros', executable='static_transform_publisher',
-             name='odom_to_map_static',
-             arguments=['--x', '0', '--y', '0', '--z', '0',
-                        '--yaw', '0', '--pitch', '0', '--roll', '0',
-                        '--frame-id', ns + '/odom', '--child-frame-id', 'map'],
-             parameters=[{'use_sim_time': use_sim_time}], output='screen'),
+    if slam_mode:
+        # registered_scan_source: slam_bridge -- bag_slam_bridge registers the raw
+        # lidar into /<ns>/cloud_registered AND publishes the matching odometry on
+        # /<ns>/state_estimation (the same trajectory). With anchor='odom' it pins
+        # the bag's odom frame to `map` via a pass-through identity, so it OWNS the
+        # <ns>/odom -> map static -- no separate odom_to_map node here.
+        # scan_to_map_refine MUST stay false: it nudges only the cloud, which would
+        # drift it off the published odometry and break the cloud+odom pair.
+        slam_share = get_package_share_directory('bag_slam_bridge')
+        lidar_msg_type = robot_params.get('slam_bridge.lidar_msg_type', 'livox')
+        lidar_suffix = robot_params.get('slam_bridge.lidar_topic_suffix',
+                                        'livox/lidar')
+        entries.append(IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                os.path.join(slam_share, 'launch', 'bag_slam_bridge.launch')),
+            launch_arguments={
+                'use_sim_time': use_sim_time,
+                'lidar_msg_type': lidar_msg_type,
+                'lidar_topic': f'/{ns}/{lidar_suffix}',
+                'odom_topic': f'/{ns}/lio/odometry',
+                'registered_scan_topic': f'/{ns}/cloud_registered',
+                'state_estimation_topic': f'/{ns}/state_estimation',
+                'lidar_frame': f'{ns}/livox_frame',
+                'base_frame': f'{ns}/base',
+                'odom_frame': f'{ns}/odom',
+                'output_frame': 'map',
+                'anchor_frame': 'odom',
+                'scan_to_map_refine': 'false',
+            }.items()))
+    else:
+        # registered_scan_source: bag -- the registered cloud + odometry come
+        # straight from the bag/robot. Static identity <ns>/odom -> map pins the
+        # stack's `map` frame to the bag odom (RViz tf tree + optional world<-odom
+        # export). In slam_bridge mode the bridge publishes this edge instead.
+        entries.append(Node(
+            package='tf2_ros', executable='static_transform_publisher',
+            name='odom_to_map_static',
+            arguments=['--x', '0', '--y', '0', '--z', '0',
+                       '--yaw', '0', '--pitch', '0', '--roll', '0',
+                       '--frame-id', ns + '/odom', '--child-frame-id', 'map'],
+            parameters=[{'use_sim_time': use_sim_time}], output='screen'))
 
+    entries += [
         include(os.path.join(sem_share, 'detection_node_go2w_bag.launch')),
         include(os.path.join(sem_share, 'semantic_mapping_go2w_bag.launch')),
         include(os.path.join(tare_share, 'room_segmentation.launch'),
@@ -90,4 +134,6 @@ def generate_launch_description():
              arguments=['-d', rviz_config],
              parameters=[{'use_sim_time': use_sim_time}],
              condition=IfCondition(rviz), output='screen'),
-    ])
+    ]
+
+    return LaunchDescription(entries)

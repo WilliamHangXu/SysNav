@@ -93,6 +93,13 @@ class MappingNode(Node):
         self.declare_parameter("robot_namespace", "")
         self.declare_parameter("topic_suffix.registered_scan", "cloud_registered")
         self.declare_parameter("topic_suffix.odometry", "lio/odometry")
+        # 'slam_bridge' source: cloud + matching odometry come from bag_slam_bridge,
+        # with the odometry on this suffix (see registered_scan_source).
+        self.declare_parameter("topic_suffix.slam_odometry", "state_estimation")
+        # 'bag' (read /<ns>/cloud_registered + /<ns>/lio/odometry directly) or
+        # 'slam_bridge' (bag_slam_bridge registers the raw lidar and publishes the
+        # matching odometry). Cloud + odometry are always switched as one pair.
+        self.declare_parameter("registered_scan_source", "bag")
         self.declare_parameter("topic_suffix.camera_info", "camera_rect/camera_info")
         self.declare_parameter("base_frame_suffix", "base")
 
@@ -137,7 +144,11 @@ class MappingNode(Node):
         robot_ns = self.get_parameter('robot_namespace').get_parameter_value().string_value
         if robot_ns:
             reg_suf = self.get_parameter('topic_suffix.registered_scan').get_parameter_value().string_value
-            odom_suf = self.get_parameter('topic_suffix.odometry').get_parameter_value().string_value
+            scan_source = self.get_parameter('registered_scan_source').get_parameter_value().string_value
+            if scan_source == 'slam_bridge':
+                odom_suf = self.get_parameter('topic_suffix.slam_odometry').get_parameter_value().string_value
+            else:
+                odom_suf = self.get_parameter('topic_suffix.odometry').get_parameter_value().string_value
             ci_suf = self.get_parameter('topic_suffix.camera_info').get_parameter_value().string_value
             base_suf = self.get_parameter('base_frame_suffix').get_parameter_value().string_value
             self.registered_scan_topic = f"/{robot_ns}/{reg_suf}"
