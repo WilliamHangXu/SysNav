@@ -443,8 +443,8 @@ class VLMNode(Node):
             room_type_prompt = self.ROOM_TYPE_PROMPT_FREE
 
             # The object inventory is the primary signal; images are support.
-            if msg.objects:
-                room_type_prompt += f"\nObjects detected in the room: {msg.objects}\n"
+            # if msg.objects:
+            #     room_type_prompt += f"\nObjects detected in the room: {msg.objects}\n"
 
             # Label stability: keep the existing label unless the evidence clearly
             # indicates a different room type, and never swap it for a synonym

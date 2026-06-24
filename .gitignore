@@ -48,6 +48,7 @@ debug_obj/
 output/
 output_frames/
 recorded_videos/
+runlogs/
 
 # Project-specific
 src/base_autonomy/vehicle_simulator/mesh/*

@@ -553,7 +553,16 @@ void ViewPointManager::CheckViewPointRoomBoundaryCollision()
     }
     int room_id = room_mask_.at<int>(viewpoint_position_voxel.x(), viewpoint_position_voxel.y());
     // if (room_id == current_room_id_ || current_room_id_ == -1 || room_id == 0)
-    if (room_id == current_room_id_ || current_room_id_ == -1 || transit_across_room_)
+    // enter_wrong_room_ added: when the robot has wandered into a room != current_room_id_,
+    // SetCurrentRoomId() flags enter_wrong_room_ but keeps current_room_id_ pinned to the OLD
+    // room. Without this term every nearby viewpoint (now in the new room) fails the room gate,
+    // so GetViewPointCandidate() returns 0, execute() bails at "Cannot get candidate viewpoints"
+    // and the keypose graph / navgraph / room labels / exporter -- i.e. the scene graph -- freeze
+    // until the VLM reconciles the room (~50 s). Accepting viewpoints while enter_wrong_room_ is
+    // set keeps the planner producing candidates so the scene-graph pipeline never stalls. This
+    // mirrors the existing (ViewPointConnected(i) || enter_wrong_room_) relaxation in
+    // GetViewPointCandidate(). (Navigation behaviour is irrelevant here; only the JSON matters.)
+    if (room_id == current_room_id_ || current_room_id_ == -1 || transit_across_room_ || enter_wrong_room_)
     // if (room_id == current_room_id_ || current_room_id_ == -1)
     {
       // RCLCPP_INFO(rclcpp::get_logger("ViewPointManager"),
@@ -1305,13 +1314,27 @@ int ViewPointManager::GetViewPointCandidate()
   viewpoint_in_collision_cloud_->clear();
   candidate_indices_.clear();
 
+  // ---- [PROF] per-filter survivor counts. A candidate must pass ALL of:
+  // !collision && line-of-sight && (connected || enter_wrong_room) && in-room.
+  // When the count returns 0, execute() prints "Cannot get candidate viewpoints"
+  // and freezes; these counts say WHICH predicate eliminated every viewpoint.
+  // grep "[PROF] viewpoints". (disabled; the prof_in_* bools below stay -- they are
+  // the candidate predicate, not profiling.)
+  // int prof_notcol = 0, prof_los = 0, prof_conn = 0, prof_inroom = 0;
   for (int i = 0; i < vp_.kViewPointNumber; i++)
   {
     SetViewPointCandidate(i, false);
     SetViewPointRoomCandidate(i, false);
-    if (!ViewPointInCollision(i) && ViewPointInLineOfSight(i) && (ViewPointConnected(i) || enter_wrong_room_) && ViewPointInRoom(i))
-    // if (!ViewPointInCollision(i) && ViewPointInLineOfSight(i) && ViewPointInRoom(i))
-    // if (!ViewPointInCollision(i) && ViewPointInLineOfSight(i) && ViewPointConnected(i))
+    bool prof_in_col = ViewPointInCollision(i);
+    bool prof_in_los = ViewPointInLineOfSight(i);
+    bool prof_in_conn = ViewPointConnected(i) || enter_wrong_room_;
+    bool prof_in_room = ViewPointInRoom(i);
+    // [PROF] survivor counts (disabled)
+    // if (!prof_in_col) prof_notcol++;
+    // if (prof_in_los) prof_los++;
+    // if (prof_in_conn) prof_conn++;
+    // if (prof_in_room) prof_inroom++;
+    if (!prof_in_col && prof_in_los && prof_in_conn && prof_in_room)
     {
       SetViewPointCandidate(i, true);
       candidate_indices_.push_back(i);
@@ -1322,7 +1345,7 @@ int ViewPointManager::GetViewPointCandidate()
       point.z = viewpoint_position.z;
       viewpoint_candidate_cloud_->points.push_back(point);
     }
-    if (ViewPointInCollision(i))
+    if (prof_in_col)
     {
       geometry_msgs::msg::Point viewpoint_position = GetViewPointPosition(i);
       pcl::PointXYZI point;
@@ -1333,6 +1356,11 @@ int ViewPointManager::GetViewPointCandidate()
       viewpoint_in_collision_cloud_->points.push_back(point);
     }
   }
+  // ---- [PROF] viewpoints log (disabled)
+  // RCLCPP_INFO(rclcpp::get_logger("standalone_logger"),
+  //             "[PROF] viewpoints total=%d notcol=%d los=%d conn=%d inroom=%d cand=%zu (enter_wrong_room=%d)",
+  //             vp_.kViewPointNumber, prof_notcol, prof_los, prof_conn, prof_inroom,
+  //             candidate_indices_.size(), static_cast<int>(enter_wrong_room_));
 
   if (!candidate_indices_.empty())
   {

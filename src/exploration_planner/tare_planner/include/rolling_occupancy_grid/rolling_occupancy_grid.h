@@ -91,7 +91,6 @@ public:
   {
     return occupancy_cloud_;
   }
-  void GetVisualizationCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr& vis_cloud);
 
   // Representation
   void GetObsVoxelNumber(int &obs_voxel_number);

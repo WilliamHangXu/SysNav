@@ -76,4 +76,16 @@ esac
 run+=( "$IMAGE" "$@" )
 
 echo "+ ${run[*]}"
-exec "${run[@]}"
+
+# RViz (run as root in the container) can't open the host X server until it's
+# authorized -- otherwise it aborts with "Authorization required ... could not
+# connect to display :0" and the pipeline runs on, headless. Grant local root
+# access for the lifetime of this run and revoke on exit, so we don't leave the
+# host X server loosened. Skip silently if xhost isn't installed / no X.
+if [ "$RVIZ" = "1" ] && command -v xhost >/dev/null 2>&1; then
+  xhost +local:root >/dev/null 2>&1 || true
+  trap 'xhost -local:root >/dev/null 2>&1 || true' EXIT
+  "${run[@]}"
+else
+  exec "${run[@]}"
+fi

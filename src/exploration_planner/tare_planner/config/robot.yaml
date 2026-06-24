@@ -11,7 +11,7 @@
 # semantic_mapping / detection launches.
 /**:
   ros__parameters:
-    robot_namespace: go2w_005
+    robot_namespace: go2w_026
 
     # --- registered cloud + odometry source --------------------------------
     # Every scene-graph node consumes a registered (odom-frame) point cloud and
@@ -24,7 +24,7 @@
     #                 cloud = /<ns>/cloud_registered   odom = /<ns>/state_estimation
     #               (scene_graph.launch then starts the bridge; the ros1_bridge
     #                carries /<ns>/livox/lidar instead of /<ns>/cloud_registered.)
-    registered_scan_source: slam_bridge
+    registered_scan_source: bag
 
     # Raw lidar feeding bag_slam_bridge -- only used when source == slam_bridge.
     # Defaults suit the go2w Livox (CustomMsg). Use 'pointcloud2' + a PointCloud2

@@ -114,8 +114,11 @@ the host). `Ctrl-C` → `tearing down (N processes)` → clean exit.
 `RVIZ=1` forwards the host X server and renders on the dGPU. The CUDA base only
 requests `compute,utility` driver caps, so `run.sh` adds
 `NVIDIA_DRIVER_CAPABILITIES=all` + `--device /dev/dri` (else RViz falls back to
-Mesa and dies with `failed to load driver: iris`). You may need `xhost
-+local:root` once per host login. Set `RVIZ=0` for headless.
+Mesa and dies with `failed to load driver: iris`). The container runs as root, so
+`run.sh` also grants it X access (`xhost +local:root`) for the lifetime of the run
+and revokes it on exit — without that, RViz aborts with `Authorization required …
+could not connect to display`. (Needs `xhost`, i.e. `x11-xserver-utils`, on an X11
+session; harmless no-op otherwise.) Set `RVIZ=0` for headless.
 
 ## Per-robot / per-bag config
 

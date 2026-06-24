@@ -143,14 +143,35 @@ public:
       if (parameters_.kUseFrontier)
       {
         bool remove_noise = (registered_cloud_count_ == 0);
+        // UpdateOccupancy + RayTrace maintain the rolling occupancy grid (frontier /
+        // occupied state) and stay. The full-grid debug render
+        // RollingOccupancyGrid::GetVisualizationCloud -> /rolling_occupancy_grid_cloud
+        // was REMOVED: it rescanned the entire fixed-size grid on every scan (~45 ms,
+        // ~62% of the single executor thread) to publish a cloud no node subscribes
+        // to and that isn't in the loaded RViz config. occupied_cloud is a DIFFERENT,
+        // incremental cloud (-> /occupied_cloud, consumed by room_segmentation) and
+        // stays.
+        // ---- [PROF] per-step timing; grep "[PROF] UpdateRegCloud". (disabled)
+        // misc_utils_ns::Timer prof_occ("occ"); prof_occ.Start();
         rolling_occupancy_grid_->UpdateOccupancy<PCLPointType>(cloud);
+        // prof_occ.Stop(false);
+        // misc_utils_ns::Timer prof_ray("ray"); prof_ray.Start();
         rolling_occupancy_grid_->RayTrace(robot_position_, remove_noise);
-        rolling_occupancy_grid_->GetVisualizationCloud(rolling_occupancy_grid_cloud_->cloud_);
-        rolling_occupancy_grid_cloud_->Publish();
+        // prof_ray.Stop(false);
 
         // ------------------------------------------
+        // misc_utils_ns::Timer prof_occgen("occgen"); prof_occgen.Start();
         occupied_cloud->cloud_ = rolling_occupancy_grid_->GetUpdatedOccupiedCloudAll();
+        // prof_occgen.Stop(false);
+        // misc_utils_ns::Timer prof_occpub("occpub"); prof_occpub.Start();
         occupied_cloud->Publish();
+        // prof_occpub.Stop(false);
+
+        // RCLCPP_INFO(rclcpp::get_logger("standalone_logger"),
+        //             "[PROF] UpdateRegCloud occ=%d ray=%d occgen=%d occpub=%d us | occ_pts=%zu",
+        //             prof_occ.GetDuration("us"), prof_ray.GetDuration("us"),
+        //             prof_occgen.GetDuration("us"), prof_occpub.GetDuration("us"),
+        //             occupied_cloud->cloud_->points.size());
       }
     }
   }
@@ -383,7 +404,6 @@ private:
   std::shared_ptr<pointcloud_utils_ns::PCLCloud<PlannerCloudPointType>> planner_cloud_;
   std::shared_ptr<pointcloud_manager_ns::PointCloudManager> pointcloud_manager_;
   std::shared_ptr<rolling_occupancy_grid_ns::RollingOccupancyGrid> rolling_occupancy_grid_;
-  std::shared_ptr<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>> rolling_occupancy_grid_cloud_;
   std::shared_ptr<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>> rolling_frontier_cloud_;
   std::shared_ptr<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>> rolling_filtered_frontier_cloud_;
 

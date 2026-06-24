@@ -1068,6 +1068,13 @@ void SensorCoveragePlanner3D::RegisteredScanCallback(
     return;
   }
 
+  // ---- [PROF] registered-scan callback timing. (disabled)
+  // static auto prof_last_cb = std::chrono::steady_clock::now();
+  // auto prof_cb_t0 = std::chrono::steady_clock::now();
+  // double prof_cb_gap_ms =
+  //     std::chrono::duration<double, std::milli>(prof_cb_t0 - prof_last_cb).count();
+  // prof_last_cb = prof_cb_t0;
+
   registered_cloud_count_ = (registered_cloud_count_ + 1) % 5;
 
   pcl::PointCloud<pcl::PointXYZ>::Ptr registered_scan_tmp(
@@ -1076,6 +1083,7 @@ void SensorCoveragePlanner3D::RegisteredScanCallback(
   if (registered_scan_tmp->points.empty()) {
     return;
   }
+  // size_t prof_in_pts = registered_scan_tmp->points.size();  // [PROF] disabled
   *(registered_scan_stack_->cloud_) += *(registered_scan_tmp);
   pointcloud_downsizer_.Downsize(
       registered_scan_tmp, kKeyposeCloudDwzFilterLeafSize,
@@ -1105,6 +1113,15 @@ void SensorCoveragePlanner3D::RegisteredScanCallback(
     registered_scan_stack_->cloud_->clear();
     keypose_cloud_update_ = true;
   }
+
+  // ---- [PROF] RegScanCb log (disabled)
+  // double prof_cb_ms = std::chrono::duration<double, std::milli>(
+  //                         std::chrono::steady_clock::now() - prof_cb_t0)
+  //                         .count();
+  // RCLCPP_INFO(this->get_logger(),
+  //             "[PROF] RegScanCb gap=%.0fms total=%.1fms in_pts=%zu%s",
+  //             prof_cb_gap_ms, prof_cb_ms, prof_in_pts,
+  //             registered_cloud_count_ == 0 ? " [keypose]" : "");
 }
 
 void SensorCoveragePlanner3D::TerrainMapCallback(
@@ -1953,6 +1970,19 @@ void SensorCoveragePlanner3D::SetCurrentRoomId()
       robot_position_tmp, shift_, 1.0 / room_resolution_);
   Eigen::Vector3i robot_position_voxel_old = misc_utils_ns::point_to_voxel(
       robot_position_old_tmp, shift_, 1.0 / room_resolution_);
+  // Bulletproofing: room_mask_ comes from room_segmentation and is empty until the
+  // first mask arrives; the robot voxel can also fall outside it. An unguarded
+  // cv::Mat::at() on an empty mat / out-of-range index throws and would kill the node
+  // (and with it the scene-graph JSON). Skip the room-id update this cycle if we can't
+  // index safely -- the rest of execute()'s scene-graph work still runs.
+  if (room_mask_.empty() ||
+      robot_position_voxel_new.x() < 0 || robot_position_voxel_new.x() >= room_mask_.rows ||
+      robot_position_voxel_new.y() < 0 || robot_position_voxel_new.y() >= room_mask_.cols ||
+      robot_position_voxel_old.x() < 0 || robot_position_voxel_old.x() >= room_mask_.rows ||
+      robot_position_voxel_old.y() < 0 || robot_position_voxel_old.y() >= room_mask_.cols)
+  {
+    return;
+  }
   int room_id_tmp_ = room_mask_.at<int>(robot_position_voxel_new.x(),
                                         robot_position_voxel_new.y());
   int last_room_id_tmp_ = room_mask_.at<int>(robot_position_voxel_old.x(),
@@ -3880,9 +3910,19 @@ void SensorCoveragePlanner3D::execute() {
   overall_processing_timer.Start();
   if (keypose_cloud_update_) {
     keypose_cloud_update_ = false;
+    // ---- [PROF] main-loop timing. (disabled)
+    // static auto prof_exec_last = std::chrono::steady_clock::now();
+    // auto prof_exec_t0 = std::chrono::steady_clock::now();
+    // double prof_exec_gap_ms =
+    //     std::chrono::duration<double, std::milli>(prof_exec_t0 - prof_exec_last)
+    //         .count();
+    // prof_exec_last = prof_exec_t0;
+    // misc_utils_ns::Timer prof_roomlabel("roomlabel");
+    // prof_roomlabel.Start();
     UpdateRoomLabel();
     SetCurrentRoomId();
     PublishRoomTypeQueries();
+    // prof_roomlabel.Stop(false);
     // -------- Transit across rooms --------
     if (transit_across_room_ && !at_room_)
     {
@@ -3935,10 +3975,19 @@ void SensorCoveragePlanner3D::execute() {
     CreateVisibilityMarkers();
     
     int viewpoint_candidate_count = UpdateViewPoints();
-    if (viewpoint_candidate_count == 0) {
+    // SCENE-GRAPH BULLETPROOFING: a zero candidate-viewpoint count is a *motion-
+    // planning* condition, not a scene-graph one. This used to `return` here, which
+    // also skipped the keypose-graph / NavGraph / room-finishing work below -- i.e.
+    // froze the scene graph (and thus the exported JSON). Instead, keep building the
+    // scene graph every cycle and only skip the parts that genuinely need candidate
+    // viewpoints (the TSP path planning + coverage update, which only steer the robot
+    // and never touch the JSON). UpdateKeyposeGraph()/navgraph_->Update() below do not
+    // iterate the candidate set, so they are safe to run with zero candidates.
+    bool have_viewpoints = (viewpoint_candidate_count > 0);
+    if (!have_viewpoints) {
       RCLCPP_WARN(rclcpp::get_logger("standalone_logger"),
-                  "Cannot get candidate viewpoints, skipping this round");
-      return;
+                  "No candidate viewpoints this cycle; skipping motion planning, "
+                  "still updating the scene graph");
     }
 
     CheckDoorCloudInRange();
@@ -3958,26 +4007,31 @@ void SensorCoveragePlanner3D::execute() {
 
     int uncovered_point_num = 0;
     int uncovered_frontier_point_num = 0;
-    if (!exploration_finished_ || !kNoExplorationReturnHome) {
-      UpdateViewPointCoverage();
-      UpdateCoveredAreas(uncovered_point_num, uncovered_frontier_point_num);
-    } else {
-      viewpoint_manager_->ResetViewPointCoverage();
+    if (have_viewpoints) {
+      if (!exploration_finished_ || !kNoExplorationReturnHome) {
+        UpdateViewPointCoverage();
+        UpdateCoveredAreas(uncovered_point_num, uncovered_frontier_point_num);
+      } else {
+        viewpoint_manager_->ResetViewPointCoverage();
+      }
     }
 
     update_representation_timer.Stop(false);
     update_representation_runtime_ +=
         update_representation_timer.GetDuration("ms");
 
-    // Global TSP
+    // Global + Local TSP -- motion planning over the candidate viewpoints. Only run
+    // with candidates; otherwise leave the paths empty (the scene-graph work above has
+    // already run). The downstream Concatenate/GetLookAheadPoint/publish calls are
+    // empty-path safe (they return early / iterate zero times on empty paths).
     std::vector<int> global_cell_tsp_order;
     exploration_path_ns::ExplorationPath global_path;
-    GlobalPlanning(global_cell_tsp_order, global_path);
-
-    // Local TSP
     exploration_path_ns::ExplorationPath local_path;
-    LocalPlanning(uncovered_point_num, uncovered_frontier_point_num,
-                  global_path, local_path);
+    if (have_viewpoints) {
+      GlobalPlanning(global_cell_tsp_order, global_path);
+      LocalPlanning(uncovered_point_num, uncovered_frontier_point_num,
+                    global_path, local_path);
+    }
 
     near_home_ = GetRobotToHomeDistance() < kRushHomeDist;
     at_home_ = GetRobotToHomeDistance() < kAtHomeDistThreshold;
@@ -4049,12 +4103,15 @@ void SensorCoveragePlanner3D::execute() {
 
     overall_processing_timer.Stop(false);
     overall_runtime_ = overall_processing_timer.GetDuration("ms");
- 
+
+    // ---- [PROF] publish-tail timing. (disabled)
+    // misc_utils_ns::Timer prof_publishtail("publishtail");
+    // prof_publishtail.Start();
     visualizer_->GetGlobalSubspaceMarker(grid_world_, global_cell_tsp_order);
     Eigen::Vector3d viewpoint_origin = viewpoint_manager_->GetOrigin();
     visualizer_->GetLocalPlanningHorizonMarker(viewpoint_origin.x(), viewpoint_origin.y(), robot_position_.z);
     visualizer_->PublishMarkers();
-    
+
     PublishFreespaceCloud();
 
     PublishLocalPlanningVisualization(local_path);
@@ -4062,6 +4119,21 @@ void SensorCoveragePlanner3D::execute() {
     PublishRoomTypeVisualization();
     PublishObjectNodeMarkers();
     PublishRuntime();
+    // prof_publishtail.Stop(false);
+
+    // ---- [PROF] execute log (disabled)
+    // double prof_exec_total_ms =
+    //     std::chrono::duration<double, std::milli>(
+    //         std::chrono::steady_clock::now() - prof_exec_t0)
+    //         .count();
+    // RCLCPP_INFO(this->get_logger(),
+    //             "[PROF] execute gap=%.0fms total=%.0fms | roomlabel=%dms "
+    //             "updaterep=%dms global=%dms localsample=%dms localpath=%dms "
+    //             "publishtail=%dms",
+    //             prof_exec_gap_ms, prof_exec_total_ms,
+    //             prof_roomlabel.GetDuration("ms"), update_representation_runtime_,
+    //             global_planning_runtime_, local_viewpoint_sampling_runtime_,
+    //             local_path_finding_runtime_, prof_publishtail.GetDuration("ms"));
 
     stayed_in_room_counter_++;
   }
@@ -4683,6 +4755,14 @@ void SensorCoveragePlanner3D::UpdateRoomLabel()
   {
     Eigen::Vector3f point_pos(point.x, point.y, point.z);
     Eigen::Vector3i point_voxel_ind = misc_utils_ns::point_to_voxel(point_pos, shift_, 1.0 / room_resolution_);
+    // Bulletproofing: skip points whose voxel falls outside room_mask_ (also covers an
+    // empty mask before room_segmentation publishes). An unguarded cv::Mat::at() would
+    // throw and kill the node.
+    if (point_voxel_ind.x() < 0 || point_voxel_ind.x() >= room_mask_.rows ||
+        point_voxel_ind.y() < 0 || point_voxel_ind.y() >= room_mask_.cols)
+    {
+      continue;
+    }
     int room_id = room_mask_.at<int>(point_voxel_ind.x(), point_voxel_ind.y());
     if (representation_->HasRoomNode(room_id))
     {
@@ -5474,7 +5554,7 @@ void SensorCoveragePlanner3D::CheckObjectFound()
       if (!representation_->HasRoomNode(room_id))
       {
         // RCLCPP_WARN(this->get_logger(), "❌❌❌Object %s with id %d found in unknown room with id %d",
-                    object_node.label_.c_str(), object_node.object_id_[0], room_id);
+        //             object_node.label_.c_str(), object_node.object_id_[0], room_id);
         continue;
       }
       std::string img_path = object_node.img_path_;
@@ -5482,7 +5562,7 @@ void SensorCoveragePlanner3D::CheckObjectFound()
       if (!std::filesystem::exists(img_path))
       {
         // RCLCPP_ERROR(this->get_logger(), "❌❌❌Image path %s does not exist, remove the object %s with id %d from consideration",
-                    img_path.c_str(), object_node.label_.c_str(), object_node.object_id_[0]);
+        //             img_path.c_str(), object_node.label_.c_str(), object_node.object_id_[0]);
         error_object_ids.push_back(id);
         continue;
       }
@@ -5490,7 +5570,7 @@ void SensorCoveragePlanner3D::CheckObjectFound()
       std::string label = room_node.GetRoomLabel();
       
       // RCLCPP_ERROR(this->get_logger(), "❌❌❌Object %s with id %d in room %s with is_considered_ %d, is_asked_vlm_ %d, visible_viewpoint_indices_ size %d",
-              object_node.label_.c_str(), object_node.object_id_[0], label.c_str(), object_node.IsConsidered(), object_node.is_asked_vlm_, (int)object_node.visible_viewpoint_indices_.size());
+      //         object_node.label_.c_str(), object_node.object_id_[0], label.c_str(), object_node.IsConsidered(), object_node.is_asked_vlm_, (int)object_node.visible_viewpoint_indices_.size());
 
       if (spatial_condition_=="")
       {

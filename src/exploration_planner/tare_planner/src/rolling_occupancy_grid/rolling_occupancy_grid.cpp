@@ -651,48 +651,6 @@ void RollingOccupancyGrid::RayTraceHelper(const Eigen::Vector3i &start_sub, cons
   }
 }
 
-void RollingOccupancyGrid::GetVisualizationCloud(pcl::PointCloud<pcl::PointXYZI>::Ptr& vis_cloud)
-{
-  vis_cloud->clear();
-  int cell_number = occupancy_array_->GetCellNumber();
-  for (int i = 0; i < cell_number; i++)
-  {
-    int array_ind = rolling_grid_->GetArrayInd(i);
-    // if (occupancy_array_->GetCellValue(array_ind) == CellState::COVERED ||
-    //     occupancy_array_->GetCellValue(array_ind) == CellState::FREE ||
-    //     occupancy_array_->GetCellValue(array_ind) == CellState::OCCUPIED)
-    if (occupancy_array_->GetCellValue(array_ind) == CellState::OCCUPIED)
-    {
-      Eigen::Vector3d position = occupancy_array_->Ind2Pos(i);
-      pcl::PointXYZI point;
-      point.x = position.x();
-      point.y = position.y();
-      point.z = position.z();
-      // if (point.z < robot_position_.z() -0.6 || point.z > robot_position_.z() + 1.0)
-      // {
-      //   continue;
-      // }
-      if (occupancy_array_->GetCellValue(array_ind) == CellState::OCCUPIED)
-      {
-        point.intensity = 0.0;
-      }
-      else if (occupancy_array_->GetCellValue(array_ind) == CellState::FREE)
-      {
-        point.intensity = 1.0;
-      }
-      else if (occupancy_array_->GetCellValue(array_ind) == CellState::COVERED)
-      {
-        point.intensity = 2.0;
-      }
-      else
-      {
-        point.intensity = 3.0; // Unknown state
-      }
-      vis_cloud->points.push_back(point);
-    }
-  }
-}
-
 bool RollingOccupancyGrid::InRange(const Eigen::Vector3i& sub, const Eigen::Vector3i& sub_min,
                                    const Eigen::Vector3i& sub_max)
 {

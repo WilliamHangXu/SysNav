@@ -12,10 +12,10 @@
     # Image contract = rectified (Phase 4): planner room-view crops use
     # image_rect_color; PointToCameraView projects with the rectified camera_info
     # P matrix (no distortion) + base->camera extrinsic from tf.
-    # topic_suffix.camera_image: camera/image_rect_color
-    # topic_suffix.camera_info: camera_rect/camera_info
-    topic_suffix.camera_image: camera/image_raw
-    topic_suffix.camera_info:  camera/camera_info
+    topic_suffix.camera_image: camera/image_rect_color
+    topic_suffix.camera_info: camera_rect/camera_info
+    # topic_suffix.camera_image: camera/image_raw
+    # topic_suffix.camera_info:  camera/camera_info
     base_frame_suffix: base
     room_resolution: 0.1
     room_x: 3000

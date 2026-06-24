@@ -15,10 +15,10 @@
     # Image contract = rectified: the detector consumes image_rect_color and the
     # cloud projection uses the rectified camera_info P matrix (no distortion) +
     # the base->camera extrinsic from tf. See cloud_image_fusion.set_calibration().
-    # topic_suffix.camera_image: camera/image_rect_color
-    # topic_suffix.camera_info: camera_rect/camera_info
-    topic_suffix.camera_image: camera/image_raw
-    topic_suffix.camera_info:  camera/camera_info
+    topic_suffix.camera_image: camera/image_rect_color
+    topic_suffix.camera_info: camera_rect/camera_info
+    # topic_suffix.camera_image: camera/image_raw
+    # topic_suffix.camera_info:  camera/camera_info
     base_frame_suffix: base
     detection_linear_state_time_bias: 0.0
     detection_angular_state_time_bias: 0.0
