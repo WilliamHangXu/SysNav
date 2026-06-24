@@ -24,7 +24,7 @@
 # result onto the robot's ROS 1 master, then runs `parameter_bridge` (reads it as
 # /topics). Live config: no /clock (use_sim_time:=false).
 topics:
-  - topic: /__NS__/livox/lidar
+  - topic: /__NS__/cloud_registered
     type: sensor_msgs/msg/PointCloud2
     queue_size: 10
   - topic: /__NS__/lio/odometry

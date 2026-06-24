@@ -1,8 +1,20 @@
 # ROS 1 (Noetic) ↔ ROS 2 (Jazzy) bridge for the scene-graph pipeline
 
-Runtime `ros1_bridge` so a **ROS 1 Noetic** robot (or a ROS 1 bag) can feed the
-**ROS 2 Jazzy** scene-graph pipeline live. The pipeline runs natively on the host;
-this directory only stands up the bridge.
+`ros1_bridge` so a **ROS 1 Noetic** robot (or a ROS 1 bag) can feed the **ROS 2
+Jazzy** scene-graph pipeline.
+
+**In normal use you don't run anything here directly.** The bridge runs *inside*
+the unified dev container (see `../README.md`): `supervisor.sh` calls
+`start_bridge.sh` with the `bridge_topics.yaml` allowlist. This directory holds:
+
+- `start_bridge.sh` + `bridge_topics.yaml` — the shared bridge launch logic +
+  topic allowlist, consumed by the unified container's supervisor.
+- `Dockerfile` + `entrypoint.sh` — an **optional standalone** bridge-only image
+  (`sysnav-ros1-bridge:latest`) for inspecting the bridge in isolation.
+
+The rest of this doc is bridge-internals reference: the upstream builder
+dependency, the allowlist + QoS, `param-bridge` vs `dynamic_bridge`, and the
+live-calibration gotchas.
 
 ## Why a prebuilt upstream builder (read before building)
 
@@ -37,108 +49,102 @@ Our `Dockerfile` adds only a thin entrypoint so the container *runs the bridge*.
 
 ## Prerequisites
 
-- Docker (no GPU needed for the bridge itself; the pipeline's GPU needs are
-  unchanged and run on the host).
-- The scene-graph pipeline built/runnable on the host (native ROS 2 Jazzy).
-- Linux host (these compose files use `network_mode: host`).
+- Docker (no GPU needed for the bridge itself).
+- Linux host (`--network host` for DDS discovery).
 - **amd64 only** — the upstream builder does not currently publish arm64 artifacts.
 
-## Build (two images, once)
+## Build
+
+The upstream bridge compiler is a prerequisite for **the unified image** (its
+graft `COPY`s from it) and for the optional standalone bridge image:
 
 ```bash
-# 1. The upstream bridge compiler (≈10 min; needs ~1 GB RAM per CPU core)
+# The upstream bridge compiler (≈10 min; needs ~1 GB RAM per CPU core)
 git clone --recurse-submodules \
   https://github.com/TommyChangUMD/ros-jazzy-ros1-bridge-builder.git
 cd ros-jazzy-ros1-bridge-builder
 docker build . -t ros-jazzy-ros1-bridge-builder:latest
+```
 
-# 2. Our thin runtime layer
+The unified image grafts the compiled bridge from this builder (see
+`../Dockerfile`), so for normal use you stop here. **Optional** — a standalone
+bridge-only image:
+
+```bash
 cd /home/all/AlphaZ/SysNav
 docker build -t sysnav-ros1-bridge:latest docker/ros1_bridge
 ```
 
 ---
 
-## Use it — Step 2 of your test plan: the ROS 1 bag
+## Run the bridge — through the unified container
 
-This is the closest possible proxy for the live robot: it replays the raw ROS 1
-`.bag` through Noetic and across the real bridge.
-
-```bash
-# Set robot.yaml -> robot_namespace: go2w_016 first (matches this bag).
-ROS1_BAG_DIR=/home/all/AlphaZ/bags/multifloor_test_slam \
-ROS_DOMAIN_ID=0 \
-docker compose -f docker/ros1_bridge/docker-compose.yml up
-```
-
-Then, on the host (native Jazzy):
+Both the ROS 1 bag and the live robot run through the unified container, which
+starts roscore (bag mode), the bridge, and the pipeline together with the right
+`use_sim_time` and start ordering:
 
 ```bash
-source install/setup.bash
-ros2 launch tare_planner scene_graph.launch use_sim_time:=true   # sim time: /clock comes from the bag
+# ROS 1 bag through the bridge (set robot.yaml -> robot_namespace to match the bag)
+MODE=bag  BAG=/home/all/AlphaZ/bags/multifloor_test_slam docker/run.sh
+
+# live robot
+MODE=live ROBOT_IP=<robot-ip> LAPTOP_IP=<laptop-ip> docker/run.sh
 ```
 
-`use_sim_time:=true` here because the bag publishes `/clock` (via `rosbag play
---clock`) and the bridge carries it. The default in `scene_graph.launch` is
-already `true`, so you can omit the arg.
+See `../README.md` for all knobs. The bridge always runs in `param-bridge` mode
+(the explicit allowlist) — eager bridges + per-topic QoS remove the ~30s live
+calibration lag (see [Bridging modes](#bridging-modes-selective-vs-allowlist)).
 
-## Use it — Step 3: the live robot
+## Standalone bridge (optional, debugging)
 
-No bag, no roscore in a container — the bridge talks to the **robot's** master.
-Use **`param-bridge`** (the explicit allowlist) here: on a live robot it removes the
-~30s startup calibration lag that selective `dynamic_bridge` causes (see
-[Bridging modes](#bridging-modes-selective-vs-allowlist)).
+To run *only* the bridge in its own container — e.g. to inspect what crosses
+without the pipeline — use the optional `sysnav-ros1-bridge:latest` image:
 
 ```bash
 docker run --rm -it --network host --ipc host \
   -e ROS_MASTER_URI=http://<robot-ip>:11311 \
   -e ROS_IP=<laptop-ip> \
   -e ROS_DOMAIN_ID=0 \
-  -e FASTRTPS_DEFAULT_PROFILES_FILE=/fastdds_udp_only.xml \
-  -e FASTDDS_DEFAULT_PROFILES_FILE=/fastdds_udp_only.xml \
-  -v $(pwd)/docker/ros1_bridge/fastdds_udp_only.xml:/fastdds_udp_only.xml:ro \
   -v $(pwd)/docker/ros1_bridge/bridge_topics.yaml:/bridge_topics.yaml:ro \
   -v $(pwd)/src/exploration_planner/tare_planner/config/robot.yaml:/robot.yaml:ro \
   sysnav-ros1-bridge:latest param-bridge
 ```
 
-- **`ROS_IP=<laptop-ip>` is required live** — your laptop's IP on the robot's subnet
-  (e.g. `192.168.123.190`); without it the robot's ROS 1 publishers can't send data
-  back. The UDP-only profile is needed for the same root-container ↔ host-pipeline
-  reason as the bag test.
+- **`ROS_IP=<laptop-ip>` is required live** — your laptop's IP on the robot's
+  subnet (e.g. `192.168.123.190`); without it the robot's ROS 1 publishers can't
+  send data back.
 - **No robot name to edit.** `bridge_topics.yaml` uses a `__NS__` placeholder; the
   `param-bridge` entrypoint reads `robot_namespace` from the mounted `robot.yaml`
-  (the one place the robot name lives) and renders it before loading. So switching
-  robots is a one-line edit in `robot.yaml` — same as the rest of the pipeline.
-  Nothing else in the allowlist is hardcoded beyond topic names + QoS.
+  (the one place the robot name lives) and renders it before loading.
+- **No UDP-only FastDDS profile.** That hack only existed for a root *container* ↔
+  non-root *host* process. Run the pipeline in another container on the same
+  `--ipc host` (or just use the unified container) and DDS shared memory works.
 
-Then on the host:
-
-```bash
-ros2 launch tare_planner scene_graph.launch use_sim_time:=false   # wall clock — no /clock live
-```
-
-> ⚠️ **The one trap:** `use_sim_time` flips from `true` (bag) to **`false`**
-> (live). Leave it `true` on the live robot and the pipeline waits forever for a
-> `/clock` that never arrives. Live also means **no end-of-bag watchdog** — rely on
-> periodic snapshots (`save_interval_s`) or the manual trigger
-> (`ros2 topic pub --once /keyboard_input std_msgs/String "{data: 'ssg'}"`).
+> ⚠️ **`use_sim_time` flips bag → live.** The unified container sets it for you,
+> but if you launch the pipeline by hand: `true` for the bag (it publishes
+> `/clock`), **`false`** live (wall clock, no `/clock`). Leave it `true` live and
+> the pipeline waits forever for a `/clock` that never arrives. Live also has no
+> end-of-bag watchdog — rely on periodic snapshots (`save_interval_s`) or the
+> manual trigger (`ros2 topic pub --once /keyboard_input std_msgs/String "{data:
+> 'ssg'}"`).
 
 ## Bridging modes: selective vs allowlist
 
-Two modes, two entrypoint subcommands. **Bag test → `bridge`; live robot →
-`param-bridge`.**
+The unified container always uses **`param-bridge`** (the explicit allowlist) for
+both bag and live — it's strictly better on the live robot and fine for the bag.
+The selective **`bridge`** (`dynamic_bridge`) survives only as a standalone-image
+subcommand, for ad-hoc inspection. The two compared:
 
-### `bridge` — selective `dynamic_bridge` (default)
+### `bridge` — selective `dynamic_bridge` (standalone image only)
 
 Bridges a topic only when the *other* side has a subscriber, so exactly the
 pipeline's inputs cross (`cloud_registered`, `lio/odometry`,
 `camera/image_rect_color`, `camera_rect/camera_info`, `/tf`, `/tf_static`, plus
-`/clock` under sim time) and direction is automatic. Zero config — good for the
-**bag test** and quick checks.
+`/clock` under sim time) and direction is automatic. Zero config — good for
+quick checks.
 
-- `BRIDGE_ALL=1` bridges *everything* (firehose) — used in the bag test to prime
-  `/clock` before the planner boots.
+- `BRIDGE_ALL=1` bridges *everything* (firehose) — primes `/clock` before the
+  planner boots (selective mode otherwise won't bridge `/clock` until subscribed).
 - A topic isn't bridged until its subscriber exists, so **start the pipeline first**.
   `ros2 topic echo <topic>` alone won't trigger a bridge — pass the type too.
 - **On a live robot it's slow to settle (~30s):** discovery over the robot's 300+
@@ -172,16 +178,16 @@ only topic names + QoS.
 
 ## Verify the bridge
 
-With the bridge up **and the pipeline running** (selective mode bridges on demand),
-on the host:
+From inside the running container (`docker exec -it <id> bash`, or a separate
+`docker/run.sh … shell`), with `<ns>` = your `robot_namespace`:
 
 ```bash
-ros2 topic list | grep go2w_016                 # cloud_registered, lio/odometry, camera/*, …
-ros2 topic hz /go2w_016/cloud_registered        # data actually flowing
-ros2 run tf2_tools view_frames                   # odom -> base -> front_cam tree present
+ros2 topic list | grep <ns>                 # cloud_registered, lio/odometry, camera/*, …
+ros2 topic hz /<ns>/cloud_registered        # data actually flowing
+ros2 run tf2_tools view_frames               # odom -> base -> front_cam tree present
 ```
 
-Inside the bridge container, `--print-pairs` shows what it can map:
+Using the standalone bridge image, `--print-pairs` shows what it can map:
 
 ```bash
 docker run --rm --network host sysnav-ros1-bridge:latest \
@@ -205,14 +211,13 @@ docker run --rm --network host sysnav-ros1-bridge:latest \
   bridge" QoS mismatch does not apply here.
 - **`ROS_DOMAIN_ID` must match** between the bridge container and the host
   pipeline (both default `0` here).
-- **"Topic is listed on the host but `ros2 topic echo` hangs."** Discovery works
-  (UDP) but data doesn't, because FastDDS uses shared memory for same-host data
-  and the root container's `/dev/shm` segments aren't usable by the non-root host
-  process — even with `ipc: host`. The compose fixes this by forcing the bridge's
-  DDS to **UDP-only** (`fastdds_udp_only.xml` + `FASTRTPS_DEFAULT_PROFILES_FILE`).
-  Trade-off: UDP loopback is heavier than SHM for the big LiDAR cloud; if it
-  bottlenecks, restore SHM by running the container as your host user
-  (`user: "$(id -u):$(id -g)"`) instead of disabling SHM.
+- **"Topic is listed but `ros2 topic echo` hangs" (only if you split containers).**
+  FastDDS uses shared memory for same-host data; a root *container*'s `/dev/shm`
+  segments aren't usable by a non-root *host* process even with `ipc: host`. The
+  unified container sidesteps this entirely — bridge and pipeline are in the SAME
+  container, so SHM just works. (This is why the old UDP-only FastDDS profile was
+  retired.) If you do split bridge and pipeline across two containers, share
+  `--ipc host` and run both as the same user.
 - **Bandwidth.** A full LiDAR `PointCloud2` stream through `dynamic_bridge` can be
   a CPU/bandwidth bottleneck — confirm `ros2 topic hz /go2w_016/cloud_registered`
   keeps up before trusting the live map. Selective mode (the default) already drops
@@ -225,10 +230,10 @@ docker run --rm --network host sysnav-ros1-bridge:latest \
 
 | File | Purpose |
 |---|---|
-| `Dockerfile` | Thin runtime layer over the upstream builder image. |
-| `entrypoint.sh` | Subcommands: `bridge` (default), `param-bridge`, `roscore`, `play`, `shell`. |
-| `bridge_topics.yaml` | Explicit topic allowlist + QoS for `param-bridge` (recommended live); `__NS__` placeholder filled from `robot.yaml`. |
-| `docker-compose.yml` | Bag-test topology: Noetic master+bag + bridge. |
+| `start_bridge.sh` | Shared bridge launcher: renders `__NS__` from `robot.yaml`, `rosparam load`s the allowlist, runs `parameter_bridge`. Used by the unified container's supervisor AND the standalone entrypoint. |
+| `bridge_topics.yaml` | Explicit topic allowlist + QoS for `param-bridge`; `__NS__` placeholder filled from `robot.yaml`. |
+| `Dockerfile` | Optional standalone bridge-only image over the upstream builder. |
+| `entrypoint.sh` | Standalone-image subcommands: `bridge`, `param-bridge`, `roscore`, `play`, `shell`. |
 
 ## Sources
 

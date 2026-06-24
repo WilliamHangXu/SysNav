@@ -37,7 +37,7 @@ windows:
             --start-offset 200
             --playback-duration 230
             --clock --start-paused --disable-keyboard-controls < /dev/null &
-          - sleep 15
+          - sleep 20
           - ros2 service call /rosbag2_player/resume rosbag2_interfaces/srv/Resume "{}"
           # Primer: replay the main bag's own /tf_static (the full go2w_016 robot
           # tree incl. base->front_cam->front_cam_ar) which --start-offset skips.
@@ -51,3 +51,31 @@ windows:
           - "# Probes / manual snapshot trigger (run by hand):"
           - "# ros2 topic hz /room_nodes_list"
           - "# ros2 topic pub --once /keyboard_input std_msgs/String \"{data: 'ssg'}\""
+
+  # - window_name: bag
+  #   layout: tiled
+  #   panes:
+  #     - shell_command:
+  #         # PER-RUN KNOBS: bag path, --start-offset, --playback-duration.
+  #         # Starts paused (so /clock is alive at the bag start time before the
+  #         # stack boots), then auto-resumes once the stack is up.
+  #         - >
+  #           ros2 bag play /home/all/AlphaZ/bags/multifloor_2_ros2
+  #           --start-offset 232
+  #           --playback-duration 275
+  #           --clock --start-paused --disable-keyboard-controls < /dev/null &
+  #         - sleep 15
+  #         - ros2 service call /rosbag2_player/resume rosbag2_interfaces/srv/Resume "{}"
+  #         # Primer: replay the main bag's own /tf_static (the full go2w_016 robot
+  #         # tree incl. base->front_cam->front_cam_ar) which --start-offset skips.
+  #         # Needed by the camera<-base tf calibration in semantic_mapping + the
+  #         # planner. Comes up AFTER resume so only the main player offers
+  #         # /rosbag2_player/resume (no service-name collision). No --clock here.
+  #         - >
+  #           ros2 bag play /home/all/AlphaZ/bags/multifloor_2_ros2
+  #           --topics /tf_static --loop --disable-keyboard-controls < /dev/null &
+  #     - shell_command:
+  #         - "# Probes / manual snapshot trigger (run by hand):"
+  #         - "# ros2 topic hz /room_nodes_list"
+  #         - "# ros2 topic pub --once /keyboard_input std_msgs/String \"{data: 'ssg'}\""
+

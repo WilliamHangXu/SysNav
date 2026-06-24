@@ -96,8 +96,8 @@ tare_planner_node:
     keypose_graph/kAddEdgeCollisionCheckPointNumThr : 1
 
     # NavGraph (lightweight contraction of the keypose graph for path planning)
-    navigation_graph/kNavNodeMinDist : 1.5
-    navigation_graph/kNavGraphUpdateInterval : 2
+    navigation_graph/kNavNodeMinDist : 1.25
+    navigation_graph/kNavGraphUpdateInterval : 4
 
     # ViewPointManager
     viewpoint_manager/number_x : 45
