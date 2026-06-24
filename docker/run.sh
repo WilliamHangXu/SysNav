@@ -10,8 +10,9 @@
 #   docker/run.sh shell          # debug shell in the container (workspace sourced)
 #   BUILD=1 ... docker/run.sh     # force a colcon rebuild (e.g. after C++ changes)
 #
-# Knobs: IMAGE MODE ROS_DOMAIN_ID RVIZ ROBOT_IP LAPTOP_IP BAG BUILD VOLUME
+# Knobs: IMAGE MODE ROS_DOMAIN_ID RVIZ OBJECTS ROBOT_IP LAPTOP_IP BAG BUILD VOLUME
 #   RVIZ=1 (default) forwards X; you may need `xhost +local:root` once on the host.
+#   OBJECTS=1 adds object detection+mapping; default 0 = rooms + navgraph only.
 #   Cloud-VLM keys (GEMINI_API_KEY / DASHSCOPE_API_KEY / VLM_PROVIDER) pass through
 #   from your environment if set.
 set -euo pipefail
@@ -22,6 +23,7 @@ IMAGE="${IMAGE:-sysnav:latest}"
 MODE="${MODE:-live}"
 ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}"
 RVIZ="${RVIZ:-1}"
+OBJECTS="${OBJECTS:-0}"
 BUILD="${BUILD:-0}"
 VOLUME="${VOLUME:-sysnav-build}"   # named volume holding /app/{build,install,log}
 
@@ -30,7 +32,7 @@ mkdir -p "$REPO/output" "$REPO/runlogs"
 
 run=( docker run --rm -it
   --gpus all --network host --ipc host
-  -e MODE="$MODE" -e RVIZ="$RVIZ" -e ROS_DOMAIN_ID="$ROS_DOMAIN_ID" -e BUILD="$BUILD"
+  -e MODE="$MODE" -e RVIZ="$RVIZ" -e OBJECTS="$OBJECTS" -e ROS_DOMAIN_ID="$ROS_DOMAIN_ID" -e BUILD="$BUILD"
   -e FORCE_ENGINE_REBUILD="${FORCE_ENGINE_REBUILD:-0}"
   -v "$VOLUME:/app"                       # build/install/log persist here
   -v "$REPO/src:/app/src"                 # the volatile workspace (mounted, not baked)

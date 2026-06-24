@@ -1249,9 +1249,9 @@ void SensorCoveragePlanner3D::ObjectNodeListCallback(
   // Single timestamp check and logging for the entire batch
   rclcpp::Time now = this->now();
   rclcpp::Duration time_diff = now - msg->header.stamp;
-  RCLCPP_INFO(this->get_logger(), 
-              "Received ObjectNodeList with %zu objects, time_diff=%.2f seconds", 
-              msg->nodes.size(), time_diff.seconds());
+  // RCLCPP_INFO(this->get_logger(), 
+  //             "Received ObjectNodeList with %zu objects, time_diff=%.2f seconds", 
+  //             msg->nodes.size(), time_diff.seconds());
   
   last_object_update_time_ = msg->header.stamp;
   
@@ -1512,12 +1512,12 @@ void SensorCoveragePlanner3D::GoalPointCallback(
   goal_position.z = goal_point_msg->point.z;
 
   target_room_id_ = room_mask_.at<int>(goal_position_voxel.x(), goal_position_voxel.y());
-  RCLCPP_INFO(this->get_logger(), "Target room id: %d", target_room_id_);
+  // RCLCPP_INFO(this->get_logger(), "Target room id: %d", target_room_id_);
 
   // If goal is in the same room, no need to transit
   if (target_room_id_ == current_room_id_ && !transit_across_room_)
   {
-    RCLCPP_INFO(this->get_logger(), "Goal point is in the same room as the robot");
+    // RCLCPP_INFO(this->get_logger(), "Goal point is in the same room as the robot");
     ResetRoomInfo();
     return;
   }
@@ -1561,8 +1561,8 @@ void SensorCoveragePlanner3D::RoomTypeCallback(
   }
   std::string room_type = room_type_msg->room_type;
   std::string current_room_type_ = representation_->GetRoomNode(room_id).GetRoomLabel();
-  RCLCPP_INFO(this->get_logger(), "Room id: %d, Room type: %s, Current room type: %s",
-              room_id, room_type.c_str(), current_room_type_.c_str());
+  // RCLCPP_INFO(this->get_logger(), "Room id: %d, Room type: %s, Current room type: %s",
+  //             room_id, room_type.c_str(), current_room_type_.c_str());
   // Latest answer wins: each re-query carries strictly better evidence, so the
   // newest VLM answer replaces the label rather than accumulating votes.
   auto &labels = representation_->GetRoomNode(room_id).GetLabelsMutable();
@@ -1658,7 +1658,7 @@ void SensorCoveragePlanner3D::KeyboardInputCallback(const std_msgs::msg::String:
   if (keyboard_input_msg->data == "dynamic")
   {
     dynamic_environment_ = true;
-    RCLCPP_INFO(this->get_logger(), "✅✅✅✅✅✅Dynamic environment mode on");
+    // RCLCPP_INFO(this->get_logger(), "✅✅✅✅✅✅Dynamic environment mode on");
   }
   if (keyboard_input_msg->data == "reset")
   {
@@ -1746,7 +1746,7 @@ void SensorCoveragePlanner3D::TargetObjectCallback(
       // Override the transit across room state
       ResetRoomInfo();
 
-      RCLCPP_INFO(this->get_logger(), "✅✅✅ Found target object id: %d", found_object_id_);
+      // RCLCPP_INFO(this->get_logger(), "✅✅✅ Found target object id: %d", found_object_id_);
     }
     else
     {
@@ -1758,7 +1758,7 @@ void SensorCoveragePlanner3D::TargetObjectCallback(
         found_object_distance_ = candidate_found_object_distance;
         ask_found_object_ = false;
 
-        RCLCPP_INFO(this->get_logger(), "✅✅✅ Update to a closer target object id: %d", found_object_id_);
+        // RCLCPP_INFO(this->get_logger(), "✅✅✅ Update to a closer target object id: %d", found_object_id_);
       }
     }
   }
@@ -1793,7 +1793,7 @@ void SensorCoveragePlanner3D::AnchorObjectCallback(
     found_anchor_object_room_id_ = anchor_object_room_id_;
     found_anchor_object_distance_ = anchor_object_distance;
 
-    RCLCPP_INFO(this->get_logger(), "🔖🔖🔖 Found anchor object id: %d", found_anchor_object_id_);
+    // RCLCPP_INFO(this->get_logger(), "🔖🔖🔖 Found anchor object id: %d", found_anchor_object_id_);
   }
 }
 
@@ -1865,13 +1865,13 @@ void SensorCoveragePlanner3D::SetStartAndEndRoomId()
 
   if (target_room_id_ == current_room_id_ && !transit_across_room_)
   {
-    RCLCPP_INFO(this->get_logger(), "Goal point is in the same room as the robot");
+    // RCLCPP_INFO(this->get_logger(), "Goal point is in the same room as the robot");
     ResetRoomInfo();
     return;
   }
 
-  RCLCPP_INFO(this->get_logger(), "Current room id: %d, Target room id: %d",
-              current_room_id_, target_room_id_);
+  // RCLCPP_INFO(this->get_logger(), "Current room id: %d, Target room id: %d",
+  //             current_room_id_, target_room_id_);
 
   // find a feasible path from the current room to the target room using the adjacency matrix
   std::vector<int> path = misc_utils_ns::find_path_bfs(current_room_id_ - 1, target_room_id_ - 1, adjacency_matrix);
@@ -1891,10 +1891,10 @@ void SensorCoveragePlanner3D::SetStartAndEndRoomId()
       return;
     }
   }
-  RCLCPP_INFO(this->get_logger(), "Path from current room to target room:");
+  // RCLCPP_INFO(this->get_logger(), "Path from current room to target room:");
   for (int i = 0; i < path.size(); i++)
   {
-    RCLCPP_INFO(this->get_logger(), "%d", path[i] + 1);
+    // RCLCPP_INFO(this->get_logger(), "%d", path[i] + 1);
   }
   // 取出path上最后两个房间的id作为起始和结束房间id
   start_room_id_ = path[path.size() - 2] + 1; // +1 to convert to 1-based index
@@ -1960,7 +1960,7 @@ void SensorCoveragePlanner3D::SetCurrentRoomId()
 
   if (room_id_tmp_ <= 0)
   {
-    RCLCPP_INFO(this->get_logger(), "Robot is not in any room");
+    // RCLCPP_INFO(this->get_logger(), "Robot is not in any room");
     return; // maybe just across a door, no need to update the room id
   }
 
@@ -1977,7 +1977,7 @@ void SensorCoveragePlanner3D::SetCurrentRoomId()
     room_mask_old_ = room_mask_.clone();
     viewpoint_manager_->SetCurrentRoomId(current_room_id_);
     grid_world_->SetCurrentRoomId(current_room_id_);
-    RCLCPP_INFO(this->get_logger(), "Current room id: %d", current_room_id_);
+    // RCLCPP_INFO(this->get_logger(), "Current room id: %d", current_room_id_);
     return;
   }
 
@@ -2004,7 +2004,7 @@ void SensorCoveragePlanner3D::SetCurrentRoomId()
     if (room_label_old_new != current_room_id_)
     {
       // 机器人在走入该房间前就已经知道该房间是一个新房间，一定要绕回原房间。
-      RCLCPP_INFO(this->get_logger(), "Robot enters a wrong room %d, but already knows it is a new room before entering.", room_id_tmp_);
+      // RCLCPP_INFO(this->get_logger(), "Robot enters a wrong room %d, but already knows it is a new room before entering.", room_id_tmp_);
       enter_wrong_room_ = true;
       viewpoint_manager_->SetEnterWrongRoom(enter_wrong_room_);
       return;
@@ -2026,19 +2026,19 @@ void SensorCoveragePlanner3D::SetCurrentRoomId()
         // TODO: 暂时的逻辑
         ask_vlm_change_room_ = false;
 
-        RCLCPP_INFO(this->get_logger(), "Room %d is merged into room %d", current_room_id_, room_id_tmp_);
+        // RCLCPP_INFO(this->get_logger(), "Room %d is merged into room %d", current_room_id_, room_id_tmp_);
         current_room_id_ = room_id_tmp_;
         robot_position_old_ = robot_position_;
         room_mask_old_ = room_mask_.clone();
         viewpoint_manager_->SetCurrentRoomId(current_room_id_);
         grid_world_->SetCurrentRoomId(current_room_id_);
-        RCLCPP_INFO(this->get_logger(), "Current room id: %d", current_room_id_);
+        // RCLCPP_INFO(this->get_logger(), "Current room id: %d", current_room_id_);
         return;
       }
       else
       {
         // 2. 被分割出去
-        RCLCPP_INFO(this->get_logger(), "Room %d is split into room %d", current_room_id_, room_id_tmp_);
+        // RCLCPP_INFO(this->get_logger(), "Room %d is split into room %d", current_room_id_, room_id_tmp_);
         ask_vlm_change_room_ = true;
         prev_room_id_ = current_room_id_;
         current_room_id_ = room_id_tmp_;
@@ -2404,8 +2404,8 @@ void SensorCoveragePlanner3D::SendInRoomWaypoint()
   waypoint.point.x = door_position_.x() + dx;
   waypoint.point.y = door_position_.y() + dy;
   waypoint.point.z = robot_position_.z;
-  RCLCPP_INFO(this->get_logger(), "Send waypoint in room: (%.2f, %.2f, %.2f)",
-              waypoint.point.x, waypoint.point.y, waypoint.point.z);
+  // RCLCPP_INFO(this->get_logger(), "Send waypoint in room: (%.2f, %.2f, %.2f)",
+              // waypoint.point.x, waypoint.point.y, waypoint.point.z);
   waypoint_pub_->publish(waypoint);
 }
 
@@ -3668,15 +3668,15 @@ void SensorCoveragePlanner3D::PublishWaypoint() {
   {
     if (ask_vlm_finish_room_)
     {
-      RCLCPP_INFO(this->get_logger(), "Room finished, waiting for next action");
+      // RCLCPP_INFO(this->get_logger(), "Room finished, waiting for next action");
     }
     if (ask_vlm_change_room_)
     {
-      RCLCPP_INFO(this->get_logger(), "Accidentally enter a new room");
+      // RCLCPP_INFO(this->get_logger(), "Accidentally enter a new room");
     }
     if (ask_found_object_)
     {
-      RCLCPP_INFO(this->get_logger(), "Found the target object, waiting for next action");
+      // RCLCPP_INFO(this->get_logger(), "Found the target object, waiting for next action");
     }
     // If the room is finished, we just send the robot position as the waypoint(not moving)
     waypoint.point.x = robot_position_.x;
@@ -3743,8 +3743,8 @@ double SensorCoveragePlanner3D::GetRobotToRoomDistance()
                                  robot_position_.z);
   double euler_length = (robot_position - door_position_).norm();
   double exploration_path_length = exploration_path_.GetLength() / 2.0; // because the path is a loop
-  RCLCPP_INFO(this->get_logger(), "Robot to room distance: %f, Exploration path length: %f",
-              euler_length, exploration_path_length);
+  // RCLCPP_INFO(this->get_logger(), "Robot to room distance: %f, Exploration path length: %f",
+              // euler_length, exploration_path_length);
   return std::max(euler_length, exploration_path_length);
 }
 
@@ -3784,8 +3784,8 @@ void SensorCoveragePlanner3D::GetToRoomState(bool &at_room, bool &near_room_1, b
         }
       }
     }
-    RCLCPP_INFO(this->get_logger(), "!!!!!!!!!!!!!!Near room 1: %d, Near room 2: %d, At room: %d, Current room: %d, Target room: %d",
-                near_room_1_, near_room_2_, at_room_, current_room_id_, end_room_id_);
+    // RCLCPP_INFO(this->get_logger(), "!!!!!!!!!!!!!!Near room 1: %d, Near room 2: %d, At room: %d, Current room: %d, Target room: %d",
+                // near_room_1_, near_room_2_, at_room_, current_room_id_, end_room_id_);
   }
 }
 
@@ -3906,7 +3906,7 @@ void SensorCoveragePlanner3D::execute() {
       viewpoint_manager_->SetTransitAcrossRoom(false);
       if (room_guide_counter_ % 3 == 0)
       {
-        RCLCPP_INFO(this->get_logger(), "Arrived at the room, waiting for next action");
+        // RCLCPP_INFO(this->get_logger(), "Arrived at the room, waiting for next action");
         room_guide_counter_ = 0;
         stayed_in_room_counter_ = 0;
         ResetRoomInfo();
@@ -4012,7 +4012,7 @@ void SensorCoveragePlanner3D::execute() {
         // if the room is too small, it can never finish the local coverage if only exploring within the room, so add the area limit
         if ((grid_world_->IsRoomFinished() && !local_coverage_planner_->IsLocalCoverageComplete() && !transit_across_room_)
             || (current_room.area_ < 6.0)) {
-          RCLCPP_INFO(this->get_logger(), "Room %d is nearly finished, publishing room navigation query in advance", current_room_id_);
+          // RCLCPP_INFO(this->get_logger(), "Room %d is nearly finished, publishing room navigation query in advance", current_room_id_);
           room_navigation_query_counter_++;
           if (room_navigation_query_counter_ % 3 == 1) {
             PublishRoomNavigationQuery();
@@ -4089,13 +4089,13 @@ void SensorCoveragePlanner3D::UpdateViewpointRep(){
   {
     // If the intersection is less than 20% of the current obs voxel number,
     // we update the viewpoint representation
-    RCLCPP_INFO(rclcpp::get_logger("UpdateViewpointRep"), "Intersection voxel number is low, updating viewpoint representation.");
+    // RCLCPP_INFO(rclcpp::get_logger("UpdateViewpointRep"), "Intersection voxel number is low, updating viewpoint representation.");
     add_viewpoint_rep_ = true;
   }
   // RCLCPP_ERROR(rclcpp::get_logger("UpdateViewpointRep"), "Object score: %f.", obj_score_);
   if (obj_score_ > 4.0)
   {
-    RCLCPP_INFO(rclcpp::get_logger("UpdateViewpointRep"), "Object score is high, adding viewpoint representation.");
+    // RCLCPP_INFO(rclcpp::get_logger("UpdateViewpointRep"), "Object score is high, adding viewpoint representation.");
     add_viewpoint_rep_ = true;
   }
 
@@ -5429,13 +5429,13 @@ void SensorCoveragePlanner3D::CheckObjectFound()
       GoalPointCallback(geomsg);
     }
 
-    RCLCPP_INFO(this->get_logger(), "✅✅✅Target object %s with id %d found", target_object_.c_str(), found_object_id_);
+    // RCLCPP_INFO(this->get_logger(), "✅✅✅Target object %s with id %d found", target_object_.c_str(), found_object_id_);
     nav_msgs::msg::Path path;
     found_object_distance_ = keypose_graph_->GetShortestPath(robot_position_, found_object_position_, false, path, true);
     double euclidean_distance_to_object_ = std::sqrt(std::pow(robot_position_.x - found_object_position_.x, 2) +
                                                      std::pow(robot_position_.y - found_object_position_.y, 2) +
                                                      std::pow(robot_position_.z - found_object_position_.z, 2));
-    RCLCPP_INFO(this->get_logger(), "Distance to the found object: %.2f meters", found_object_distance_);
+    // RCLCPP_INFO(this->get_logger(), "Distance to the found object: %.2f meters", found_object_distance_);
     if (found_object_distance_ < 1.0 && euclidean_distance_to_object_ < 2.0)
     {
       ask_found_object_ = true;
@@ -5462,18 +5462,18 @@ void SensorCoveragePlanner3D::CheckObjectFound()
       // if (considered_object_ids_.find(id) != considered_object_ids_.end())
       if (object_node.IsConsidered() || object_node.IsConsideredStrong())
       {
-        RCLCPP_INFO(this->get_logger(), "❌❌❌Object %s with id %d already considered, skip", object_node.label_.c_str(), id);
+        // RCLCPP_INFO(this->get_logger(), "❌❌❌Object %s with id %d already considered, skip", object_node.label_.c_str(), id);
         continue;
       }
       if (not object_node.is_asked_vlm_)
       {
-        RCLCPP_INFO(this->get_logger(), "❌❌❌Object %s with id %d label haven't been checked by VLM, skip", object_node.label_.c_str(), object_node.object_id_[0]);
+        // RCLCPP_INFO(this->get_logger(), "❌❌❌Object %s with id %d label haven't been checked by VLM, skip", object_node.label_.c_str(), object_node.object_id_[0]);
         continue;
       }
       int room_id = object_node.room_id_;
       if (!representation_->HasRoomNode(room_id))
       {
-        RCLCPP_WARN(this->get_logger(), "❌❌❌Object %s with id %d found in unknown room with id %d",
+        // RCLCPP_WARN(this->get_logger(), "❌❌❌Object %s with id %d found in unknown room with id %d",
                     object_node.label_.c_str(), object_node.object_id_[0], room_id);
         continue;
       }
@@ -5481,7 +5481,7 @@ void SensorCoveragePlanner3D::CheckObjectFound()
       // if this path does not exist, warn and remove the object and continue
       if (!std::filesystem::exists(img_path))
       {
-        RCLCPP_ERROR(this->get_logger(), "❌❌❌Image path %s does not exist, remove the object %s with id %d from consideration",
+        // RCLCPP_ERROR(this->get_logger(), "❌❌❌Image path %s does not exist, remove the object %s with id %d from consideration",
                     img_path.c_str(), object_node.label_.c_str(), object_node.object_id_[0]);
         error_object_ids.push_back(id);
         continue;
@@ -5489,7 +5489,7 @@ void SensorCoveragePlanner3D::CheckObjectFound()
       auto &room_node = representation_->GetRoomNode(room_id);
       std::string label = room_node.GetRoomLabel();
       
-      RCLCPP_ERROR(this->get_logger(), "❌❌❌Object %s with id %d in room %s with is_considered_ %d, is_asked_vlm_ %d, visible_viewpoint_indices_ size %d",
+      // RCLCPP_ERROR(this->get_logger(), "❌❌❌Object %s with id %d in room %s with is_considered_ %d, is_asked_vlm_ %d, visible_viewpoint_indices_ size %d",
               object_node.label_.c_str(), object_node.object_id_[0], label.c_str(), object_node.IsConsidered(), object_node.is_asked_vlm_, (int)object_node.visible_viewpoint_indices_.size());
 
       if (spatial_condition_=="")
@@ -5658,7 +5658,7 @@ void SensorCoveragePlanner3D::CheckAnchorObjectFound()
       if (distance_to_robot < 1.0)
       {
         found_anchor_object_viewpoint_positions_visited_.push_back(viewpoint.GetPosition());
-        RCLCPP_INFO(this->get_logger(), "Viewpoint %d is very close to the robot position, consider it as visited", viewpoint.GetId());
+        // RCLCPP_INFO(this->get_logger(), "Viewpoint %d is very close to the robot position, consider it as visited", viewpoint.GetId());
         continue;
       }
       // only add the viewpoint position if it is in the same room as the anchor object,
@@ -5692,13 +5692,13 @@ void SensorCoveragePlanner3D::CheckAnchorObjectFound()
       GoalPointCallback(geomsg);
     }
 
-    RCLCPP_INFO(this->get_logger(), "✅✅✅Anchor object %s with id %d found", anchor_object_.c_str(), found_anchor_object_id_);
+    // RCLCPP_INFO(this->get_logger(), "✅✅✅Anchor object %s with id %d found", anchor_object_.c_str(), found_anchor_object_id_);
     nav_msgs::msg::Path path;
     found_anchor_object_distance_ = keypose_graph_->GetShortestPath(robot_position_, found_anchor_object_position_, false, path, true);
     double euclidean_distance_to_object_ = std::sqrt(std::pow(robot_position_.x - found_anchor_object_position_.x, 2) +
                                                      std::pow(robot_position_.y - found_anchor_object_position_.y, 2) +
                                                      std::pow(robot_position_.z - found_anchor_object_position_.z, 2));
-    RCLCPP_INFO(this->get_logger(), "Distance to the found object: %.2f meters", found_anchor_object_distance_);
+    // RCLCPP_INFO(this->get_logger(), "Distance to the found object: %.2f meters", found_anchor_object_distance_);
     // if (found_object_distance_ < 1.0 && euclidean_distance_to_object_ < 2.0)
     // {
     //   ask_found_object_ = true;
@@ -5795,7 +5795,7 @@ void SensorCoveragePlanner3D::GetAnswer()
   }
   else
   {
-    RCLCPP_INFO(this->get_logger(), "Room %d finished, waiting for next action", current_room_id_);
+    // RCLCPP_INFO(this->get_logger(), "Room %d finished, waiting for next action", current_room_id_);
     if (!asked_in_advance_)
     {
       PublishRoomNavigationQuery();

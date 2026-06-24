@@ -11,6 +11,9 @@
 # Driven by env (set by docker/run.sh):
 #   MODE            live | bag | bag-direct          (default live)
 #   RVIZ            1|0   launch RViz (needs X)       (default 1)
+#   OBJECTS         1|0   run object detection+mapping (default 0 = rooms +
+#                         navgraph only, also skips the GPU YOLO engine export);
+#                         1 = full pipeline with objects
 #   ROS_DOMAIN_ID                                     (default 0)
 #   BUILD           1 forces a colcon rebuild
 #   FORCE_ENGINE_REBUILD  1 re-exports the TRT engines
@@ -25,6 +28,7 @@ set -uo pipefail
 
 MODE="${MODE:-live}"
 RVIZ="${RVIZ:-1}"
+OBJECTS="${OBJECTS:-0}"
 : "${ROS_DOMAIN_ID:=0}"; export ROS_DOMAIN_ID
 : "${AUTOPLAY_DELAY:=12}"
 APP=/app
@@ -60,21 +64,24 @@ set +u; source "$APP/install/setup.bash"; set -u
 [ "${1:-}" = "shell" ] && exec bash
 
 # YOLO TensorRT engines are GPU-architecture specific and need a live GPU, so they
-# cannot be baked at image-build time -- export here, once, on the real GPU.
-EXT="$APP/src/semantic_mapping/semantic_mapping/external"
-E1="$EXT/yoloe-26x-seg.engine"; E2="$EXT/yolov8x-worldv2_cus.engine"
-[ "${FORCE_ENGINE_REBUILD:-0}" = "1" ] && rm -f "$E1" "$E2"
-if [ ! -f "$E1" ] || [ ! -f "$E2" ]; then
-  echo "[supervisor] exporting YOLO TensorRT engines on the GPU (one-time) ..."
-  ( cd "$APP" && python3 set_yolo_e.py && python3 set_yolo_world.py ) \
-    || echo "[supervisor] WARN: engine export failed -- check GPU / torch."
+# cannot be baked at image-build time -- export here, once, on the real GPU. Skipped
+# when OBJECTS=0: the object branch (which is the only consumer) isn't launched.
+if [ "$OBJECTS" = "1" ]; then
+  EXT="$APP/src/semantic_mapping/semantic_mapping/external"
+  E1="$EXT/yoloe-26x-seg.engine"; E2="$EXT/yolov8x-worldv2_cus.engine"
+  [ "${FORCE_ENGINE_REBUILD:-0}" = "1" ] && rm -f "$E1" "$E2"
+  if [ ! -f "$E1" ] || [ ! -f "$E2" ]; then
+    echo "[supervisor] exporting YOLO TensorRT engines on the GPU (one-time) ..."
+    ( cd "$APP" && python3 set_yolo_e.py && python3 set_yolo_world.py ) \
+      || echo "[supervisor] WARN: engine export failed -- check GPU / torch."
+  fi
 fi
 
 # ---------------------------------------------------------------------------
 # Process supervision: background each piece, tear everything down on exit.
 # ---------------------------------------------------------------------------
 LOG_DIR="$APP/runlogs/$(date +%Y%m%d_%H%M%S)"; mkdir -p "$LOG_DIR"
-echo "[supervisor] MODE=$MODE  RVIZ=$RVIZ  logs -> $LOG_DIR"
+echo "[supervisor] MODE=$MODE  RVIZ=$RVIZ  OBJECTS=$OBJECTS  logs -> $LOG_DIR"
 PIDS=(); LAST_PID=""; PRIMARY=""
 
 launch() {  # launch <name> <cmd...>
@@ -94,7 +101,7 @@ trap cleanup EXIT INT TERM
 start_pipeline() {  # start_pipeline <use_sim_time>
   launch pipeline bash -c \
     "set +u; source $JAZZY_SETUP; source $APP/install/setup.bash; \
-     exec ros2 launch tare_planner scene_graph.launch use_sim_time:=$1 rviz:=$RVIZ"
+     exec ros2 launch tare_planner scene_graph.launch use_sim_time:=$1 rviz:=$RVIZ objects:=$OBJECTS"
 }
 
 case "$MODE" in

@@ -64,6 +64,7 @@ BUILD=1 MODE=bag-direct BAG=<dir> docker/run.sh
 |---|---|---|
 | `MODE` | `live` | `live` \| `bag` \| `bag-direct` |
 | `RVIZ` | `1` | Launch RViz (forwards X; see below) |
+| `OBJECTS` | `0` | Default = rooms + navgraph only (also skips the GPU YOLO engine export); `1` adds object detection+mapping |
 | `ROS_DOMAIN_ID` | `0` | DDS domain |
 | `BUILD` | `0` | `1` forces `colcon build` even if the volume already has one |
 | `FORCE_ENGINE_REBUILD` | `0` | `1` re-exports the YOLO TensorRT engines |

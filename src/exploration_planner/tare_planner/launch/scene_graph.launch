@@ -39,6 +39,7 @@ def _robot_params(tare_share):
 def generate_launch_description():
     use_sim_time = LaunchConfiguration('use_sim_time')
     rviz = LaunchConfiguration('rviz')
+    objects = LaunchConfiguration('objects')
 
     tare_share = get_package_share_directory('tare_planner')
     sem_share = get_package_share_directory('semantic_mapping')
@@ -63,18 +64,29 @@ def generate_launch_description():
         os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
         'tare_planner_ground.rviz')
 
-    def include(path, extra=None):
+    def include(path, extra=None, condition=None):
         args = {'use_sim_time': use_sim_time}
         if extra:
             args.update(extra)
         return IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(path), launch_arguments=args.items())
+            PythonLaunchDescriptionSource(path), launch_arguments=args.items(),
+            condition=condition)
 
     entries = [
         DeclareLaunchArgument('use_sim_time', default_value='true',
                               description='Use sim (bag) clock'),
         DeclareLaunchArgument('rviz', default_value='true',
                               description='Launch RViz alongside the pipeline'),
+        # Object mapping toggle. false (default) drops the object branch
+        # (detection_node + semantic_mapping_node) and exports scene graphs with
+        # rooms + navgraph only -- the planner just sees no object messages and
+        # exports an empty object list; room segmentation and navgraph are
+        # unaffected. NOTE room labeling still runs but DEGRADES to image-only:
+        # the /room_type_query object inventory (the VLM's primary signal) goes
+        # empty, so rooms are typed from the best-3 images alone. Set
+        # objects:=true to restore the full objects-first pipeline.
+        DeclareLaunchArgument('objects', default_value='false',
+                              description='Run object detection + mapping branch'),
     ]
 
     if slam_mode:
@@ -120,8 +132,10 @@ def generate_launch_description():
             parameters=[{'use_sim_time': use_sim_time}], output='screen'))
 
     entries += [
-        include(os.path.join(sem_share, 'detection_node_go2w_bag.launch')),
-        include(os.path.join(sem_share, 'semantic_mapping_go2w_bag.launch')),
+        include(os.path.join(sem_share, 'detection_node_go2w_bag.launch'),
+                condition=IfCondition(objects)),
+        include(os.path.join(sem_share, 'semantic_mapping_go2w_bag.launch'),
+                condition=IfCondition(objects)),
         include(os.path.join(tare_share, 'room_segmentation.launch'),
                 {'scenario': SCENARIO, 'robot_config': robot_yaml}),
         include(os.path.join(vlm_share, 'vlm_node.launch'),
