@@ -54,6 +54,9 @@ MODE=bag-direct BAG=/home/all/AlphaZ/bags/multifloor_test_slam_ros2 docker/run.s
 # ROS 1 bag through the bridge (in-container roscore + rosbag --clock)
 MODE=bag BAG=/home/all/AlphaZ/bags/multifloor_test_slam docker/run.sh
 
+# play only a window of the bag: skip 200s in, then play 230s (either knob optional)
+MODE=bag-direct BAG=<dir> START_OFFSET=200 DURATION=230 docker/run.sh
+
 # debug shell (workspace sourced); any MODE's env still applies
 MODE=bag-direct BAG=<dir> docker/run.sh shell
 
@@ -76,6 +79,8 @@ BUILD=1 MODE=bag-direct BAG=<dir> docker/run.sh
 | `ROBOT_IP` | — | **live**: robot's IP (its `roscore` host) → `ROS_MASTER_URI` |
 | `LAPTOP_IP` | — | **live**: your IP on the robot's subnet → `ROS_IP` |
 | `BAG` | — | **bag / bag-direct**: host bag directory (mounted ro at `/app/bag`) |
+| `START_OFFSET` | — | **bag / bag-direct**: seconds to skip from the bag start (empty = from 0) |
+| `DURATION` | — | **bag / bag-direct**: seconds to play, then stop (empty = to the end) |
 
 Cloud-VLM credentials (`GEMINI_API_KEY`, `DASHSCOPE_API_KEY`, `VLM_PROVIDER`,
 `QWEN_MODEL`, `QWEN_MODEL_LITE`) pass through from your environment if set.
@@ -117,6 +122,18 @@ and hands off to `docker/supervisor.sh`, which:
 
 Per-run logs land in `runlogs/<timestamp>/{bridge,pipeline,bag,…}.log` (mounted to
 the host). `Ctrl-C` → `tearing down (N processes)` → clean exit.
+
+The pipeline is backgrounded, so its output (RViz, planner, VLM, room
+segmentation, …) goes to the logfile, not your terminal. Follow it live from
+another terminal:
+
+```bash
+L=$(ls -dt runlogs/*/ | head -1)   # newest run dir
+tail -f "$L"pipeline.log           # whole stack; or bridge.log / bag.log
+tail -f "$L"*.log                  # all of them at once
+```
+
+Run it from the repo root (else anchor the glob: `runlogs/` → `<repo>/runlogs/`).
 
 ### Demo-mode handshake (MODE=demo)
 

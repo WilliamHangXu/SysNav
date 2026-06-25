@@ -22,7 +22,10 @@
 #   demo: like live, but the pipeline is gated -- waits for "start" on
 #         /scene_graph_generator/request before launching; optional
 #         REQ_TOPIC / RESP_TOPIC / ACK_TIMEOUT overrides
-#   bag / bag-direct: BAG_PATH (mounted bag dir)
+#   bag / bag-direct: BAG_PATH (mounted bag dir);
+#                     START_OFFSET / DURATION (seconds) trim playback (empty = whole
+#                     bag). A non-zero START_OFFSET also starts a /tf_static primer,
+#                     since the offset skips the bag's latched static-TF tree.
 #   GEMINI_API_KEY / DASHSCOPE_API_KEY ... passed through for the cloud VLM
 #
 # `supervisor.sh shell` drops into an interactive shell (workspace sourced) for
@@ -132,8 +135,19 @@ case "$MODE" in
       bash -c "source $NOETIC_SETUP; rosparam list" >/dev/null 2>&1 && break; sleep 1
     done
     launch bridge bash "$START_BRIDGE"
-    launch bag bash -c "source $NOETIC_SETUP; exec rosbag play --clock $BAG_PATH/*.bag"
+    # START_OFFSET / DURATION map to rosbag play's --start / --duration (seconds).
+    R1_OPTS=""
+    [ -n "${START_OFFSET:-}" ] && R1_OPTS="$R1_OPTS --start $START_OFFSET"
+    [ -n "${DURATION:-}" ]     && R1_OPTS="$R1_OPTS --duration $DURATION"
+    launch bag bash -c "source $NOETIC_SETUP; exec rosbag play --clock $R1_OPTS $BAG_PATH/*.bag"
     BAG_PID=$LAST_PID
+    # A non-zero --start skips the bag's latched /tf_static (the robot tf tree the
+    # camera<-base calibration needs), so re-emit it with a second looping player
+    # (no --clock). With offset 0 the main player already carries it.
+    if [ "${START_OFFSET:-0}" != "0" ]; then
+      launch tf_static_primer bash -c \
+        "source $NOETIC_SETUP; exec rosbag play --loop $BAG_PATH/*.bag --topics /tf_static"
+    fi
     # /tf_static survives via the bridge's transient_local QoS even if the pipeline
     # starts a few seconds in; the delay just primes /clock so TARE doesn't see the
     # 0 -> bag-time jump.
@@ -148,15 +162,29 @@ case "$MODE" in
     # Start PAUSED so /clock is alive at bag-start before the planner boots, then
     # resume once the stack is up (mirrors the tmuxp runner).
     : "${BAG_PATH:?bag-direct mode needs BAG_PATH (a ROS 2 bag directory)}"
+    # START_OFFSET / DURATION map to ros2 bag play --start-offset / --playback-duration.
+    R2_OPTS=""
+    [ -n "${START_OFFSET:-}" ] && R2_OPTS="$R2_OPTS --start-offset $START_OFFSET"
+    [ -n "${DURATION:-}" ]     && R2_OPTS="$R2_OPTS --playback-duration $DURATION"
     launch bag bash -c \
       "set +u; source $JAZZY_SETUP; source $APP/install/setup.bash; \
-       exec ros2 bag play '$BAG_PATH' --clock --start-paused --disable-keyboard-controls < /dev/null"
+       exec ros2 bag play '$BAG_PATH' $R2_OPTS --clock --start-paused --disable-keyboard-controls < /dev/null"
     BAG_PID=$LAST_PID
     start_pipeline true
     echo "[supervisor] waiting ${AUTOPLAY_DELAY}s for the stack, then resuming the bag ..."
     sleep "$AUTOPLAY_DELAY"
     bash -c "set +u; source $JAZZY_SETUP; source $APP/install/setup.bash; \
              ros2 service call /rosbag2_player/resume rosbag2_interfaces/srv/Resume '{}'" || true
+    # A non-zero --start-offset skips the bag's latched /tf_static (the robot tf tree
+    # incl. base->front_cam->front_cam_ar that camera<-base calibration needs). Re-emit
+    # it with a second player looping just /tf_static from bag start (no --clock).
+    # Started AFTER the resume so only the main player owns /rosbag2_player/resume
+    # (no service-name collision). Mirrors the tmuxp runner.
+    if [ "${START_OFFSET:-0}" != "0" ]; then
+      launch tf_static_primer bash -c \
+        "set +u; source $JAZZY_SETUP; source $APP/install/setup.bash; \
+         exec ros2 bag play '$BAG_PATH' --topics /tf_static --loop --disable-keyboard-controls < /dev/null"
+    fi
     PRIMARY=$BAG_PID              # exit when the bag finishes
     ;;
 

@@ -43,7 +43,7 @@ windows:
           # Starts paused (so /clock is alive at the bag start time before the
           # stack boots), then auto-resumes once the stack is up.
           - >
-            ros2 bag play /home/all/AlphaZ/bags/multifloor_test_slam_ros2
+            ros2 bag play /home/all/AlphaZ/bags/multifloor_test_slam_ros2_light_bag
             --start-offset 200
             --playback-duration 230
             --clock --start-paused --disable-keyboard-controls < /dev/null &
@@ -55,7 +55,7 @@ windows:
           # planner. Comes up AFTER resume so only the main player offers
           # /rosbag2_player/resume (no service-name collision). No --clock here.
           - >
-            ros2 bag play /home/all/AlphaZ/bags/multifloor_test_slam_ros2
+            ros2 bag play /home/all/AlphaZ/bags/multifloor_test_slam_ros2_light_bag
             --topics /tf_static --loop --disable-keyboard-controls < /dev/null &
       - shell_command:
           - "# Probes / manual snapshot trigger (run by hand):"
