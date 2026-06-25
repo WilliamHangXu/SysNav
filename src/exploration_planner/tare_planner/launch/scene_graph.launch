@@ -3,7 +3,7 @@ import yaml
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
-from launch.conditions import IfCondition
+from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -132,6 +132,24 @@ def generate_launch_description():
             parameters=[{'use_sim_time': use_sim_time}], output='screen'))
 
     entries += [
+        # Live/demo (use_sim_time:=false) receive the camera over the ROS 1 bridge
+        # as CompressedImage (JPEG) -- bridging raw frames was saturating the WiFi
+        # hop. Decode it back to the raw /<ns>/camera/image_rect_color the planner
+        # (and, with objects:=true, the detection node) already subscribe to, so
+        # nothing downstream changes. republish is LAZY: it only decodes while a
+        # consumer is attached, and in this image_transport version the transports
+        # are PARAMETERS (in_transport/out_transport) -- the old positional
+        # `republish compressed raw` CLI form silently no-ops. Bag modes
+        # (use_sim_time:=true) play raw image_rect_color straight from the ROS 2
+        # bag, so no decode node runs there.
+        Node(package='image_transport', executable='republish',
+             name='camera_decompress',
+             parameters=[{'in_transport': 'compressed', 'out_transport': 'raw',
+                          'use_sim_time': use_sim_time}],
+             remappings=[('in/compressed',
+                          f'/{ns}/camera/image_rect_color/compressed'),
+                         ('out', f'/{ns}/camera/image_rect_color')],
+             condition=UnlessCondition(use_sim_time), output='screen'),
         include(os.path.join(sem_share, 'detection_node_go2w_bag.launch'),
                 condition=IfCondition(objects)),
         include(os.path.join(sem_share, 'semantic_mapping_go2w_bag.launch'),

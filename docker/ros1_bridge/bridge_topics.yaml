@@ -30,8 +30,13 @@ topics:
   - topic: /__NS__/lio/odometry
     type: nav_msgs/msg/Odometry
     queue_size: 50
-  - topic: /__NS__/camera/image_rect_color
-    type: sensor_msgs/msg/Image
+  # Camera arrives COMPRESSED (JPEG) to keep the WiFi hop cheap -- bridging raw
+  # frames was saturating it. The in-container `camera_decompress` republish node
+  # (scene_graph.launch, live/demo only) decodes this back to the raw
+  # /<ns>/camera/image_rect_color the pipeline consumes. The robot must publish
+  # this image_transport sub-topic (it does: .../image_rect_color/compressed).
+  - topic: /__NS__/camera/image_rect_color/compressed
+    type: sensor_msgs/msg/CompressedImage
     queue_size: 5
   - topic: /__NS__/camera_rect/camera_info
     type: sensor_msgs/msg/CameraInfo

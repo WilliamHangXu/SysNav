@@ -127,7 +127,7 @@ def cmd_serve(args):
 
     node.create_subscription(String, args.req, on_req, qos)
     node.get_logger().info(
-        "serving: waiting for 'complete' or '%s' on %s ..." % (args.cancel, args.req))
+        "🟢 Scene graph stack started. Waiting for 'complete' or '%s' on %s ..." % (args.cancel, args.req))
 
     # Phase 1 -- wait for "complete" or "cancel".
     while rclpy.ok() and not state["complete"] and not state["cancel"]:
@@ -190,7 +190,7 @@ def cmd_serve(args):
         rclpy.spin_once(node, timeout_sec=0.1)
 
     if state["received"]:
-        node.get_logger().info("received ack; terminating")
+        node.get_logger().info("🟢 Scene graph received by the robot; terminating")
     elif state["cancel"]:
         node.get_logger().info("cancel during respond; terminating")
     else:
