@@ -26,6 +26,8 @@
 #                     START_OFFSET / DURATION (seconds) trim playback (empty = whole
 #                     bag). A non-zero START_OFFSET also starts a /tf_static primer,
 #                     since the offset skips the bag's latched static-TF tree.
+#                     HOLD=1 keeps the stack (incl. RViz) up after the bag finishes,
+#                     for inspection, instead of exiting (Ctrl-C to quit).
 #   GEMINI_API_KEY / DASHSCOPE_API_KEY ... passed through for the cloud VLM
 #
 # `supervisor.sh shell` drops into an interactive shell (workspace sourced) for
@@ -153,8 +155,14 @@ case "$MODE" in
     # 0 -> bag-time jump.
     echo "[supervisor] priming /clock for ${AUTOPLAY_DELAY}s before the pipeline ..."
     sleep "$AUTOPLAY_DELAY"
-    start_pipeline true
-    PRIMARY=$BAG_PID              # exit when the bag finishes
+    start_pipeline true; PIPE_PID=$LAST_PID
+    # Default: exit when the bag finishes. HOLD=1 blocks on the pipeline instead, so
+    # the stack (incl. RViz) stays up for inspection after playback (Ctrl-C quits).
+    PRIMARY=$BAG_PID
+    if [ "${HOLD:-0}" = "1" ]; then
+      PRIMARY=$PIPE_PID
+      echo "[supervisor] HOLD=1: stack (incl. RViz) stays up after the bag ends -- Ctrl-C to quit."
+    fi
     ;;
 
   bag-direct)
@@ -170,7 +178,7 @@ case "$MODE" in
       "set +u; source $JAZZY_SETUP; source $APP/install/setup.bash; \
        exec ros2 bag play '$BAG_PATH' $R2_OPTS --clock --start-paused --disable-keyboard-controls < /dev/null"
     BAG_PID=$LAST_PID
-    start_pipeline true
+    start_pipeline true; PIPE_PID=$LAST_PID
     echo "[supervisor] waiting ${AUTOPLAY_DELAY}s for the stack, then resuming the bag ..."
     sleep "$AUTOPLAY_DELAY"
     bash -c "set +u; source $JAZZY_SETUP; source $APP/install/setup.bash; \
@@ -185,7 +193,13 @@ case "$MODE" in
         "set +u; source $JAZZY_SETUP; source $APP/install/setup.bash; \
          exec ros2 bag play '$BAG_PATH' --topics /tf_static --loop --disable-keyboard-controls < /dev/null"
     fi
-    PRIMARY=$BAG_PID              # exit when the bag finishes
+    # Default: exit when the bag finishes. HOLD=1 blocks on the pipeline instead, so
+    # the stack (incl. RViz) stays up for inspection after playback (Ctrl-C quits).
+    PRIMARY=$BAG_PID
+    if [ "${HOLD:-0}" = "1" ]; then
+      PRIMARY=$PIPE_PID
+      echo "[supervisor] HOLD=1: stack (incl. RViz) stays up after the bag ends -- Ctrl-C to quit."
+    fi
     ;;
 
   demo)

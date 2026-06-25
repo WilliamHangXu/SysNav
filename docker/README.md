@@ -57,6 +57,9 @@ MODE=bag BAG=/home/all/AlphaZ/bags/multifloor_test_slam docker/run.sh
 # play only a window of the bag: skip 200s in, then play 230s (either knob optional)
 MODE=bag-direct BAG=<dir> START_OFFSET=200 DURATION=230 docker/run.sh
 
+# ... and keep RViz up after the bag ends so you can inspect the result (Ctrl-C to quit)
+MODE=bag-direct BAG=<dir> DURATION=230 HOLD=1 docker/run.sh
+
 # debug shell (workspace sourced); any MODE's env still applies
 MODE=bag-direct BAG=<dir> docker/run.sh shell
 
@@ -81,6 +84,7 @@ BUILD=1 MODE=bag-direct BAG=<dir> docker/run.sh
 | `BAG` | — | **bag / bag-direct**: host bag directory (mounted ro at `/app/bag`) |
 | `START_OFFSET` | — | **bag / bag-direct**: seconds to skip from the bag start (empty = from 0) |
 | `DURATION` | — | **bag / bag-direct**: seconds to play, then stop (empty = to the end) |
+| `HOLD` | `0` | **bag / bag-direct**: `1` keeps the stack (incl. RViz) up after the bag finishes, for inspection (`Ctrl-C` to quit) |
 
 Cloud-VLM credentials (`GEMINI_API_KEY`, `DASHSCOPE_API_KEY`, `VLM_PROVIDER`,
 `QWEN_MODEL`, `QWEN_MODEL_LITE`) pass through from your environment if set.
@@ -150,6 +154,64 @@ Optional overrides: `REQ_TOPIC`, `RESP_TOPIC`, `ACK_TIMEOUT` (default 300 s — 
 guard so a lost `received` can't stream forever). The JSON is also written to
 `output/scene_graph/run_*/` (with a `latest.json` pointer) exactly as in other
 modes; the response stream just re-reads the freshest snapshot.
+
+## Code changes: rebuild, recompile, or just re-run?
+
+Recap of the design: **the image is a stable base; your workspace is mounted.**
+So after editing code — or `git pull`-ing someone else's changes — most of the
+time you just re-run. Only specific changes need work. Three levels, cheapest
+first:
+
+| You changed… | Do this | Cost |
+|---|---|---|
+| Python ROS nodes (`.py` logic), `docker/` scripts (`run.sh`/`supervisor.sh`/…), config yamls, model weights | **nothing** — just re-run `docker/run.sh` | instant (mounted live) |
+| Pipeline **C++** (tare_planner, bag_slam_bridge, …), or *added* Python nodes / entry points | `BUILD=1 … docker/run.sh` — recompiles into the build volume | incremental colcon (fast) |
+| `requirement.txt`, `docker/Dockerfile`, an apt package, or a **vendored native dep** (`src/slam/dependency/{Sophus,ceres-solver,gtsam}`, `Livox-SDK2`) | **rebuild the image** (below) | minutes (layer cache helps) |
+
+```bash
+docker build -f docker/Dockerfile -t sysnav:latest .     # rebuild the image
+```
+
+After a `git pull`, this tells you which level you're at — it lists any pulled
+changes to the files that are *baked* into the image:
+
+```bash
+git diff --stat ORIG_HEAD HEAD -- docker/Dockerfile requirement.txt \
+  src/slam/dependency src/utilities/livox_ros_driver2/Livox-SDK2
+```
+
+Any output → **rebuild the image**. Otherwise: if C++ under `src/` changed →
+`BUILD=1`; if only Python/config/scripts changed → just run.
+
+> ⚠️ **The vendored native deps live under `src/` but are compiled at
+> image-build time, not by the in-container colcon build** — so changing
+> `src/slam/dependency/*` or `Livox-SDK2` needs an **image** rebuild, not just
+> `BUILD=1`. Everything else under `src/` is the normal mounted workspace.
+
+### Your host `colcon build` does not carry into the container
+
+Only `src/` is mounted. The container builds into the **named volume**
+`sysnav-build` (`/app/{build,install,log}`), which your host's
+`build/`/`install/`/`log/` never touch — and host-compiled binaries are linked
+against host libraries, so they wouldn't load in here anyway. The container
+always builds its own. The upside: that volume **persists across runs**, so
+`BUILD=1` is needed only on the *first* run after a C++ change, and colcon
+recompiles incrementally (just the changed packages). For a tight C++ loop, shell
+in once and rebuild by hand instead of relaunching the whole stack each time:
+
+```bash
+docker/run.sh shell                                   # workspace sourced, volume mounted
+colcon build --symlink-install --packages-select tare_planner
+ros2 launch tare_planner scene_graph.launch ...       # edit on host -> rebuild pkg -> relaunch
+```
+
+### When you rebuild the image, reset the build volume
+
+Wipe the old build so the C++ isn't linked against stale baked libraries:
+
+```bash
+docker volume rm sysnav-build      # next run does a clean colcon build into a fresh volume
+```
 
 ## RViz / X
 

@@ -13,6 +13,7 @@
 #
 # Knobs: IMAGE MODE ROS_DOMAIN_ID RVIZ OBJECTS ROBOT_IP LAPTOP_IP BAG BUILD VOLUME
 #        START_OFFSET DURATION  (bag/bag-direct: seconds to skip / play; default = whole bag)
+#        HOLD  (bag/bag-direct: HOLD=1 keeps the stack incl. RViz up after the bag ends)
 #   RVIZ=1 (default) forwards X; you may need `xhost +local:root` once on the host.
 #   OBJECTS=1 adds object detection+mapping; default 0 = rooms + navgraph only.
 #   Cloud-VLM keys (GEMINI_API_KEY / DASHSCOPE_API_KEY / VLM_PROVIDER) pass through
@@ -77,8 +78,10 @@ case "$MODE" in
     : "${BAG:?$MODE mode needs BAG=<bag directory>}"
     [ -d "$BAG" ] || { echo "BAG '$BAG' is not a directory" >&2; exit 1; }
     # START_OFFSET / DURATION (seconds) trim playback; empty = whole bag.
+    # HOLD=1 keeps the stack (incl. RViz) up after the bag finishes.
     run+=( -e BAG_PATH=/app/bag -v "$BAG:/app/bag:ro"
-           -e START_OFFSET="${START_OFFSET:-}" -e DURATION="${DURATION:-}" )
+           -e START_OFFSET="${START_OFFSET:-}" -e DURATION="${DURATION:-}"
+           -e HOLD="${HOLD:-0}" )
     ;;
   *) echo "unknown MODE=$MODE (use live | demo | bag | bag-direct)" >&2; exit 2 ;;
 esac
