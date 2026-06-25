@@ -9,6 +9,7 @@
 #include <cmath>
 #include <limits>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 #include <opencv2/core.hpp>
@@ -22,6 +23,7 @@ NavGraph::NavGraph(rclcpp::Node::SharedPtr nh)
   , update_call_count_(0)
   , world_frame_id_("map")
   , kNavNodeMinDist(1.25)
+  , kNavNodeReanchorDist(0.2)
   , kNavGraphUpdateInterval(2)
 {
   ReadParameters(nh);
@@ -38,6 +40,7 @@ NavGraph::NavGraph(rclcpp::Node::SharedPtr nh)
 void NavGraph::ReadParameters(rclcpp::Node::SharedPtr nh)
 {
   nh->get_parameter("navigation_graph/kNavNodeMinDist", kNavNodeMinDist);
+  nh->get_parameter("navigation_graph/kNavNodeReanchorDist", kNavNodeReanchorDist);
   nh->get_parameter("navigation_graph/kNavGraphUpdateInterval", kNavGraphUpdateInterval);
   nh->get_parameter("navigation_graph/world_frame_id", world_frame_id_);
   if (kNavGraphUpdateInterval < 1)
@@ -148,8 +151,9 @@ void NavGraph::Reconcile(const std::shared_ptr<keypose_graph_ns::KeyposeGraph>& 
   BuildKdtree();  // over existing nodes only
   const double min_dist_sq = kNavNodeMinDist * kNavNodeMinDist;
   std::vector<geometry_msgs::msg::Point> new_node_positions;
-  for (const auto& p : connected_pos)
+  for (size_t k = 0; k < connected_pos.size(); ++k)
   {
+    const geometry_msgs::msg::Point& p = connected_pos[k];
     double d_existing = std::numeric_limits<double>::max();
     NearestNode(p, d_existing);
     bool covered = (d_existing <= kNavNodeMinDist);
@@ -172,29 +176,133 @@ void NavGraph::Reconcile(const std::shared_ptr<keypose_graph_ns::KeyposeGraph>& 
       NavNode node;
       node.id = next_id_++;
       node.position = p;
+      node.seed_keypose_ind = connected_inds[k];  // BFS source for Phase-2 labeling
       nodes_[node.id] = node;
       new_node_positions.push_back(p);
     }
   }
   const auto t_seed = nav_clock::now();
 
-  // --- Phase 2: label (nearest-node Voronoi) + member tally -----------------
-  // After Phase 1 every connected keypose node is within kNavNodeMinDist of some
-  // node, so labeling has no orphan/uncapped case. Region is keyed by keypose
-  // node index so the edge phase can look up endpoints directly.
-  BuildKdtree();  // now includes the newly seeded nodes
-  std::unordered_map<int, int> region;     // keypose node_ind -> nav node id
-  std::map<int, int> member_count;         // nav node id -> #connected members
-  for (size_t k = 0; k < connected_inds.size(); ++k)
+  // The keypose graph's connected component this pass, built once and reused by
+  // the re-anchor salvage (Phase 1.5) and the BFS labeling (Phase 2). Membership
+  // matters because GetNodeNeighbors still lists collision neighbors the DFS
+  // flood excluded.
+  const std::unordered_set<int> connected_set(connected_inds.begin(), connected_inds.end());
+
+  // --- Phase 1.5: re-anchor orphaned nodes ---------------------------------
+  // A node whose anchor keypose node has dropped out of the connected component
+  // would be hard-deleted below, churning its stable id. If a still-connected
+  // keypose node sits within kNavNodeReanchorDist of the (frozen) node position
+  // -- a near-duplicate, typical in revisited/dense areas -- rebind the node's
+  // BFS source to it so the node, and its id, survive the blip. The position
+  // stays frozen; only the source shifts (by <= kNavNodeReanchorDist). We search
+  // the dead anchor's own keypose neighbors, so a salvaged node rejoins through a
+  // real edge; the threshold is far below the node spacing, so a node that close
+  // is essentially always an edge neighbor. The node's edges then re-derive
+  // themselves in Phase 4 -- if the salvage reconnects a side it comes back, and
+  // if a side is genuinely gone its edge correctly stays dropped.
+  std::unordered_set<int> used_anchor;  // anchors already taken (no two nodes share one)
+  for (const auto& kv : nodes_)
   {
-    double d = 0.0;
-    const int nav_id = NearestNode(connected_pos[k], d);
-    if (nav_id < 0)
+    if (connected_set.count(kv.second.seed_keypose_ind))
+    {
+      used_anchor.insert(kv.second.seed_keypose_ind);
+    }
+  }
+  const double reanchor_dist_sq = kNavNodeReanchorDist * kNavNodeReanchorDist;
+  for (auto& kv : nodes_)
+  {
+    NavNode& node = kv.second;
+    if (connected_set.count(node.seed_keypose_ind))  // anchor still healthy
     {
       continue;
     }
-    region[connected_inds[k]] = nav_id;
-    member_count[nav_id]++;
+    // Orphan: take the nearest still-connected, unclaimed neighbor of the dead
+    // anchor that lies within the re-anchor radius of the frozen node position.
+    int best = -1;
+    double best_sq = reanchor_dist_sq;
+    for (int q : keypose_graph->GetNodeNeighbors(node.seed_keypose_ind))
+    {
+      if (!connected_set.count(q) || used_anchor.count(q))
+      {
+        continue;
+      }
+      const geometry_msgs::msg::Point pq = keypose_graph->GetNodePosition(q);
+      const double dx = node.position.x - pq.x;
+      const double dy = node.position.y - pq.y;
+      const double dz = node.position.z - pq.z;
+      const double d_sq = dx * dx + dy * dy + dz * dz;
+      if (d_sq < best_sq)
+      {
+        best_sq = d_sq;
+        best = q;
+      }
+    }
+    if (best >= 0)
+    {
+      node.seed_keypose_ind = best;  // survives as a BFS source rooted at `best`
+      used_anchor.insert(best);
+    }
+    // else: no near connected neighbor -> stays orphaned -> hard-deleted in Phase 3.
+  }
+  const auto t_reanchor = nav_clock::now();
+
+  // --- Phase 2: label (geodesic Voronoi via multi-source BFS) ---------------
+  // Assign every connected keypose node to its nearest node by keypose-graph hop
+  // distance, propagating labels ONLY along real keypose edges. Keypose edges are
+  // collision-checked, so they never cross walls -- a label therefore cannot leak
+  // to the far side of a wall the way the old Euclidean nearest-node Voronoi did.
+  // That leak was the sole source of false cross-wall NavGraph edges: two keypose
+  // nodes in the same room landing in regions whose representatives sit on
+  // opposite sides of a wall. With BFS labeling that configuration is impossible,
+  // and this costs less than the kdtree build + N nearest queries it replaces.
+  //
+  // Each node is a BFS source rooted at its seed keypose node. The component is a
+  // single DFS flood (KeyposeGraph::GetConnectedNodeIndices), so the sources --
+  // which all lie inside it -- reach every connected node; we gate expansion on
+  // component membership because GetNodeNeighbors still lists collision neighbors
+  // that the flood excluded. Region is keyed by keypose node index so the edge
+  // phase can look up endpoints directly. (connected_set is built above, before
+  // Phase 1.5.)
+  std::unordered_map<int, int> region;  // keypose node_ind -> nav node id (also = visited)
+  std::map<int, int> member_count;      // nav node id -> #connected members
+  std::vector<int> bfs_queue;           // FIFO frontier of keypose node indices
+  bfs_queue.reserve(connected_inds.size());
+
+  // Seed the frontier with every node's anchor keypose node. An anchor that has
+  // dropped out of the connected component is skipped; that node then gets zero
+  // members and is hard-deleted below (Phase 1 re-seeds the spot next pass if it
+  // is still needed) -- the accepted id-churn-at-a-recreated-location behavior.
+  for (const auto& kv : nodes_)
+  {
+    const int seed_ind = kv.second.seed_keypose_ind;
+    if (connected_set.count(seed_ind) && region.find(seed_ind) == region.end())
+    {
+      region[seed_ind] = kv.second.id;
+      member_count[kv.second.id]++;
+      bfs_queue.push_back(seed_ind);
+    }
+  }
+
+  // Multi-source BFS: the first source to reach a node (fewest hops) claims it.
+  for (size_t head = 0; head < bfs_queue.size(); ++head)
+  {
+    const int a = bfs_queue[head];
+    const int label = region[a];
+    for (int b : keypose_graph->GetNodeNeighbors(a))
+    {
+      if (connected_set.find(b) == connected_set.end())  // collision / out of component
+      {
+        continue;
+      }
+      if (region.find(b) != region.end())  // already claimed by a nearer source
+      {
+        continue;
+      }
+      region[b] = label;
+      member_count[label]++;
+      bfs_queue.push_back(b);
+    }
   }
   const auto t_label = nav_clock::now();
 
@@ -299,11 +407,11 @@ void NavGraph::Reconcile(const std::shared_ptr<keypose_graph_ns::KeyposeGraph>& 
     return std::chrono::duration<double, std::milli>(b - a).count();
   };
   RCLCPP_INFO(rclcpp::get_logger("navgraph"),
-              "[navgraph]   Reconcile %.2f ms | gather %.2f, seed %.2f, label %.2f, "
-              "delete %.2f, edges %.2f | connected_keypose=%zu",
+              "[navgraph]   Reconcile %.2f ms | gather %.2f, seed %.2f, reanchor %.2f, "
+              "label %.2f, delete %.2f, edges %.2f | connected_keypose=%zu",
               ms(t_start, t_edges), ms(t_start, t_gather), ms(t_gather, t_seed),
-              ms(t_seed, t_label), ms(t_label, t_delete), ms(t_delete, t_edges),
-              connected_inds.size());
+              ms(t_seed, t_reanchor), ms(t_reanchor, t_label), ms(t_label, t_delete),
+              ms(t_delete, t_edges), connected_inds.size());
 }
 
 void NavGraph::TagRooms(const cv::Mat& room_mask, const Eigen::Vector3f& shift, float room_resolution)

@@ -110,6 +110,7 @@ private:
 
   std::string world_frame_id_;
   double kNavNodeMinDist;          // node spacing (in-room granularity)
+  double kNavNodeReanchorDist;     // max gap to salvage an orphaned node by re-anchoring
   int kNavGraphUpdateInterval;     // run full reconcile every Nth Update() call
 };
 }  // namespace navgraph_ns

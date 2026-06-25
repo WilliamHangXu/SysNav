@@ -19,6 +19,11 @@ struct NavNode
 {
   int id;
   geometry_msgs::msg::Point position;
+  // Keypose-graph node index this waypoint was seeded from, frozen at birth. It
+  // is the source for the geodesic (multi-source BFS) region labeling: a region
+  // grows outward from here along real keypose edges only, so it can never leak
+  // across a wall the way Euclidean nearest-node labeling did.
+  int seed_keypose_ind = -1;
   int room_id = -1;  // room affiliation (-1 = unknown), tagged from the room mask
   // Scene-graph waypoint id, e.g. "meeting room-room_4-wp_0". Assigned each
   // reconcile from the node's room; this is exactly the id the exporter emits,

@@ -118,6 +118,7 @@ void SensorCoveragePlanner3D::ReadParameters() {
 
   // navigation_graph
   this->declare_parameter<double>("navigation_graph/kNavNodeMinDist", 1.25);
+  this->declare_parameter<double>("navigation_graph/kNavNodeReanchorDist", 0.2);
   this->declare_parameter<int>("navigation_graph/kNavGraphUpdateInterval", 2);
   this->declare_parameter<std::string>("navigation_graph/world_frame_id",
                                        kWorldFrameID);
