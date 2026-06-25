@@ -48,6 +48,9 @@ MODE=live ROBOT_IP=192.168.123.18 LAPTOP_IP=192.168.123.190 docker/run.sh
 # demo: live wiring, but the robot gates the run over /scene_graph_generator/*
 MODE=demo ROBOT_IP=192.168.123.18 LAPTOP_IP=192.168.123.190 docker/run.sh
 
+# live/demo + record what the pipeline receives as a ROS 2 bag -> output/recordings/<ts>/
+MODE=live ROBOT_IP=192.168.123.18 LAPTOP_IP=192.168.123.190 RECORD=1 docker/run.sh
+
 # ROS 2 bag straight into the pipeline -- no bridge (the fast dev/test path)
 MODE=bag-direct BAG=/home/all/AlphaZ/bags/multifloor_test_slam_ros2 docker/run.sh
 
@@ -57,8 +60,9 @@ MODE=bag BAG=/home/all/AlphaZ/bags/multifloor_test_slam docker/run.sh
 # play only a window of the bag: skip 200s in, then play 230s (either knob optional)
 MODE=bag-direct BAG=<dir> START_OFFSET=200 DURATION=230 docker/run.sh
 
-# ... and keep RViz up after the bag ends so you can inspect the result (Ctrl-C to quit)
-MODE=bag-direct BAG=<dir> DURATION=230 HOLD=1 docker/run.sh
+# RViz stays up after the bag ends by default so you can inspect the result (Ctrl-C
+# to quit); pass HOLD=0 to auto-exit when the bag finishes (e.g. scripted/batch runs)
+MODE=bag-direct BAG=<dir> DURATION=230 HOLD=0 docker/run.sh
 
 # debug shell (workspace sourced); any MODE's env still applies
 MODE=bag-direct BAG=<dir> docker/run.sh shell
@@ -79,13 +83,15 @@ BUILD=1 MODE=bag-direct BAG=<dir> docker/run.sh
 | `FORCE_ENGINE_REBUILD` | `0` | `1` re-exports the YOLO TensorRT engines |
 | `VOLUME` | `sysnav-build` | Named volume holding `/app/{build,install,log}` |
 | `IMAGE` | `sysnav:latest` | Image tag to run |
+| `NAME` | `sysnav` | Container name → `docker exec -it sysnav bash` to attach a second terminal (see below). Override to run more than one container at once |
 | `ROBOT_IP` | — | **live**: robot's IP (its `roscore` host) → `ROS_MASTER_URI` |
 | `LAPTOP_IP` | — | **live**: your IP on the robot's subnet → `ROS_IP` |
 | `BAG` | — | **bag / bag-direct**: host bag directory (mounted ro at `/app/bag`) |
 | `START_OFFSET` | — | **bag / bag-direct**: seconds to skip from the bag start (empty = from 0) |
 | `DURATION` | — | **bag / bag-direct**: seconds to play, then stop (empty = to the end) |
-| `HOLD` | `0` | **bag / bag-direct**: `1` keeps the stack (incl. RViz) up after the bag finishes, for inspection (`Ctrl-C` to quit) |
+| `HOLD` | `1` | **bag / bag-direct / demo**: keeps the stack (incl. RViz) up after the bag finishes (or, in demo, after the robot's run completes), for inspection (`Ctrl-C` to quit); set `0` to auto-exit when the run ends (scripted/batch). No effect on live (no end event — runs until `Ctrl-C`) |
 | `ROS_AUTOMATIC_DISCOVERY_RANGE` | `LOCALHOST` (bag/bag-direct) | Confines ROS 2 discovery to this host so two laptops on the same WiFi don't collide (see below). Set `SUBNET` to opt back into cross-host ROS 2 |
+| `RECORD` | `0` | **live / demo**: `1` records a ROS 2 bag of the pipeline inputs to `output/recordings/<ts>/` (see below). No effect on bag / bag-direct |
 
 Cloud-VLM credentials (`GEMINI_API_KEY`, `DASHSCOPE_API_KEY`, `VLM_PROVIDER`,
 `QWEN_MODEL`, `QWEN_MODEL_LITE`) pass through from your environment if set.
@@ -102,6 +108,54 @@ modes default `ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST`, isolating each laptop.
 ROS 2 default there and doesn't affect the robot link.) If you genuinely want two
 machines to share one ROS 2 graph, set `ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET` on
 both and give them a matching `ROS_DOMAIN_ID`.
+
+#### Recording a bag (live / demo)
+
+`RECORD=1` records **exactly what the pipeline receives** — the bridged sensor/TF
+inputs (`<ns>/cloud_registered`, `<ns>/lio/odometry`, `<ns>/camera/image_rect_color`,
+`<ns>/camera_rect/camera_info`, `/tf`, `/tf_static`) — to a ROS 2 bag under
+`output/recordings/<ts>/`. The topic set is derived from `bridge_topics.yaml`
+(rendered for the namespace), minus `/clock` (regenerated on replay) and the demo
+control channel. Off by default.
+
+- **No WiFi cost.** It records the *in-container ROS 2* side — data the bridge has
+  already pulled to your laptop once — so it adds no robot↔laptop traffic. (A ROS 1
+  `rosbag record` would re-subscribe to the robot and roughly double the sensor
+  traffic over WiFi; that's why we record ROS 2 only.)
+- **Replay** the result directly in `bag-direct` — it *is* a ROS 2 bag of the
+  pipeline inputs:
+  ```bash
+  MODE=bag-direct BAG=output/recordings/<ts> docker/run.sh
+  ```
+- **demo** records only the **run window** (robot `start` → run done); **live**
+  records for the container's lifetime. The bag is finalized cleanly on stop
+  (`SIGINT` → rosbag2 flushes and closes its file before teardown).
+- **Need a ROS 1 `.bag` later?** Convert offline with `rosbags-convert` (Ternaris
+  `rosbags` pip pkg; lossless for these standard types). Not needed to re-run the
+  pipeline — `bag-direct` plays the ROS 2 bag as-is.
+
+> Note: `/tf_static` is latched (`transient_local`). rosbag2 captures the latched
+> message on subscribe and `ros2 bag play` re-asserts it, so the TF tree comes back
+> on replay — the one thing to sanity-check the first time you record.
+
+#### Attach a second terminal (`ros2 topic hz`, etc.)
+
+The container is named `sysnav` (the `NAME` knob), so from another terminal you can
+drop into the **running** container and inspect its live ROS 2 graph:
+
+```bash
+docker exec -it sysnav bash
+ros2 topic hz /go2w_026/cloud_registered     # ~/.bashrc already sourced ROS 2 + workspace
+ros2 topic list                              # bridged inputs + pipeline-internal topics
+```
+
+`docker exec` shares the container's network/IPC namespace, `ROS_DOMAIN_ID` and RMW,
+so you see exactly the pipeline's graph — no version/discovery mismatch. The
+container's `~/.bashrc` sources ROS 2 + the workspace on startup, so the shell is
+ready immediately. For **ROS 1** topics (raw robot topics that aren't bridged),
+`source /opt/ros/noetic/setup.bash` in that shell (the `ROS_MASTER_URI` / `ROS_IP`
+are already set) and use `rostopic hz`. To attach to a second concurrent container,
+launch it with `NAME=...` and `docker exec` into that name.
 
 ### Finding the live IPs
 
@@ -168,6 +222,10 @@ Optional overrides: `REQ_TOPIC`, `RESP_TOPIC`, `ACK_TIMEOUT` (default 300 s — 
 guard so a lost `received` can't stream forever). The JSON is also written to
 `output/scene_graph/run_*/` (with a `latest.json` pointer) exactly as in other
 modes; the response stream just re-reads the freshest snapshot.
+
+By default (`HOLD=1`) the stack — including RViz — stays up after the run ends
+(`received` / `cancel`) for inspection; the live feed keeps updating (wall clock)
+until you `Ctrl-C`. Set `HOLD=0` to tear down automatically when the run ends.
 
 ## Code changes: rebuild, recompile, or just re-run?
 

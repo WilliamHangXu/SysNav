@@ -11,9 +11,15 @@
 #   docker/run.sh shell          # debug shell in the container (workspace sourced)
 #   BUILD=1 ... docker/run.sh     # force a colcon rebuild (e.g. after C++ changes)
 #
-# Knobs: IMAGE MODE ROS_DOMAIN_ID RVIZ OBJECTS ROBOT_IP LAPTOP_IP BAG BUILD VOLUME
+# Knobs: IMAGE MODE ROS_DOMAIN_ID RVIZ OBJECTS ROBOT_IP LAPTOP_IP BAG BUILD VOLUME NAME
 #        START_OFFSET DURATION  (bag/bag-direct: seconds to skip / play; default = whole bag)
-#        HOLD  (bag/bag-direct: HOLD=1 keeps the stack incl. RViz up after the bag ends)
+#        HOLD  (bag/bag-direct/demo: default 1 keeps the stack incl. RViz up after the
+#              bag ends / the robot's demo run finishes; HOLD=0 auto-exits. Ctrl-C quits)
+#        RECORD  (live/demo: RECORD=1 records a ROS 2 bag of the pipeline inputs to
+#              output/recordings/<ts>/, replayable in bag-direct; off by default)
+#   The container is named NAME (default 'sysnav'), so a second terminal can attach:
+#     docker exec -it sysnav bash      # ROS-ready (~/.bashrc sources ROS 2 + workspace)
+#   Set NAME=... to run more than one container at once.
 #   bag/bag-direct confine ROS 2 discovery to this host (ROS_AUTOMATIC_DISCOVERY_RANGE
 #   =LOCALHOST) so two laptops on the same WiFi don't cross-wire; override with
 #   ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET if you ever need cross-host ROS 2 there.
@@ -34,9 +40,11 @@ BUILD="${BUILD:-0}"
 VOLUME="${VOLUME:-sysnav-build}"   # named volume holding /app/{build,install,log}
 
 # Bind targets for artifacts must exist as the host user (else docker makes them root).
-mkdir -p "$REPO/output" "$REPO/runlogs"
+# output/recordings is pre-created too so RECORD=1 bags land host-owned, not root.
+mkdir -p "$REPO/output" "$REPO/output/recordings" "$REPO/runlogs"
 
 run=( docker run --rm -it
+  --name "${NAME:-sysnav}"                 # so `docker exec -it sysnav bash` is predictable
   --gpus all --network host --ipc host
   -e MODE="$MODE" -e RVIZ="$RVIZ" -e OBJECTS="$OBJECTS" -e ROS_DOMAIN_ID="$ROS_DOMAIN_ID" -e BUILD="$BUILD"
   -e FORCE_ENGINE_REBUILD="${FORCE_ENGINE_REBUILD:-0}"
@@ -75,13 +83,20 @@ case "$MODE" in
     # supervisor gates the pipeline on a robot request instead of auto-starting.
     : "${ROBOT_IP:?$MODE mode needs ROBOT_IP=<robot ip on its subnet, e.g. 192.168.123.18>}"
     : "${LAPTOP_IP:?$MODE mode needs LAPTOP_IP=<your ip on the robot subnet, e.g. 192.168.123.190>}"
-    run+=( -e ROS_MASTER_URI="http://$ROBOT_IP:11311" -e ROS_IP="$LAPTOP_IP" )
+    # HOLD is demo-only here: default 1 keeps the stack (incl. RViz) up after the
+    # robot's run finishes (HOLD=0 auto-exits). Harmless in live (its supervisor
+    # ignores it -- live already blocks on the pipeline until Ctrl-C).
+    # RECORD=1 records a ROS 2 bag of the pipeline inputs (off by default); see
+    # the supervisor header. Records the in-container ROS 2 side, so no WiFi cost.
+    run+=( -e ROS_MASTER_URI="http://$ROBOT_IP:11311" -e ROS_IP="$LAPTOP_IP"
+           -e HOLD="${HOLD:-1}" -e RECORD="${RECORD:-0}" )
     ;;
   bag|bag-direct)
     : "${BAG:?$MODE mode needs BAG=<bag directory>}"
     [ -d "$BAG" ] || { echo "BAG '$BAG' is not a directory" >&2; exit 1; }
     # START_OFFSET / DURATION (seconds) trim playback; empty = whole bag.
-    # HOLD=1 keeps the stack (incl. RViz) up after the bag finishes.
+    # HOLD (default 1) keeps the stack (incl. RViz) up after the bag finishes;
+    # HOLD=0 auto-exits when the bag ends (scripted/batch runs).
     # Confine ROS 2 discovery to this host: bag modes are a self-contained ROS 2
     # graph (bag -> pipeline, no robot), so they never need to talk off-box. With
     # --network host + the default ROS_DOMAIN_ID, two people on the same LAN/WiFi
@@ -91,7 +106,7 @@ case "$MODE" in
     # there -- left unset to preserve their default subnet discovery.)
     run+=( -e BAG_PATH=/app/bag -v "$BAG:/app/bag:ro"
            -e START_OFFSET="${START_OFFSET:-}" -e DURATION="${DURATION:-}"
-           -e HOLD="${HOLD:-0}"
+           -e HOLD="${HOLD:-1}"
            -e ROS_AUTOMATIC_DISCOVERY_RANGE="${ROS_AUTOMATIC_DISCOVERY_RANGE:-LOCALHOST}" )
     ;;
   *) echo "unknown MODE=$MODE (use live | demo | bag | bag-direct)" >&2; exit 2 ;;
