@@ -5421,17 +5421,51 @@ void SensorCoveragePlanner3D::SaveSceneGraphSnapshot(const std::string &reason)
     filename = buf;
   }
 
-  std::filesystem::path out_path =
-      std::filesystem::path(scene_graph_run_dir_) / filename;
-  std::ofstream out(out_path);
-  if (!out)
+  std::filesystem::path run_dir(scene_graph_run_dir_);
+  std::filesystem::path out_path = run_dir / filename;
+
+  // Write to a hidden temp in the same dir, then atomically rename it into place,
+  // so a concurrent reader (e.g. the demo-mode responder streaming the JSON back
+  // to the robot) never observes a half-written file.
+  std::filesystem::path tmp_path = run_dir / ("." + filename + ".tmp");
   {
-    RCLCPP_ERROR(this->get_logger(), "[scene_graph] cannot write %s",
-                 out_path.c_str());
+    std::ofstream out(tmp_path);
+    if (!out)
+    {
+      RCLCPP_ERROR(this->get_logger(), "[scene_graph] cannot write %s",
+                   tmp_path.c_str());
+      return;
+    }
+    out << snapshot.dump(2);
+  }
+  std::error_code ec;
+  std::filesystem::rename(tmp_path, out_path, ec);
+  if (ec)
+  {
+    RCLCPP_ERROR(this->get_logger(), "[scene_graph] cannot finalize %s: %s",
+                 out_path.c_str(), ec.message().c_str());
+    std::filesystem::remove(tmp_path, ec);
     return;
   }
-  out << snapshot.dump(2);
-  out.close();
+
+  // Maintain a stable pointer (latest.json -> the file just written) so consumers
+  // can read "the current snapshot" without scanning for the newest timestamped
+  // name. Atomic: create a temp symlink, then rename it over latest.json. Failure
+  // is non-fatal (consumers can still pick the newest snapshot_*.json).
+  std::filesystem::path latest_tmp = run_dir / ".latest.json.tmp";
+  std::filesystem::remove(latest_tmp, ec);
+  std::filesystem::create_symlink(filename, latest_tmp, ec);
+  if (!ec)
+  {
+    std::filesystem::rename(latest_tmp, run_dir / "latest.json", ec);
+  }
+  if (ec)
+  {
+    RCLCPP_WARN(this->get_logger(), "[scene_graph] could not update latest.json: %s",
+                ec.message().c_str());
+    std::filesystem::remove(latest_tmp, ec);
+  }
+
   ++scene_graph_snapshot_count_;
   RCLCPP_INFO(this->get_logger(), "[scene_graph] saved %s snapshot -> %s",
               reason.c_str(), out_path.c_str());

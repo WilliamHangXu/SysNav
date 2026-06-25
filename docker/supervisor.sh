@@ -9,7 +9,7 @@
 # on the next run.
 #
 # Driven by env (set by docker/run.sh):
-#   MODE            live | bag | bag-direct          (default live)
+#   MODE            live | demo | bag | bag-direct   (default live)
 #   RVIZ            1|0   launch RViz (needs X)       (default 1)
 #   OBJECTS         1|0   run object detection+mapping (default 0 = rooms +
 #                         navgraph only, also skips the GPU YOLO engine export);
@@ -19,6 +19,9 @@
 #   FORCE_ENGINE_REBUILD  1 re-exports the TRT engines
 #   AUTOPLAY_DELAY  seconds before the pipeline/bag resume (default 12)
 #   live: ROS_MASTER_URI (robot), ROS_IP (laptop)
+#   demo: like live, but the pipeline is gated -- waits for "start" on
+#         /scene_graph_generator/request before launching; optional
+#         REQ_TOPIC / RESP_TOPIC / ACK_TIMEOUT overrides
 #   bag / bag-direct: BAG_PATH (mounted bag dir)
 #   GEMINI_API_KEY / DASHSCOPE_API_KEY ... passed through for the cloud VLM
 #
@@ -104,6 +107,13 @@ start_pipeline() {  # start_pipeline <use_sim_time>
      exec ros2 launch tare_planner scene_graph.launch use_sim_time:=$1 rviz:=$RVIZ objects:=$OBJECTS"
 }
 
+run_helper() {  # run_helper <demo_control.py args...> -- foreground; returns its exit code
+  # The demo-mode control helper (rclpy) blocks on robot requests; sourced env
+  # mirrors start_pipeline. Args after the function name pass through verbatim.
+  bash -c "set +u; source '$JAZZY_SETUP'; source '$APP/install/setup.bash'; \
+           exec python3 '$APP/docker/demo_control.py' \"\$@\"" demo_control "$@"
+}
+
 case "$MODE" in
   live)
     # Robot is the ROS 1 master; bridge talks to it, pipeline runs on wall clock.
@@ -150,7 +160,36 @@ case "$MODE" in
     PRIMARY=$BAG_PID              # exit when the bag finishes
     ;;
 
-  *) echo "[supervisor] unknown MODE=$MODE (use live | bag | bag-direct)" >&2; exit 2 ;;
+  demo)
+    # Live robot, but the pipeline is GATED on the robot's request instead of
+    # starting immediately. The robot drives the run over the String control
+    # channel /scene_graph_generator/{request,response}: "start" launches the
+    # pipeline, "complete" saves + streams the scene-graph JSON back until
+    # "received", "cancel" saves locally and tears down. See docker/demo_control.py.
+    : "${ROS_MASTER_URI:?demo mode needs ROS_MASTER_URI=http://<robot-ip>:11311}"
+    REQ_TOPIC="${REQ_TOPIC:-/scene_graph_generator/request}"
+    RESP_TOPIC="${RESP_TOPIC:-/scene_graph_generator/response}"
+    ACK_TIMEOUT="${ACK_TIMEOUT:-300}"
+    launch bridge bash "$START_BRIDGE"
+    sleep 3                       # let the eager bridges come up
+    echo "[supervisor] demo: pipeline DOWN; waiting for 'start' on $REQ_TOPIC ..."
+    # Gate: exit 0 = start (launch), exit 3 = cancel-before-start (nothing to save).
+    if run_helper await --topic "$REQ_TOPIC" --keyword start --cancel-keyword cancel; then
+      start_pipeline false        # live pipeline (wall clock); tracked in PIDS
+      run_helper serve \
+        --req "$REQ_TOPIC" --resp "$RESP_TOPIC" \
+        --save-topic /keyboard_input --save-keyword ssg \
+        --output-root "$APP/output/scene_graph" \
+        --interval 5 --ack received --cancel cancel \
+        --file-timeout 15 --ack-timeout "$ACK_TIMEOUT" || true
+    else
+      echo "[supervisor] demo: cancelled before start; shutting down."
+    fi
+    # No PRIMARY: the blocking foreground was the helper. Fall through to the EXIT
+    # trap, which tears down the bridge + pipeline (the container then exits).
+    ;;
+
+  *) echo "[supervisor] unknown MODE=$MODE (use live | demo | bag | bag-direct)" >&2; exit 2 ;;
 esac
 
 # Block on the primary process; the EXIT trap tears the rest down.

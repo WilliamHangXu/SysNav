@@ -51,3 +51,15 @@ topics:
     qos:
       reliability: reliable
       durability: transient_local
+  # Demo-mode control channel (MODE=demo). The robot drives the run with String
+  # keywords on /request (start|complete|cancel|received); the container streams
+  # the scene-graph JSON back on /response. Global (no __NS__) -- robot-agnostic
+  # control. /response is the first topic to actually use the 2->1 direction;
+  # parameter_bridge already bridges every listed topic both ways. Idle/harmless
+  # in live/bag/bag-direct modes (nothing publishes them).
+  - topic: /scene_graph_generator/request
+    type: std_msgs/msg/String
+    queue_size: 10
+  - topic: /scene_graph_generator/response
+    type: std_msgs/msg/String
+    queue_size: 10

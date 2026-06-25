@@ -45,6 +45,9 @@ bridge graft is last, so it only re-runs if the builder image changes.
 # live robot (robot is the ROS 1 master; pipeline runs on wall clock)
 MODE=live ROBOT_IP=192.168.123.18 LAPTOP_IP=192.168.123.190 docker/run.sh
 
+# demo: live wiring, but the robot gates the run over /scene_graph_generator/*
+MODE=demo ROBOT_IP=192.168.123.18 LAPTOP_IP=192.168.123.190 docker/run.sh
+
 # ROS 2 bag straight into the pipeline -- no bridge (the fast dev/test path)
 MODE=bag-direct BAG=/home/all/AlphaZ/bags/multifloor_test_slam_ros2 docker/run.sh
 
@@ -62,7 +65,7 @@ BUILD=1 MODE=bag-direct BAG=<dir> docker/run.sh
 
 | Env | Default | Meaning |
 |---|---|---|
-| `MODE` | `live` | `live` \| `bag` \| `bag-direct` |
+| `MODE` | `live` | `live` \| `demo` \| `bag` \| `bag-direct` |
 | `RVIZ` | `1` | Launch RViz (forwards X; see below) |
 | `OBJECTS` | `0` | Default = rooms + navgraph only (also skips the GPU YOLO engine export); `1` adds object detection+mapping |
 | `ROS_DOMAIN_ID` | `0` | DDS domain |
@@ -101,6 +104,12 @@ and hands off to `docker/supervisor.sh`, which:
      (engines are GPU-arch specific, so they can't be baked).
 2. **Runs the chosen MODE** (each backgrounds its pieces, tears them all down on exit):
    - **live** — start the bridge → wait → `scene_graph.launch use_sim_time:=false`.
+   - **demo** — start the bridge, then **gate**: nothing else runs until the robot
+     publishes `start` on `/scene_graph_generator/request`. Then launch the
+     pipeline; on `complete` save the scene graph and stream its JSON back on
+     `/scene_graph_generator/response` every 5 s until the robot replies
+     `received`; `cancel` saves locally and tears down. Both control topics are
+     `std_msgs/String` (see `demo_control.py`).
    - **bag** — in-container roscore → bridge → `rosbag play --clock`, prime `/clock`,
      then `scene_graph.launch use_sim_time:=true`.
    - **bag-direct** — `ros2 bag play --clock --start-paused` → launch the stack →
@@ -108,6 +117,22 @@ and hands off to `docker/supervisor.sh`, which:
 
 Per-run logs land in `runlogs/<timestamp>/{bridge,pipeline,bag,…}.log` (mounted to
 the host). `Ctrl-C` → `tearing down (N processes)` → clean exit.
+
+### Demo-mode handshake (MODE=demo)
+
+The robot drives the whole run over two `std_msgs/String` topics:
+
+| `/scene_graph_generator/request` | Effect |
+|---|---|
+| `start` | launch the scene-graph pipeline (it was held down) |
+| `complete` | save a snapshot, then stream the JSON on `…/response` every 5 s until `received` |
+| `received` | stop streaming, tear the system down |
+| `cancel` | save the snapshot locally, then tear down (no `…/response` traffic) |
+
+Optional overrides: `REQ_TOPIC`, `RESP_TOPIC`, `ACK_TIMEOUT` (default 300 s — a
+guard so a lost `received` can't stream forever). The JSON is also written to
+`output/scene_graph/run_*/` (with a `latest.json` pointer) exactly as in other
+modes; the response stream just re-reads the freshest snapshot.
 
 ## RViz / X
 

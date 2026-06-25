@@ -5,6 +5,7 @@
 #
 # Usage (knobs are env vars):
 #   MODE=live ROBOT_IP=192.168.123.18 LAPTOP_IP=192.168.123.190 docker/run.sh
+#   MODE=demo ROBOT_IP=192.168.123.18 LAPTOP_IP=192.168.123.190 docker/run.sh  # robot-gated live
 #   MODE=bag-direct BAG=/home/all/AlphaZ/bags/multifloor_test_slam_ros2 docker/run.sh
 #   MODE=bag        BAG=/home/all/AlphaZ/bags/multifloor_test_slam     docker/run.sh
 #   docker/run.sh shell          # debug shell in the container (workspace sourced)
@@ -45,6 +46,11 @@ for k in GEMINI_API_KEY DASHSCOPE_API_KEY VLM_PROVIDER QWEN_MODEL QWEN_MODEL_LIT
   [ -n "${!k:-}" ] && run+=( -e "$k=${!k}" )
 done
 
+# Optional demo-mode (MODE=demo) overrides; the supervisor bakes sane defaults.
+for k in REQ_TOPIC RESP_TOPIC ACK_TIMEOUT; do
+  [ -n "${!k:-}" ] && run+=( -e "$k=${!k}" )
+done
+
 # RViz needs the host X server AND a GL stack. The CUDA base only requests the
 # `compute,utility` driver capabilities, so the container has no OpenGL -- RViz
 # falls back to Mesa, fails to reach a DRM device, and dies ("failed to load
@@ -59,9 +65,11 @@ if [ "$RVIZ" = "1" ]; then
 fi
 
 case "$MODE" in
-  live)
-    : "${ROBOT_IP:?live mode needs ROBOT_IP=<robot ip on its subnet, e.g. 192.168.123.18>}"
-    : "${LAPTOP_IP:?live mode needs LAPTOP_IP=<your ip on the robot subnet, e.g. 192.168.123.190>}"
+  live|demo)
+    # demo == live wiring (robot is the ROS 1 master), but the in-container
+    # supervisor gates the pipeline on a robot request instead of auto-starting.
+    : "${ROBOT_IP:?$MODE mode needs ROBOT_IP=<robot ip on its subnet, e.g. 192.168.123.18>}"
+    : "${LAPTOP_IP:?$MODE mode needs LAPTOP_IP=<your ip on the robot subnet, e.g. 192.168.123.190>}"
     run+=( -e ROS_MASTER_URI="http://$ROBOT_IP:11311" -e ROS_IP="$LAPTOP_IP" )
     ;;
   bag|bag-direct)
@@ -69,7 +77,7 @@ case "$MODE" in
     [ -d "$BAG" ] || { echo "BAG '$BAG' is not a directory" >&2; exit 1; }
     run+=( -e BAG_PATH=/app/bag -v "$BAG:/app/bag:ro" )
     ;;
-  *) echo "unknown MODE=$MODE (use live | bag | bag-direct)" >&2; exit 2 ;;
+  *) echo "unknown MODE=$MODE (use live | demo | bag | bag-direct)" >&2; exit 2 ;;
 esac
 
 # Pass-through extra args (e.g. `shell`) to the supervisor entrypoint.
