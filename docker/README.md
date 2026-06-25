@@ -85,9 +85,23 @@ BUILD=1 MODE=bag-direct BAG=<dir> docker/run.sh
 | `START_OFFSET` | — | **bag / bag-direct**: seconds to skip from the bag start (empty = from 0) |
 | `DURATION` | — | **bag / bag-direct**: seconds to play, then stop (empty = to the end) |
 | `HOLD` | `0` | **bag / bag-direct**: `1` keeps the stack (incl. RViz) up after the bag finishes, for inspection (`Ctrl-C` to quit) |
+| `ROS_AUTOMATIC_DISCOVERY_RANGE` | `LOCALHOST` (bag/bag-direct) | Confines ROS 2 discovery to this host so two laptops on the same WiFi don't collide (see below). Set `SUBNET` to opt back into cross-host ROS 2 |
 
 Cloud-VLM credentials (`GEMINI_API_KEY`, `DASHSCOPE_API_KEY`, `VLM_PROVIDER`,
 `QWEN_MODEL`, `QWEN_MODEL_LITE`) pass through from your environment if set.
+
+#### Two laptops on the same WiFi (bag/bag-direct)
+
+`bag` and `bag-direct` are a fully self-contained ROS 2 graph (bag → pipeline, no
+robot off-box). But `run.sh` uses `--network host` with the default
+`ROS_DOMAIN_ID`, so two people running on the same LAN/WiFi would otherwise
+auto-discover each other and cross-wire `/clock`, `/tf`, node names and
+`/rosbag2_player` — silently breaking **both** runs. To prevent that, the two bag
+modes default `ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST`, isolating each laptop.
+(`live`/`demo` reach the robot over **ROS 1**, not ROS 2, so this is left at the
+ROS 2 default there and doesn't affect the robot link.) If you genuinely want two
+machines to share one ROS 2 graph, set `ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET` on
+both and give them a matching `ROS_DOMAIN_ID`.
 
 ### Finding the live IPs
 

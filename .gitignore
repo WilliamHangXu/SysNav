@@ -40,6 +40,11 @@ bagfile_*/
 *.rviz
 !CMakeLists.txt
 !readme.txt
+# The scene-graph pipeline hard-loads this RViz config (scene_graph.launch ->
+# rviz2 -d <pkg>/tare_planner_ground.rviz), so it MUST ship -- otherwise a fresh
+# clone launches RViz with no displays and every user re-adds topics by hand.
+# (Personal/scratch .rviz files stay ignored by the *.rviz rule above.)
+!src/exploration_planner/tare_planner/tare_planner_ground.rviz
 
 # Simulation & runtime output
 sim_benchmark_results/
