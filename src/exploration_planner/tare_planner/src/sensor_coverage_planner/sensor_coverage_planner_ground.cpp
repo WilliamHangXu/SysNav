@@ -387,6 +387,7 @@ void SensorCoveragePlanner3D::ReadParameters() {
   this->declare_parameter<double>("room_view.motion_yaw_deg", 5.0);
   this->declare_parameter<double>("room_view.min_coverage_m2", 1.0);
   this->declare_parameter<double>("room_view.max_yaw_rate_deg_s", 30.0);
+  this->declare_parameter<double>("room_view.yaw_rate_window_s", 0.06);
   this->declare_parameter<double>("room_view.object_conf_min", 0.3);
   this->declare_parameter<double>("room_type_query.min_interval_s", 3.0);
   room_view_max_range_ = this->get_parameter("room_view.max_range_m").as_double();
@@ -399,6 +400,8 @@ void SensorCoveragePlanner3D::ReadParameters() {
   room_view_min_coverage_m2_ = this->get_parameter("room_view.min_coverage_m2").as_double();
   room_view_max_yaw_rate_ =
       this->get_parameter("room_view.max_yaw_rate_deg_s").as_double() * M_PI / 180.0;
+  room_view_yaw_rate_window_s_ =
+      this->get_parameter("room_view.yaw_rate_window_s").as_double();
   room_view_object_conf_min_ = this->get_parameter("room_view.object_conf_min").as_double();
   room_type_query_min_interval_s_ =
       this->get_parameter("room_type_query.min_interval_s").as_double();
@@ -4455,23 +4458,29 @@ void SensorCoveragePlanner3D::UpdateRoomViews()
   GetPoseAtTime(imageTime, lidarX, lidarY, lidarZ, lidarRoll, lidarPitch,
                 lidarYaw);
 
-  // Yaw-rate gate: drop frames captured while turning fast (motion blur),
-  // using the two most recent odom samples.
+  // Yaw-rate gate: drop frames captured while turning fast (motion blur).
+  // The rate is measured at the *capture* instant (imageTime), centered over a
+  // fixed window, so it matches the pose/cloud the rest of this function uses.
+  // (The old version sampled the two newest odom entries, i.e. the rate "now" —
+  // wrong when the image stream lags, and noisy over a single odom step.)
+  if (odomLastIDPointer >= 0)
   {
-    int i1 = odomLastIDPointer;
-    int i0 = (odomLastIDPointer - 1 + kOdomStackSize) % kOdomStackSize;
-    if (i1 >= 0)
+    double h = room_view_yaw_rate_window_s_;
+    double tA = imageTime - h;
+    double tB = imageTime + h;
+    // Don't extrapolate past the newest odom sample (e.g. a very fresh frame);
+    // clamp the upper bound and divide by the actual span that remains.
+    double tNewest = odomTimeStack[odomLastIDPointer];
+    if (tB > tNewest) tB = tNewest;
+    double span = tB - tA;
+    if (span > 1e-6)
     {
-      double dt = odomTimeStack[i1] - odomTimeStack[i0];
-      if (dt > 1e-6)
+      double dyaw = GetYawAtTime(tB) - GetYawAtTime(tA);
+      while (dyaw > M_PI) dyaw -= 2 * M_PI;
+      while (dyaw < -M_PI) dyaw += 2 * M_PI;
+      if (std::fabs(dyaw / span) > room_view_max_yaw_rate_)
       {
-        float dyaw = lidarYawStack[i1] - lidarYawStack[i0];
-        while (dyaw > M_PI) dyaw -= 2 * M_PI;
-        while (dyaw < -M_PI) dyaw += 2 * M_PI;
-        if (std::fabs(dyaw / dt) > room_view_max_yaw_rate_)
-        {
-          return;
-        }
+        return;
       }
     }
   }
@@ -5043,6 +5052,52 @@ void SensorCoveragePlanner3D::GetPoseAtTime(double imageTime, float &lidarX, flo
     lidarPitch = lidarPitchStack[odomFrontIDPointer] * ratioFront + lidarPitchStack[odomBackIDPointer] * ratioBack;
     lidarYaw = lidarYawStack[odomFrontIDPointer] * ratioFront + lidarYawStack[odomBackIDPointer] * ratioBack;
   }
+}
+
+// Interpolated yaw at an arbitrary time, scanning the odom ring buffer backward
+// from the newest sample. Unlike GetPoseAtTime this does NOT advance
+// odomFrontIDPointer, so it is safe to call for times on both sides of a capture
+// instant (and in any order). Clamps to the buffer's [oldest, newest] range and
+// stops at the first non-monotonic slot (guards against uninitialized entries
+// before the ring has filled).
+double SensorCoveragePlanner3D::GetYawAtTime(double queryTime)
+{
+  if (odomLastIDPointer < 0)
+  {
+    return 0.0;
+  }
+  int newer = odomLastIDPointer;
+  if (queryTime >= odomTimeStack[newer])
+  {
+    return lidarYawStack[newer];  // at/after newest: clamp
+  }
+  for (int step = 0; step < kOdomStackSize - 1; ++step)
+  {
+    int older = (newer - 1 + kOdomStackSize) % kOdomStackSize;
+    if (older == odomLastIDPointer)
+    {
+      break;  // wrapped a full lap
+    }
+    if (odomTimeStack[older] >= odomTimeStack[newer])
+    {
+      break;  // non-monotonic: hit an unwritten slot, stop here
+    }
+    if (odomTimeStack[older] <= queryTime)
+    {
+      // queryTime lies in [older, newer]: linear interpolate with wrap fix.
+      double ratioNewer =
+          (queryTime - odomTimeStack[older]) /
+          (odomTimeStack[newer] - odomTimeStack[older]);
+      double yawOlder = lidarYawStack[older];
+      double yawNewer = lidarYawStack[newer];
+      double d = yawNewer - yawOlder;
+      if (d > M_PI) yawOlder += 2 * M_PI;
+      else if (d < -M_PI) yawOlder -= 2 * M_PI;
+      return yawOlder * (1.0 - ratioNewer) + yawNewer * ratioNewer;
+    }
+    newer = older;
+  }
+  return lidarYawStack[newer];  // older than everything retained: clamp to oldest
 }
 
 // Publish the room type visualization

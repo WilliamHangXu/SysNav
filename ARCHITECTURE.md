@@ -163,7 +163,10 @@ vlm_node ─► room *type* labels ─► RoomNodeRep label  (e.g. "kitchen")
 ```
 Rooms get a lifecycle (created, updated, deleted as segmentation evolves).
 Viewpoints and objects are re-binned into rooms via the room mask as it changes.
-See [`room_segmentation/README.md`](src/exploration_planner/tare_planner/src/room_segmentation/README.md).
+See [`room_segmentation/README.md`](src/exploration_planner/tare_planner/src/room_segmentation/README.md)
+for the (purely geometric) mask, and
+[`sensor_coverage_planner/ROOM_LABELING.md`](src/exploration_planner/tare_planner/src/sensor_coverage_planner/ROOM_LABELING.md)
+for how rooms get *typed* (view-image admission → VLM query → answer applied).
 
 **4. The keypose graph — the planner (parallel, mostly independent)**
 A global topological **roadmap** of the walkable world, built from the robot's
@@ -259,7 +262,8 @@ Full schema, build logic, triggers, and gotchas:
 | If you're working on… | Go to |
 |---|---|
 | The exported JSON shape / save logic | [`scene_graph_exporter/README.md`](src/exploration_planner/tare_planner/src/scene_graph_exporter/README.md) |
-| Rooms / doors / room labels | [`room_segmentation/README.md`](src/exploration_planner/tare_planner/src/room_segmentation/README.md), `vlm_node/` |
+| Rooms / doors / the room mask (geometry) | [`room_segmentation/README.md`](src/exploration_planner/tare_planner/src/room_segmentation/README.md) |
+| Room *type* labeling (views → VLM → apply) | [`sensor_coverage_planner/ROOM_LABELING.md`](src/exploration_planner/tare_planner/src/sensor_coverage_planner/ROOM_LABELING.md), `vlm_node/` |
 | 3D objects / detection | [`semantic_mapping/README.md`](src/semantic_mapping/README.md) |
 | Traversability roadmap / routing distances | [`keypose_graph/README.md`](src/exploration_planner/tare_planner/src/keypose_graph/README.md) |
 | The exported waypoint/navigation graph (for the LLM) | [`navgraph/README.md`](src/exploration_planner/tare_planner/src/navgraph/README.md) |

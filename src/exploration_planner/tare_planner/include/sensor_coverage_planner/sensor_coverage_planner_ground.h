@@ -404,8 +404,12 @@ private:
   bool CheckRayVisibilityInOccupancyGrid(const Eigen::Vector3i& start_pos, const Eigen::Vector3i& end_pos);
   bool InRange(const Eigen::Vector3i& voxel_index) const;
   std::vector<Eigen::Vector3i> Convert2Voxels(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud);
-  void GetPoseAtTime(double imageTime, float &lidarX, float &lidarY, float &lidarZ, 
+  void GetPoseAtTime(double imageTime, float &lidarX, float &lidarY, float &lidarZ,
                      float &lidarRoll, float &lidarPitch, float &lidarYaw);
+  // Non-mutating yaw lookup at an arbitrary time (does NOT advance
+  // odomFrontIDPointer, unlike GetPoseAtTime), so it can be sampled on both
+  // sides of a capture time for a centered yaw-rate estimate.
+  double GetYawAtTime(double queryTime);
   cv::Mat project_pcl_to_image(const pcl::PointCloud<pcl::PointXYZI>::Ptr &cloud_w,
                                 float &lidarX, float &lidarY, float &lidarZ,
                                 float &lidarRoll, float &lidarPitch, float &lidarYaw,
@@ -505,6 +509,7 @@ private:
   float room_view_max_range_;           // max useful range for coverage (m)
   float room_view_min_coverage_m2_;     // reject frames seeing less than this
   float room_view_max_yaw_rate_;        // reject frames captured turning faster (rad/s)
+  double room_view_yaw_rate_window_s_;  // half-window for centered yaw-rate estimate (s)
   float room_view_object_conf_min_;     // object inventory confidence floor
   double room_type_query_min_interval_s_;  // per-room re-query rate limit
   float room_view_pose_dist_thresh_;    // pose-diversity: min position separation (m)

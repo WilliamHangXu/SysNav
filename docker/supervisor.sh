@@ -32,6 +32,10 @@
 #                     START_OFFSET / DURATION (seconds) trim playback (empty = whole
 #                     bag). A non-zero START_OFFSET also starts a /tf_static primer,
 #                     since the offset skips the bag's latched static-TF tree.
+#                     DECOMPRESS (auto|true|false) overrides camera-decode detection:
+#                     by default the bag is inspected and the JPEG camera is decoded
+#                     to raw image_rect_color only when the bag carries ONLY the
+#                     compressed topic (e.g. recorded during a live/demo run).
 #                     HOLD (default 1) keeps the stack (incl. RViz) up after the bag
 #                     finishes, for inspection (Ctrl-C to quit); HOLD=0 auto-exits.
 #   GEMINI_API_KEY / DASHSCOPE_API_KEY ... passed through for the cloud VLM
@@ -172,10 +176,31 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-start_pipeline() {  # start_pipeline <use_sim_time>
+start_pipeline() {  # start_pipeline <use_sim_time> [decompress_camera=auto]
   launch pipeline bash -c \
     "set +u; source $JAZZY_SETUP; source $APP/install/setup.bash; \
-     exec ros2 launch tare_planner scene_graph.launch use_sim_time:=$1 rviz:=$RVIZ objects:=$OBJECTS"
+     exec ros2 launch tare_planner scene_graph.launch use_sim_time:=$1 rviz:=$RVIZ \
+       objects:=$OBJECTS decompress_camera:=${2:-auto}"
+}
+
+# Decide whether the pipeline must decode a CompressedImage camera for THIS bag.
+# The camera switched to compressed (JPEG) to spare the live WiFi hop, so a bag
+# recorded during a live/demo run (RECORD=1, or a robot-side ROS 1 bag) captures
+# /<ns>/camera/image_rect_color/compressed instead of the raw
+# /<ns>/camera/image_rect_color the pipeline subscribes to. Echo "true" (run
+# scene_graph.launch's camera_decompress node) when the bag carries ONLY the
+# compressed topic; "false" otherwise -- older bags carry the raw topic directly and
+# decoding alongside it would double-publish on image_rect_color. The arg is the
+# bag's topic listing (`ros2 bag info` / `rosbag info` output); grep is
+# namespace-agnostic. Overridable per run with DECOMPRESS=auto|true|false.
+camera_decompress_for_bag() {  # camera_decompress_for_bag <topic-listing>
+  local info="$1"
+  if printf '%s\n' "$info" | grep -q 'image_rect_color/compressed' \
+     && ! printf '%s\n' "$info" | grep -qE 'image_rect_color[[:space:]]'; then
+    echo true
+  else
+    echo false
+  fi
 }
 
 # The bag-record input set = the bridged pipeline inputs, rendered for the robot
@@ -242,6 +267,11 @@ case "$MODE" in
   bag)
     # ROS 1 bag through the bridge: in-container roscore + rosbag --clock.
     : "${BAG_PATH:?bag mode needs BAG_PATH (a ROS 1 .bag directory)}"
+    # A bag recorded during a live/demo run carries the camera as JPEG; decode it
+    # only if this bag has the compressed (and not the raw) topic. DECOMPRESS overrides.
+    BAG_DECOMP="${DECOMPRESS:-$(camera_decompress_for_bag \
+      "$(bash -c "source $NOETIC_SETUP; rosbag info $BAG_PATH/*.bag" 2>/dev/null)")}"
+    echo "[supervisor] camera: decompress_camera=$BAG_DECOMP (decode compressed JPEG -> raw image_rect_color)"
     export ROS_MASTER_URI=http://localhost:11311 ROS_IP=127.0.0.1
     launch roscore bash -c "source $NOETIC_SETUP; exec roscore"
     for i in $(seq 1 20); do
@@ -266,7 +296,7 @@ case "$MODE" in
     # 0 -> bag-time jump.
     echo "[supervisor] priming /clock for ${AUTOPLAY_DELAY}s before the pipeline ..."
     sleep "$AUTOPLAY_DELAY"
-    start_pipeline true; PIPE_PID=$LAST_PID
+    start_pipeline true "$BAG_DECOMP"; PIPE_PID=$LAST_PID
     # HOLD (default 1) blocks on the pipeline so the stack (incl. RViz) stays up for
     # inspection after playback; HOLD=0 exits when the bag finishes (scripted runs).
     PRIMARY=$BAG_PID
@@ -281,6 +311,12 @@ case "$MODE" in
     # Start PAUSED so /clock is alive at bag-start before the planner boots, then
     # resume once the stack is up (mirrors the tmuxp runner).
     : "${BAG_PATH:?bag-direct mode needs BAG_PATH (a ROS 2 bag directory)}"
+    # A bag recorded during a live/demo run (RECORD=1 records the bridge_topics set,
+    # now compressed-only) carries the camera as JPEG; decode it only if this bag has
+    # the compressed (and not the raw) topic. DECOMPRESS overrides.
+    BAG_DECOMP="${DECOMPRESS:-$(camera_decompress_for_bag \
+      "$(bash -c "set +u; source $JAZZY_SETUP; source $APP/install/setup.bash; ros2 bag info '$BAG_PATH'" 2>/dev/null)")}"
+    echo "[supervisor] camera: decompress_camera=$BAG_DECOMP (decode compressed JPEG -> raw image_rect_color)"
     # START_OFFSET / DURATION map to ros2 bag play --start-offset / --playback-duration.
     R2_OPTS=""
     [ -n "${START_OFFSET:-}" ] && R2_OPTS="$R2_OPTS --start-offset $START_OFFSET"
@@ -289,7 +325,7 @@ case "$MODE" in
       "set +u; source $JAZZY_SETUP; source $APP/install/setup.bash; \
        exec ros2 bag play '$BAG_PATH' $R2_OPTS --clock --start-paused --disable-keyboard-controls < /dev/null"
     BAG_PID=$LAST_PID
-    start_pipeline true; PIPE_PID=$LAST_PID
+    start_pipeline true "$BAG_DECOMP"; PIPE_PID=$LAST_PID
     echo "[supervisor] waiting ${AUTOPLAY_DELAY}s for the stack, then resuming the bag ..."
     sleep "$AUTOPLAY_DELAY"
     bash -c "set +u; source $JAZZY_SETUP; source $APP/install/setup.bash; \

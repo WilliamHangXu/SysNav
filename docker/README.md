@@ -119,11 +119,18 @@ both and give them a matching `ROS_DOMAIN_ID`.
 #### Recording a bag (live / demo)
 
 `RECORD=1` records **exactly what the pipeline receives** — the bridged sensor/TF
-inputs (`<ns>/cloud_registered`, `<ns>/lio/odometry`, `<ns>/camera/image_rect_color`,
-`<ns>/camera_rect/camera_info`, `/tf`, `/tf_static`) — to a ROS 2 bag under
-`output/recordings/<ts>/`. The topic set is derived from `bridge_topics.yaml`
-(rendered for the namespace), minus `/clock` (regenerated on replay) and the demo
-control channel. Off by default.
+inputs (`<ns>/cloud_registered`, `<ns>/lio/odometry`,
+`<ns>/camera/image_rect_color/compressed`, `<ns>/camera_rect/camera_info`, `/tf`,
+`/tf_static`) — to a ROS 2 bag under `output/recordings/<ts>/`. The topic set is
+derived from `bridge_topics.yaml` (rendered for the namespace), minus `/clock`
+(regenerated on replay) and the demo control channel. Off by default.
+
+> The camera is recorded **compressed** (JPEG) — that's how it crosses the bridge,
+> to spare the WiFi hop. On replay (`bag` / `bag-direct`) the supervisor inspects the
+> bag and, when it carries only the compressed topic, runs the `camera_decompress`
+> node to decode it back to the raw `<ns>/camera/image_rect_color` the pipeline
+> consumes — so nothing downstream changes. Older raw-only bags play through
+> untouched. Force it with `DECOMPRESS=auto|true|false`.
 
 - **No WiFi cost.** It records the *in-container ROS 2* side — data the bridge has
   already pulled to your laptop once — so it adds no robot↔laptop traffic. (A ROS 1

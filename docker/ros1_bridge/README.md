@@ -39,8 +39,8 @@ Our `Dockerfile` adds only a thin entrypoint so the container *runs the bridge*.
    ──────────────────────────         ────────────────            ───────────────────
    /<ns>/cloud_registered   ─┐
    /<ns>/lio/odometry        ├─ roscpp ─►  dynamic_bridge  ─ DDS ─►  scene_graph.launch
-   /<ns>/camera/image_rect_color   (selective: only subscribed)      (planner, room_seg,
-   /<ns>/camera_rect/camera_info                                      semantic_mapping, vlm,
+   /<ns>/camera/image_rect_color/compressed  (selective; JPEG,        (planner, room_seg,
+   /<ns>/camera_rect/camera_info              decoded host-side)       semantic_mapping, vlm,
    /tf, /tf_static  (+ /clock, bag only)                              exporter)
 ```
 
@@ -139,9 +139,9 @@ subcommand, for ad-hoc inspection. The two compared:
 
 Bridges a topic only when the *other* side has a subscriber, so exactly the
 pipeline's inputs cross (`cloud_registered`, `lio/odometry`,
-`camera/image_rect_color`, `camera_rect/camera_info`, `/tf`, `/tf_static`, plus
-`/clock` under sim time) and direction is automatic. Zero config — good for
-quick checks.
+`camera/image_rect_color/compressed`, `camera_rect/camera_info`, `/tf`,
+`/tf_static`, plus `/clock` under sim time) and direction is automatic. Zero
+config — good for quick checks.
 
 - `BRIDGE_ALL=1` bridges *everything* (firehose) — primes `/clock` before the
   planner boots (selective mode otherwise won't bridge `/clock` until subscribed).

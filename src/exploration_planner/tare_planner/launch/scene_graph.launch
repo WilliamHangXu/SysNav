@@ -3,9 +3,9 @@ import yaml
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
-from launch.conditions import IfCondition, UnlessCondition
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
 # One bringup launch for the whole scene-graph pipeline. Scenario / export / vlm
@@ -40,6 +40,7 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration('use_sim_time')
     rviz = LaunchConfiguration('rviz')
     objects = LaunchConfiguration('objects')
+    decompress = LaunchConfiguration('decompress_camera')
 
     tare_share = get_package_share_directory('tare_planner')
     sem_share = get_package_share_directory('semantic_mapping')
@@ -87,6 +88,17 @@ def generate_launch_description():
         # objects:=true to restore the full objects-first pipeline.
         DeclareLaunchArgument('objects', default_value='false',
                               description='Run object detection + mapping branch'),
+        # Whether to decode a CompressedImage camera back to the raw
+        # <ns>/camera/image_rect_color the pipeline consumes. 'auto' (default) = on
+        # when use_sim_time:=false (live/demo, where the ROS 1 bridge carries JPEG to
+        # spare the WiFi hop) and off for bag modes -- which historically play the raw
+        # topic straight from the bag. supervisor.sh inspects each bag and passes
+        # decompress_camera:=true when it carries ONLY the compressed topic (e.g. a
+        # bag recorded during a live/demo run), so such bags decode in bag /
+        # bag-direct too. 'true'/'false' force it on/off (e.g. a hand-run pipeline).
+        DeclareLaunchArgument('decompress_camera', default_value='auto',
+                              description='Decode compressed camera -> raw '
+                                          'image_rect_color: auto | true | false'),
     ]
 
     if slam_mode:
@@ -132,16 +144,18 @@ def generate_launch_description():
             parameters=[{'use_sim_time': use_sim_time}], output='screen'))
 
     entries += [
-        # Live/demo (use_sim_time:=false) receive the camera over the ROS 1 bridge
-        # as CompressedImage (JPEG) -- bridging raw frames was saturating the WiFi
-        # hop. Decode it back to the raw /<ns>/camera/image_rect_color the planner
+        # The camera can arrive COMPRESSED (JPEG): live/demo bridge JPEG over the
+        # ROS 1 hop to spare the WiFi (bridging raw frames saturated it), and a bag
+        # recorded during a live/demo run therefore captures the compressed topic
+        # too. Decode it back to the raw /<ns>/camera/image_rect_color the planner
         # (and, with objects:=true, the detection node) already subscribe to, so
         # nothing downstream changes. republish is LAZY: it only decodes while a
         # consumer is attached, and in this image_transport version the transports
         # are PARAMETERS (in_transport/out_transport) -- the old positional
-        # `republish compressed raw` CLI form silently no-ops. Bag modes
-        # (use_sim_time:=true) play raw image_rect_color straight from the ROS 2
-        # bag, so no decode node runs there.
+        # `republish compressed raw` CLI form silently no-ops. Gated by
+        # decompress_camera (see the DeclareLaunchArgument above): on for live/demo,
+        # and on for bag modes only when supervisor.sh finds the bag carries ONLY the
+        # compressed topic (raw-only bags play through untouched -- no double-publish).
         Node(package='image_transport', executable='republish',
              name='camera_decompress',
              parameters=[{'in_transport': 'compressed', 'out_transport': 'raw',
@@ -149,7 +163,10 @@ def generate_launch_description():
              remappings=[('in/compressed',
                           f'/{ns}/camera/image_rect_color/compressed'),
                          ('out', f'/{ns}/camera/image_rect_color')],
-             condition=UnlessCondition(use_sim_time), output='screen'),
+             condition=IfCondition(PythonExpression([
+                 "'", decompress, "' == 'true' or ('", decompress,
+                 "' == 'auto' and '", use_sim_time, "' == 'false')"])),
+             output='screen'),
         include(os.path.join(sem_share, 'detection_node_go2w_bag.launch'),
                 condition=IfCondition(objects)),
         include(os.path.join(sem_share, 'semantic_mapping_go2w_bag.launch'),
