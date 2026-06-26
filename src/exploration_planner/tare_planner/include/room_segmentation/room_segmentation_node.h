@@ -17,6 +17,7 @@
 #include <set>
 #include <numeric>
 #include <limits>
+#include <deque>
 
 // ROS 2
 #include "rclcpp/rclcpp.hpp"
@@ -111,6 +112,11 @@ private:
     int toIndex(int x, int y, int z);
     int toIndex(int x, int y);
 
+    // Freshness gate: true when the registered cloud lags the pose enough that
+    // the latest-odom pose is spatially far from where the robot actually was
+    // when the cloud was captured -> destructive wall ops must be skipped.
+    bool cloudPoseStale();
+
     // ==================== Publishing Functions ====================
     void publishRoomNodes();
     void publishRoomPolygon();
@@ -167,6 +173,7 @@ private:
     float kViewPointCollisionMarginZMinus_;
     bool is_debug_; // whether to save debug images
     std::vector<int> room_voxel_dimension_;
+    float cloud_pose_lag_dist_; // freshness gate: skip destructive wall ops when the registered cloud lags the pose by more than this (m)
 
     // ==================== Point Clouds ====================
     pcl::PointCloud<pcl::PointXYZINormal>::Ptr laser_cloud_;
@@ -214,6 +221,10 @@ private:
     bool segment_flag_; // flag to trigger room segmentation
     bool demo_frozen_; // when true, stop updating and keep republishing cached results
     int demo_publish_count_; // counter for throttling publish rate while frozen
+
+    // ==================== Cloud-vs-pose freshness gate ====================
+    double latest_cloud_stamp_sec_; // stamp (s) of the most recent registered scan
+    std::deque<std::array<double, 3>> odom_buf_; // (stamp_s, x, y) odom history (~5 s) for the freshness gate
 };
 
 } // namespace room_segmentation

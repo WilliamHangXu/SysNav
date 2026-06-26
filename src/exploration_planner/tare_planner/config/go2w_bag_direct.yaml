@@ -186,3 +186,11 @@ room_segmentation:
 
     ceilingHeight_: 2.3
     isDebug: true
+
+    # Cloud-vs-pose freshness gate (meters). When a delivery-lagged registered
+    # scan leaves the robot's pose more than this far ahead of where the robot
+    # was when the cloud was captured, room_segmentation skips the destructive
+    # wall ops (state-free latch, wall_hist decrement, in-range plane refresh)
+    # for that cycle, so a stale cloud cannot carve real walls as free space.
+    # Lower = more protective. Default in code is 0.3 if this key is omitted.
+    cloud_pose_lag_dist: 0.5

@@ -11,6 +11,22 @@
 
 namespace room_segmentation {
 
+// ===== Wall-evidence diagnostics (temporary; grep "[wall_dbg]") ==============
+// Instruments every site that CREATES or DESTROYS wall evidence so a bag replay
+// shows which path breaks a previously-stable divider, and on which cycle:
+//   getWall          -> plane lifecycle (in-range kill / no-revive / 33%-free cull)
+//   updateFreespace  -> wall_hist decremented by freespace (the "halving")
+//   updateStateVoxel -> cells latched free that destroyed standing wall evidence
+//   roomSegmentation -> raw hist max, the relative 0.5*max gate, final barrier,
+//                       and the room-seed count (a drop = two rooms merged)
+// Flip WALL_DBG_ENABLED to 0 to silence everything in one place.
+#define WALL_DBG_ENABLED 1
+#if WALL_DBG_ENABLED
+#define WALL_DBG(...) RCLCPP_INFO(this->get_logger(), __VA_ARGS__)
+#else
+#define WALL_DBG(...) ((void)0)
+#endif
+
 // ==================== Constructor ====================
 RoomSegmentationNode::RoomSegmentationNode() 
     : Node("room_segmentation_node"),
@@ -38,7 +54,9 @@ RoomSegmentationNode::RoomSegmentationNode()
       room_node_counter_(0),
       segment_flag_(false),
       demo_frozen_(false),
-      demo_publish_count_(0)
+      demo_publish_count_(0),
+      latest_cloud_stamp_sec_(-1.0),
+      cloud_pose_lag_dist_(0.3f)
 {
     RCLCPP_INFO(this->get_logger(), "Initializing Room Segmentation Node...");
 
@@ -88,6 +106,12 @@ RoomSegmentationNode::RoomSegmentationNode()
     this->get_parameter("kViewPointCollisionMarginZPlus", kViewPointCollisionMarginZPlus_);
     this->get_parameter("kViewPointCollisionMarginZMinus", kViewPointCollisionMarginZMinus_);
     this->get_parameter("isDebug", is_debug_);
+
+    // Cloud-vs-pose freshness gate threshold (meters). When the registered scan
+    // lags the pose such that the robot moved more than this between the cloud's
+    // stamp and the latest odom, the destructive wall ops are skipped this cycle.
+    this->declare_parameter<float>("cloud_pose_lag_dist", 0.3f);
+    this->get_parameter("cloud_pose_lag_dist", cloud_pose_lag_dist_);
 
     // --- Multi-robot portability: one knob (robot_namespace) ---
     // Robot-source inputs become /<robot_namespace>/<suffix>; /occupied_cloud,
@@ -357,6 +381,50 @@ geometry_msgs::msg::PolygonStamped RoomSegmentationNode::computePolygonFromMaskC
 // ==================== State Estimation Callback ====================
 void RoomSegmentationNode::stateEstimationCallback(const nav_msgs::msg::Odometry::ConstSharedPtr msg) {
     robot_position_ = msg->pose.pose.position;
+    // Keep a short (~5 s) odom history (stamp, x, y) for the cloud-vs-pose
+    // freshness gate. Odom and the registered scan carry the same robot-clock
+    // stamps, so they are directly comparable.
+    const double stamp = rclcpp::Time(msg->header.stamp).seconds();
+    odom_buf_.push_back({stamp, robot_position_.x, robot_position_.y});
+    while (odom_buf_.size() > 1 && stamp - odom_buf_.front()[0] > 5.0) {
+        odom_buf_.pop_front();
+    }
+}
+
+// ==================== Cloud-vs-pose freshness gate ====================
+// The destructive wall ops (state-free latch, wall_hist decrement, in-range
+// plane refresh) combine the LATEST pose with the most recent registered cloud.
+// When that cloud is delivered late, the pose is fresh while the cloud is stale,
+// so it sits "behind" the robot and the ops carve real walls as free. Return
+// true when the robot moved more than cloud_pose_lag_dist_ between the cloud's
+// stamp and the latest odom -> the caller must skip the destructive op.
+bool RoomSegmentationNode::cloudPoseStale() {
+    if (latest_cloud_stamp_sec_ < 0.0 || odom_buf_.size() < 2) {
+        return false; // not enough data yet -> behave exactly as before
+    }
+    const double odom_t = odom_buf_.back()[0];
+    const double ox = odom_buf_.back()[1];
+    const double oy = odom_buf_.back()[2];
+    const double cs = latest_cloud_stamp_sec_;
+    if (cs >= odom_t) {
+        return false; // cloud is not behind the latest pose
+    }
+    if (cs <= odom_buf_.front()[0]) {
+        return true; // cloud older than our whole odom history -> very stale
+    }
+    // Interpolate the pose at the cloud's stamp from the odom history.
+    double cx = ox, cy = oy;
+    for (size_t i = odom_buf_.size() - 1; i > 0; --i) {
+        const double t1 = odom_buf_[i][0];
+        const double t0 = odom_buf_[i - 1][0];
+        if (t0 <= cs && cs <= t1) {
+            const double f = (t1 > t0) ? (cs - t0) / (t1 - t0) : 0.0;
+            cx = odom_buf_[i - 1][1] + f * (odom_buf_[i][1] - odom_buf_[i - 1][1]);
+            cy = odom_buf_[i - 1][2] + f * (odom_buf_[i][2] - odom_buf_[i - 1][2]);
+            break;
+        }
+    }
+    return std::hypot(ox - cx, oy - cy) > cloud_pose_lag_dist_;
 }
 
 // ==================== Keyboard Input Callback ====================
@@ -380,6 +448,7 @@ void RoomSegmentationNode::laserCloudCallback(const sensor_msgs::msg::PointCloud
     if (demo_frozen_) {
         return;
     }
+    latest_cloud_stamp_sec_ = rclcpp::Time(msg->header.stamp).seconds();
     laser_cloud_->clear();
     laser_cloud_tmp_->clear();
     pcl::fromROSMsg(*msg, *laser_cloud_tmp_);
@@ -536,6 +605,12 @@ void RoomSegmentationNode::occupiedCloudCallback(const sensor_msgs::msg::PointCl
         return;
     }
 
+    if (cloudPoseStale())
+    {
+        WALL_DBG("[wall_dbg] GATE_SKIP updateStateVoxel (stale cloud, lag_dist>%.2f) t=%.3f robot=(%.2f,%.2f)",
+                 cloud_pose_lag_dist_, this->now().seconds(), robot_position_.x, robot_position_.y);
+        return;
+    }
     updateStateVoxel();
 }
 
@@ -552,6 +627,12 @@ void RoomSegmentationNode::freespaceCloudCallback(const sensor_msgs::msg::PointC
         return;
     }
 
+    if (cloudPoseStale())
+    {
+        WALL_DBG("[wall_dbg] GATE_SKIP updateFreespace (stale cloud, lag_dist>%.2f) t=%.3f robot=(%.2f,%.2f)",
+                 cloud_pose_lag_dist_, this->now().seconds(), robot_position_.x, robot_position_.y);
+        return;
+    }
     pcl::PointCloud<pcl::PointXYZI>::Ptr freespace_cloud_tmp(new pcl::PointCloud<pcl::PointXYZI>);
     updateFreespace(freespace_cloud_tmp);
 }
@@ -728,7 +809,21 @@ cv::Mat RoomSegmentationNode::getWall(const pcl::PointCloud<pcl::PointXYZINormal
 
     // Extract in-range planes from plane_infos_
     std::vector<int> in_range_plane_indices;
-    for (size_t i = 0; i < plane_infos_.size(); ++i)
+    // [wall_dbg] remember which standing planes get killed for refresh this cycle,
+    // so we can report the ones a fresh detection never revives (= silently gone).
+    struct DbgKilled { size_t idx; float cx, cy, sz, h, dist; };
+    std::vector<DbgKilled> wdbg_killed;
+    const size_t wdbg_planes_in = plane_infos_.size();
+    // Freshness gate: a stale (lagging) cloud lacks points on walls the robot
+    // has already passed; killing in-range planes "for refresh" would then drop
+    // them with nothing to revive them. Skip the in-range kill while stale.
+    const bool cloud_stale = cloudPoseStale();
+    if (cloud_stale)
+    {
+        WALL_DBG("[wall_dbg] GATE_SKIP getWall in-range plane kill (stale cloud, lag_dist>%.2f) t=%.3f robot=(%.2f,%.2f)",
+                 cloud_pose_lag_dist_, this->now().seconds(), robot_position_.x, robot_position_.y);
+    }
+    for (size_t i = 0; i < plane_infos_.size() && !cloud_stale; ++i)
     {
         const auto &plane = plane_infos_[i];
         if (plane.cloud->size() > 1000)
@@ -739,6 +834,8 @@ cv::Mat RoomSegmentationNode::getWall(const pcl::PointCloud<pcl::PointXYZINormal
         {
             in_range_plane_indices.push_back(i);
             plane_infos_[i].alive = false;
+            wdbg_killed.push_back({i, plane.centroid.x(), plane.centroid.y(),
+                                   static_cast<float>(plane.cloud->size()), plane.height, dist});
         }
     }
 
@@ -788,6 +885,20 @@ cv::Mat RoomSegmentationNode::getWall(const pcl::PointCloud<pcl::PointXYZINormal
         }
     }
 
+    // [wall_dbg] planes that were killed for in-range refresh but no fresh
+    // detection revived them this cycle => they vanish from the wall raster.
+    // This is the "wall disappears from plane fitting" path.
+    int wdbg_norevive = 0;
+    for (const auto &k : wdbg_killed)
+    {
+        if (k.idx < plane_infos_.size() && !plane_infos_[k.idx].alive)
+        {
+            wdbg_norevive++;
+            WALL_DBG("[wall_dbg] PLANE_INRANGE_KILL_NOREVIVE centroid=(%.2f,%.2f) size=%.0f height=%.2f dist=%.2f robot=(%.2f,%.2f)",
+                     k.cx, k.cy, k.sz, k.h, k.dist, robot_position_.x, robot_position_.y);
+        }
+    }
+
     // Remove planes where most voxels are free
     for (auto &plane : plane_infos_)
     {
@@ -809,6 +920,11 @@ cv::Mat RoomSegmentationNode::getWall(const pcl::PointCloud<pcl::PointXYZINormal
         }
         if (free_count > total_count * 0.33f)
         {
+            WALL_DBG("[wall_dbg] PLANE_FREE_CULL centroid=(%.2f,%.2f) size=%.0f height=%.2f free=%d/%d ratio=%.2f",
+                     plane.centroid.x(), plane.centroid.y(),
+                     static_cast<float>(plane.cloud->size()), plane.height,
+                     free_count, total_count,
+                     total_count > 0 ? static_cast<float>(free_count) / total_count : 0.0f);
             plane.alive = false;
         }
     }
@@ -818,6 +934,10 @@ cv::Mat RoomSegmentationNode::getWall(const pcl::PointCloud<pcl::PointXYZINormal
                                      [](const PlaneInfo &plane)
                                      { return (!plane.alive); }),
                       plane_infos_.end());
+
+    WALL_DBG("[wall_dbg] PLANE_SUMMARY in=%zu detected_new=%zu inrange_killed=%zu norevive=%d alive_out=%zu",
+             wdbg_planes_in, plane_infos_new.size(), wdbg_killed.size(), wdbg_norevive,
+             plane_infos_.size());
 
     // Visualize merged planes
     t0 = std::chrono::high_resolution_clock::now();
@@ -996,6 +1116,10 @@ void RoomSegmentationNode::updateVoxelMap(const std::vector<Eigen::Vector3f> &na
 
 void RoomSegmentationNode::updateStateVoxel() {
     // use the idx store in freespace_indices_ to update the state_map_all_
+    // [wall_dbg] count cells newly latched free, and how many of those were
+    // carrying real wall evidence (prev wall_hist>2) => irreversibly destroyed
+    // wall (state_map free is never reset and gates wall regrowth).
+    int wdbg_newly_freed = 0; int wdbg_wall_destroyed = 0; float wdbg_wall_destroyed_mag = 0.0f;
     for (const auto &pt : occupied_cloud_->points)
     {
         if (pt.intensity != 0) // Occupied
@@ -1045,9 +1169,17 @@ void RoomSegmentationNode::updateStateVoxel() {
                     if (nx >= 0 && nx < room_voxel_dimension_[0] &&
                         ny >= 0 && ny < room_voxel_dimension_[1])
                     {
+                        bool wdbg_was_free = (state_map_all_.at<uchar>(nx, ny) == 1);
+                        float wdbg_prev_wall = wall_hist_all_.at<float>(nx, ny);
                         state_map_all_.at<uchar>(nx, ny) = 1; // Mark as free space
                         navigable_map_all_.at<float>(nx, ny) = 1.0f;
                         wall_hist_all_.at<float>(nx, ny) = 1.0f; // Clear wall history
+                        if (!wdbg_was_free)
+                        {
+                            wdbg_newly_freed++;
+                            if (wdbg_prev_wall > 2.0f)
+                            { wdbg_wall_destroyed++; wdbg_wall_destroyed_mag += wdbg_prev_wall; }
+                        }
                         
                         for (int z = 0; z < room_voxel_dimension_[2]; ++z)
                         {
@@ -1071,6 +1203,10 @@ void RoomSegmentationNode::updateStateVoxel() {
         }
     }
 
+    WALL_DBG("[wall_dbg] STATE_FREE_LATCH newly_freed=%d wall_cells_destroyed=%d destroyed_mag=%.0f t=%.3f robot=(%.2f,%.2f) (prev wall_hist>2; these can never regrow)",
+             wdbg_newly_freed, wdbg_wall_destroyed, wdbg_wall_destroyed_mag,
+             this->now().seconds(), robot_position_.x, robot_position_.y);
+
     if (!updated_voxel_cloud_->empty())
     {
         // Publish the updated_voxel_cloud using pub_debug_
@@ -1087,6 +1223,7 @@ void RoomSegmentationNode::updateFreespace(pcl::PointCloud<pcl::PointXYZI>::Ptr 
     // this function only updates the navigable_voxels_, navigable_map_all_, wall_hist_all_ based on the freespace_cloud_
     // this function will store the freespace voxel indices in freespace_indices_, and it is used in updateStateVoxel() to update the state_map_all_
     freespace_indices_.clear();
+    int wdbg_dec_cells = 0; float wdbg_dec_total = 0.0f;  // [wall_dbg] wall_hist removed by freespace this cycle
     for (auto &pt : freespace_cloud_->points)
     {
         auto idx = misc_utils_ns::point_to_voxel(Eigen::Vector3f(pt.x + 1e-4, pt.y + 1e-4, pt.z + 1e-4), shift_, room_resolution_inv_);
@@ -1125,7 +1262,10 @@ void RoomSegmentationNode::updateFreespace(pcl::PointCloud<pcl::PointXYZI>::Ptr 
                                 navigable_map_all_.at<float>(nx, ny) -= 1.0f;
                                 float pt_z = pt.z + dz * room_resolution_; // 计算实际的z坐标
                                 if (wall_thres_height_ < pt_z && pt_z < ceiling_height_)
+                                {
                                     wall_hist_all_.at<float>(nx, ny) -= 1.0f; // 更新墙体地图
+                                    wdbg_dec_cells++; wdbg_dec_total += 1.0f;
+                                }
                             }
                         }
                     }
@@ -1133,6 +1273,9 @@ void RoomSegmentationNode::updateFreespace(pcl::PointCloud<pcl::PointXYZI>::Ptr 
             }
         }
     }
+
+    WALL_DBG("[wall_dbg] FREESPACE_DECREMENT dec_events=%d magnitude=%.0f t=%.3f robot=(%.2f,%.2f) (wall_hist -=1 per wall-height voxel hit by freespace)",
+             wdbg_dec_cells, wdbg_dec_total, this->now().seconds(), robot_position_.x, robot_position_.y);
 
     // use pub_debug_1_ to publish the freespace cloud
     sensor_msgs::msg::PointCloud2 freespace_cloud_msg;
@@ -1585,6 +1728,8 @@ void RoomSegmentationNode::roomSegmentation()
     // --------------------------- Extract walls from histogram ---------------------------
     t_0 = std::chrono::high_resolution_clock::now();
     cv::Mat wall_from_hist = wall_hist_.clone();
+    double wdbg_hist_max_raw = 0; cv::minMaxLoc(wall_hist_, nullptr, &wdbg_hist_max_raw);  // [wall_dbg] raw wall-evidence peak (pre-normalize)
+    int wdbg_hist_nz_raw = cv::countNonZero(wall_hist_ > 1.0f);                            // [wall_dbg] cells with real wall evidence
     cv::normalize(wall_from_hist, wall_from_hist, 0, 1, cv::NORM_MINMAX);
     wall_from_hist.convertTo(wall_from_hist, CV_8U);
     saveImageToFile(wall_from_hist, "walls_skeleton_hist_1_raw.png");
@@ -1595,6 +1740,10 @@ void RoomSegmentationNode::roomSegmentation()
     cv::normalize(wall_from_plane, wall_from_plane, 0, 255, cv::NORM_MINMAX);
     wall_from_plane.convertTo(wall_from_plane, CV_8U);
     cv::threshold(wall_from_plane, wall_from_plane, 0, 255, cv::THRESH_BINARY);
+    int wdbg_hist_bin_nz = cv::countNonZero(wall_from_hist);  // [wall_dbg] hist cells surviving the 0.5*max gate
+    int wdbg_plane_nz = cv::countNonZero(wall_from_plane);    // [wall_dbg] plane-derived wall cells
+    WALL_DBG("[wall_dbg] HIST max_raw=%.1f nz_raw(>1)=%d kept_after_0.5max_gate=%d | PLANE nz=%d",
+             wdbg_hist_max_raw, wdbg_hist_nz_raw, wdbg_hist_bin_nz, wdbg_plane_nz);
     // save 2 histograms speparately
     saveImageToFile(wall_from_plane, "wall_from_plane.png");
     saveImageToFile(wall_from_hist, "wall_from_hist.png");
@@ -1603,8 +1752,14 @@ void RoomSegmentationNode::roomSegmentation()
     // Combine the two histograms
     cv::Mat walls_skeleton_hist_connected = wall_from_hist.clone();
     wall_from_plane = wall_from_plane | wall_from_hist;
+    int wdbg_barrier_before_mask = cv::countNonZero(wall_from_plane);
 
     wall_from_plane.setTo(0, state_map_);
+    int wdbg_barrier_final = cv::countNonZero(wall_from_plane);
+    WALL_DBG("[wall_dbg] WALL_BARRIER plane_nz=%d hist_nz=%d combined=%d after_statemap_mask=%d removed_by_statemap=%d t=%.3f robot=(%.2f,%.2f)",
+             wdbg_plane_nz, wdbg_hist_bin_nz, wdbg_barrier_before_mask, wdbg_barrier_final,
+             wdbg_barrier_before_mask - wdbg_barrier_final,
+             this->now().seconds(), robot_position_.x, robot_position_.y);
 
     t_1 = std::chrono::high_resolution_clock::now();
     // std::cout << "[Time] Extract Wall from Histogram: " << std::chrono::duration<float>(t_1 - t_0).count() << " s" << std::endl;
@@ -1744,6 +1899,8 @@ void RoomSegmentationNode::roomSegmentation()
     cv::cvtColor(full_map_connected, full_map_color, cv::COLOR_GRAY2BGR);
     saveImageToFile(full_map_color, "full_map_color.png");
     cv::watershed(full_map_color, markers);
+    WALL_DBG("[wall_dbg] ROOMS_FOUND seeds=%zu (room basins this cycle; a drop here = two rooms merged into one mask)",
+             found_region_masks.size());
 
     // --------------------------- Merge Rooms ---------------------------
     auto t0_merge_room = std::chrono::high_resolution_clock::now();
