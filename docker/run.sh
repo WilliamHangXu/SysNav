@@ -48,6 +48,8 @@ run=( docker run --rm -it
   --gpus all --network host --ipc host
   -e MODE="$MODE" -e RVIZ="$RVIZ" -e OBJECTS="$OBJECTS" -e ROS_DOMAIN_ID="$ROS_DOMAIN_ID" -e BUILD="$BUILD"
   -e FORCE_ENGINE_REBUILD="${FORCE_ENGINE_REBUILD:-0}"
+  -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)"   # supervisor chowns output/+runlogs/ back to you on exit
+
   -v "$VOLUME:/app"                       # build/install/log persist here
   -v "$REPO/src:/app/src"                 # the volatile workspace (mounted, not baked)
   -v "$REPO/docker:/app/docker:ro"        # supervisor + scripts (edit-without-rebuild)

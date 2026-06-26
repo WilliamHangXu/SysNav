@@ -185,4 +185,4 @@ room_segmentation:
     kViewPointCollisionMarginZMinus : 0.4
 
     ceilingHeight_: 2.3
-    isDebug: false
+    isDebug: true

@@ -35,6 +35,10 @@
 #                     HOLD (default 1) keeps the stack (incl. RViz) up after the bag
 #                     finishes, for inspection (Ctrl-C to quit); HOLD=0 auto-exits.
 #   GEMINI_API_KEY / DASHSCOPE_API_KEY ... passed through for the cloud VLM
+#   HOST_UID / HOST_GID   set by run.sh; the cleanup trap chowns the bind-mounted
+#         output/ + runlogs/ back to this uid:gid on exit, so container-written
+#         artifacts (recordings, runlogs, snapshots) stay host-owned -- deletable
+#         without sudo. Recursive, so it also reclaims the backlog from older runs.
 #
 # `supervisor.sh shell` drops into an interactive shell (workspace sourced) for
 # the dev inner loop (edit src -> colcon build -> ros2 launch by hand).
@@ -134,6 +138,16 @@ cleanup() {
   for p in "${PIDS[@]}"; do kill -INT  "$p" 2>/dev/null || true; done
   sleep 3
   for p in "${PIDS[@]}"; do kill -KILL "$p" 2>/dev/null || true; done
+  # Hand container-written artifacts back to the host user. The container runs as
+  # root, so anything it creates under the bind-mounted output/ + runlogs/ lands
+  # root-owned on the host -- un-deletable without sudo (the "lock" icon in the
+  # file manager). chown them back on the way out. Recursive, so it also self-heals
+  # the backlog from earlier root-only runs. (A hard `docker kill` can skip this
+  # trap; if so, reclaim by hand: sudo chown -R "$(id -u):$(id -g)" output runlogs.)
+  if [ -n "${HOST_UID:-}" ] && [ "$HOST_UID" != "0" ]; then
+    echo "[supervisor] returning output/ + runlogs/ to uid $HOST_UID:${HOST_GID:-$HOST_UID} ..."
+    chown -R "$HOST_UID:${HOST_GID:-$HOST_UID}" "$APP/output" "$APP/runlogs" 2>/dev/null || true
+  fi
 }
 trap cleanup EXIT INT TERM
 

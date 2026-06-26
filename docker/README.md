@@ -138,6 +138,17 @@ control channel. Off by default.
 > message on subscribe and `ros2 bag play` re-asserts it, so the TF tree comes back
 > on replay — the one thing to sanity-check the first time you record.
 
+> **Artifact ownership.** The container runs as root, so anything it writes under
+> the bind-mounted `output/` and `runlogs/` (recordings, snapshots, per-run logs)
+> would otherwise land root-owned on the host — un-deletable without `sudo` (a lock
+> icon in the file manager). On exit the supervisor `chown`s both trees back to your
+> uid/gid (`HOST_UID`/`HOST_GID`, set automatically by `run.sh`), recursively, so it
+> also reclaims older root-owned runs. If a container is ever hard-killed
+> (`docker kill`) and skips that step, reclaim by hand from the repo root:
+> ```bash
+> sudo chown -R "$(id -u):$(id -g)" output runlogs
+> ```
+
 #### Attach a second terminal (`ros2 topic hz`, etc.)
 
 The container is named `sysnav` (the `NAME` knob), so from another terminal you can
