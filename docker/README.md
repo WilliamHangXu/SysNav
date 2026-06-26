@@ -67,8 +67,14 @@ MODE=bag-direct BAG=<dir> DURATION=230 HOLD=0 docker/run.sh
 # debug shell (workspace sourced); any MODE's env still applies
 MODE=bag-direct BAG=<dir> docker/run.sh shell
 
-# force a colcon rebuild (e.g. after C++ changes)
+# force a colcon rebuild (e.g. after C++ changes), THEN run the pipeline
 BUILD=1 MODE=bag-direct BAG=<dir> docker/run.sh
+
+# just build, no pipeline -- incremental colcon build into the named volume (no MODE/bag)
+docker/run.sh build
+
+# just build, no pipeline -- full clean rebuild: wipe build/install/log, build from scratch
+docker/run.sh rebuild
 ```
 
 ### Knobs
@@ -84,6 +90,7 @@ BUILD=1 MODE=bag-direct BAG=<dir> docker/run.sh
 | `VOLUME` | `sysnav-build` | Named volume holding `/app/{build,install,log}` |
 | `IMAGE` | `sysnav:latest` | Image tag to run |
 | `NAME` | `sysnav` | Container name → `docker exec -it sysnav bash` to attach a second terminal (see below). Override to run more than one container at once |
+| `INS` | `0` | `1` auto-opens a second host terminal already `docker exec`'d into the container, with sample ROS inspection commands printed (commented out). Scripts the "attach a second terminal" recipe below; needs a host terminal emulator + X |
 | `ROBOT_IP` | — | **live**: robot's IP (its `roscore` host) → `ROS_MASTER_URI` |
 | `LAPTOP_IP` | — | **live**: your IP on the robot's subnet → `ROS_IP` |
 | `BAG` | — | **bag / bag-direct**: host bag directory (mounted ro at `/app/bag`) |
@@ -167,6 +174,23 @@ ready immediately. For **ROS 1** topics (raw robot topics that aren't bridged),
 `source /opt/ros/noetic/setup.bash` in that shell (the `ROS_MASTER_URI` / `ROS_IP`
 are already set) and use `rostopic hz`. To attach to a second concurrent container,
 launch it with `NAME=...` and `docker exec` into that name.
+
+**`INS=1` automates this.** Add it to any run and, once the container is up (and the
+workspace is sourced), `run.sh` opens a **new terminal already inside the container**
+with these sample commands pre-printed as comments (copy a line, drop the `#`, run):
+
+```bash
+INS=1 MODE=bag-direct BAG=/home/all/AlphaZ/bags/multifloor_test_slam_ros2 docker/run.sh
+```
+
+It's off by default (`INS=0`) and works in every mode. It needs a host terminal
+emulator (`gnome-terminal` / `konsole` / `xfce4-terminal` / `tilix` / `xterm`, or the
+Debian `x-terminal-emulator` alias) and an X session; if none is found it prints the
+manual `docker exec -it <NAME> bash` line instead. The sample commands are filled in
+with the live `robot_namespace` from `robot.yaml`. The watcher runs in the
+background, so the main run keeps the foreground (and `Ctrl-C` behaves as usual); on
+the first run it waits out the one-time colcon build before opening, so the shell is
+ROS-ready when it appears.
 
 ### Finding the live IPs
 
@@ -271,6 +295,31 @@ Any output → **rebuild the image**. Otherwise: if C++ under `src/` changed →
 > `src/slam/dependency/*` or `Livox-SDK2` needs an **image** rebuild, not just
 > `BUILD=1`. Everything else under `src/` is the normal mounted workspace.
 
+### Build without running the pipeline (`build` / `rebuild`)
+
+`BUILD=1 … docker/run.sh` recompiles *and then launches a run*. When you just want
+to compile — CI, a pre-flight check, or warming the build volume — use the build-only
+subcommands. Both compile into the named volume and **exit** (no robot, no bag, no
+pipeline), so they need **no `MODE`/`ROBOT_IP`/`BAG`**:
+
+```bash
+docker/run.sh build      # incremental colcon build (same compile BUILD=1 does)
+docker/run.sh rebuild    # wipe build/install/log in the volume, then build from scratch
+```
+
+- **`build`** — `colcon build --symlink-install` into `sysnav-build`. Incremental:
+  only changed packages recompile (instant if nothing changed). This is the plain
+  compile that `BUILD=1` performs, minus the run afterward.
+- **`rebuild`** — first `rm -rf /app/{build,install,log}` *inside the volume*, then a
+  full from-scratch build. Reach for this when incremental is suspect: after an image
+  rebuild (so the C++ relinks against the fresh baked libs — see below), after
+  changing a package's CMake/dependencies, or to clear a corrupted build tree. It's
+  the in-place equivalent of `docker volume rm sysnav-build` followed by a build, but
+  it keeps the same volume.
+
+Both honor the `VOLUME` / `IMAGE` knobs and write incrementally, so a later
+`docker/run.sh` (any mode) starts immediately against the freshly built volume.
+
 ### Your host `colcon build` does not carry into the container
 
 Only `src/` is mounted. The container builds into the **named volume**
@@ -290,10 +339,12 @@ ros2 launch tare_planner scene_graph.launch ...       # edit on host -> rebuild 
 
 ### When you rebuild the image, reset the build volume
 
-Wipe the old build so the C++ isn't linked against stale baked libraries:
+Wipe the old build so the C++ isn't linked against stale baked libraries — either
+drop the volume, or just `rebuild` it in place:
 
 ```bash
 docker volume rm sysnav-build      # next run does a clean colcon build into a fresh volume
+docker/run.sh rebuild              # same effect without a run: wipe build/install/log, build fresh
 ```
 
 ## RViz / X

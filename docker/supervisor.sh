@@ -42,6 +42,8 @@
 #
 # `supervisor.sh shell` drops into an interactive shell (workspace sourced) for
 # the dev inner loop (edit src -> colcon build -> ros2 launch by hand).
+# `supervisor.sh build` / `supervisor.sh rebuild` compile the workspace and exit (no
+# pipeline): build = incremental, rebuild = wipe build/install/log then build fresh.
 set -uo pipefail
 
 MODE="${MODE:-live}"
@@ -63,6 +65,25 @@ cd "$APP"
 # Provision the mounted workspace (idempotent; the slow bits run only once).
 # ---------------------------------------------------------------------------
 set +u; source "$JAZZY_SETUP"; set -u
+
+# `supervisor.sh build|rebuild` -- compile the workspace into the named volume and
+# EXIT, without launching the pipeline (no robot/bag needed). `build` is incremental
+# (the same compile BUILD=1 does before a run); `rebuild` first wipes the volume's
+# build/install/log so the next build is from scratch (use after an image rebuild, or
+# when stale artifacts are suspected). ROS 2 is already sourced above -- all colcon
+# needs; we deliberately skip the sam2/engine steps (irrelevant to a C++/ament build)
+# and don't source install/ (we're about to (re)build it).
+case "${1:-}" in
+  build|rebuild)
+    if [ "$1" = "rebuild" ]; then
+      echo "[supervisor] rebuild: clearing $APP/{build,install,log} for a from-scratch build ..."
+      rm -rf "$APP/build" "$APP/install" "$APP/log"
+    fi
+    echo "[supervisor] $1: colcon build --symlink-install (into the named volume) ..."
+    colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release
+    exit $?
+    ;;
+esac
 
 SAM2_DIR="$APP/src/semantic_mapping/semantic_mapping/external/sam2"
 # sam2 is baked editable in the image (egg-link in site-packages -> the mounted
