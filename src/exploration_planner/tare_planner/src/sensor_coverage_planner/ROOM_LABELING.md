@@ -14,7 +14,7 @@
 > downstream consumer of the mask. Don't conflate the two.
 >
 > Parent guide: [`ARCHITECTURE.md`](../../../../../ARCHITECTURE.md).
-> Last verified against code: **2026-06-26**.
+> Last verified against code: **2026-06-27**.
 
 All `file:line` anchors below are in
 `sensor_coverage_planner/sensor_coverage_planner_ground.cpp` unless prefixed with
@@ -48,10 +48,12 @@ a Stage-2 query, the VLM answers, and Stage-4 applies it without a later strip.
 |---|---|---|
 | **Fix #1 — apply answer by `room_id`** | ✅ **DONE** (committed `7158fd9`) | `RoomTypeCallback` `:1643-1684` |
 | **Fix #2 — decouple `is_labeled_` from navigation** | ❌ **deferred / not applied** | nav writes at `:4912`, `:4962` |
-| **Fix #3 — neuter the mask-flicker STRIP** | ❌ **deferred / not applied** | `RoomNodeListCallback` `:1500-1524` |
+| **Fix #3 — mask-flicker STRIP** | ✅ **REMOVED** — label lifecycle now follows room lifecycle | deleted from `RoomNodeListCallback` |
+| **Interior point (pole of inaccessibility)** | ✅ **NEW** — single stable point for marker / `wp_0` / re-ID | `room_segmentation` PIA → `RoomNode.interior_point` |
 | **Objects in the VLM prompt** | ⚠️ **commented out** — labeling is image-only | `vlm_reasoning_node.py:446-447` |
 | **VLM prompt** | open-vocabulary `ROOM_TYPE_PROMPT_FREE` (not the closed candidate set) | `vlm_reasoning_node.py:443` |
-| **Diagnostic logging** | ON (`#define ROOM_DBG_ENABLED 1`) — `[room_dbg]` / `[room_views]` / `LAG` / `PROJ` | top of the `.cpp` |
+| **VLM 429 / no retry** | ⚠️ drops query on any exception, no backoff/re-queue | `vlm_reasoning_node.py:508` |
+| **Diagnostic logging** | ON (`#define ROOM_DBG_ENABLED 1`) — `[room_dbg]` / `[room_views]` / `[room_pia]` / `LAG` / `PROJ` | top of `.cpp` + `room_segmentation` |
 
 **The biggest "looks half-finished" thing:** the planner builds and ships the
 per-room object inventory in the query, but the VLM node ignores it (the line that
@@ -100,7 +102,9 @@ Once per planning loop, per room:
   (`object_count != objects_at_last_query_`), and ≥1 image or ≥1 object to send.
 - **Rate limit** (`:4706`): skip if `now − last_query_time_ < room_type_query.min_interval_s` (**3.0 s**, `:391`).
 - **Payload** (`tare_planner/RoomType`, built `:4722`): `room_id`, `anchor_point`
-  (= centroid), ≤3 `image_paths`, `objects` string, `room_mask`,
+  (= centroid, **unchanged**, nav-only), `interior_point` (= the room's
+  pole-of-inaccessibility; the snapshot Stage 4 re-IDs against), ≤3 `image_paths`,
+  `objects` string, `room_mask`,
   `room_type = GetRoomLabel()` (the room's **current** label, for stability),
   `in_room`, `voxel_num`. Published on `/room_type_query`.
 - **`objects` string** (`:4669`): room's object indices, confidence-filtered
@@ -132,12 +136,46 @@ Once per planning loop, per room:
 
 - Target room = `room_id = room_type_msg->room_id` (`:1648`) — the stable handle
   the query was issued for (monotonic, never reused). Only if that node is gone
-  does it fall back to re-sampling `room_mask_` at the anchor (`:1654-1678`).
+  does it fall back to re-sampling `room_mask_` at the **`interior_point`
+  snapshot** (`:1654-1678`) — a deep-interior cell, so the sample is robust to
+  mask growth/churn (the old anchor sample mis-resolved when the anchor drifted).
 - **Latest-answer-wins** (`:1691`): `labels.clear(); labels[type] = 1; SetIsLabeled(true)` (`:1694`).
 - **Why Fix #1 exists:** the legacy path re-derived the room id by sampling
   `room_mask_` at the anchor *every time*; that raster flickers per
   re-segmentation cycle (a valid cell reads 0 some cycles), which dropped correct
   answers. Applying by `room_id` is robust to that flicker.
+
+---
+
+## Room reference points — centroid vs interior point vs anchor
+
+Three distinct per-room points exist; keep them straight (all on `RoomNodeRep`):
+
+| Point | Computed | Meaning | Consumers |
+|---|---|---|---|
+| `centroid_` | segmentation, area-mean of mask cells | geometric center of footprint; can fall **outside** a non-convex room | reserved for geometry (future room-area subdivision); still shipped as `RoomNode.centroid` |
+| `interior_point_` | segmentation, **pole of inaccessibility** | a guaranteed-**inside**, deepest-clearance cell — the stable "where is this room" handle | RViz label **marker**, exporter **`wp_0`**, async **re-ID** snapshot (`RoomType.interior_point`) |
+| `anchor_point_` | planner, **nav-only** | drifting in-range mean of observed cells (seeded `= centroid` at query time, overwritten by `UpdateRoomLabel` `:4912/:4962`) | navigation goal only (`candidate_room_position_`, `goal_point`) |
+
+**Interior point (pole of inaccessibility).** Computed in `room_segmentation`'s
+per-room centroid loop: bbox-crop the room's binary mask (+2 px margin so the
+surrounding non-id cells form the zero boundary), `cv::distanceTransform`
+(`DIST_L2`), then take the **medoid of the max-clearance ridge** — *not* a bare
+`minMaxLoc` argmax. The argmax is degenerate: for a rectangle the maximum clearance
+is the whole **medial axis** (a line segment), so argmax lands at one **end**
+(~1.5 m off-center for a 1.5×4.5 m room, verified) and hops between ends as the
+mask shifts cycle-to-cycle. The medoid (ridge centroid snapped to the nearest real
+max-clearance cell) is centered for a rectangle, stable across cycles, and still a
+genuine deepest cell → **always inside** (a plain region centroid can fall in a gap
+for a U-shape). Cost ~tens of µs/room; timed under `[room_pia]`.
+
+**Why this replaced the old anchor-based design.** The marker used to sit on
+`anchor_point_` (the drifting mean) → it visibly yo-yo'd toward the mask's growing
+frontier and snapped back. Re-ID used to sample the mask at the anchor → it
+mis-resolved whenever the anchor drifted onto a foreign/background cell. Both now
+key off the stable interior point; `anchor_point_` is left untouched as nav's own
+target. This — together with removing the STRIP (gate D) — is what fixed the
+marker yo-yo, the disappear/relabel flicker, and the duplicate view-image jpgs.
 
 ---
 
@@ -154,11 +192,13 @@ break it — including code *outside* the labeling pipeline:
   change → no query; the 3 s rate-limit coalesces bursts.
 - **C. Objects ignored (Stage 3).** A room with strong object evidence but weak
   imagery can't lean on objects — typing is purely what the ≤3 frames show.
-- **D. Mask-flicker STRIP — `RoomNodeListCallback` `:1500-1524` (Fix #3 not
-  applied).** For every *labeled* room it re-samples `room_mask_` at the stored
-  anchor; on out-of-bounds or id mismatch it calls `ClearRoomLabels()`, wiping a
-  correct label whenever the segmentation raster flickers. Can un-label a room you
-  already typed.
+- **D. ~~Mask-flicker STRIP~~ — REMOVED (Fix #3 done).** This used to re-sample
+  `room_mask_` at the stored anchor for every labeled room each cycle and
+  `ClearRoomLabels()` on a mismatch, wiping correct labels (and their on-disk
+  views) on transient raster flicker — the source of the disappear/relabel and
+  duplicate-jpg symptoms. It is gone; **label lifecycle now follows room
+  lifecycle** (genuine split/merge/death is still handled by the `DEATH`/re-home
+  path below). No per-cycle label stripping remains.
 - **E. `is_labeled_` conflation (Fix #2 not applied).** `is_labeled_` is
   overloaded. Navigation bookkeeping in `UpdateRoomLabel` sets `SetIsLabeled(true)`
   at `:4912` (first time a room accrues points) and `:4962` (room grew), **before
@@ -190,12 +230,19 @@ break it — including code *outside* the labeling pipeline:
 2. **Fix #2 — decouple `is_labeled_`.** Give navigation its own flag (e.g.
    `is_anchored_`/`is_asked_`); stop `UpdateRoomLabel` (`:4912`, `:4962`) from
    writing `SetIsLabeled`. Label state owned solely by `RoomTypeCallback`. Update
-   the exporter and `CheckDoorCloudInRange:2464` to read the right flag.
-3. **Fix #3 — neuter the mask-flicker STRIP** (`:1500-1524`). Stop
-   `ClearRoomLabels()` from firing on transient single-cycle mask flicker (e.g.
-   require N consecutive mismatched cycles, or re-resolve via a small neighborhood
-   instead of the exact anchor cell).
-4. *(optional)* a recovery pass for imaged-but-unlabeled rooms.
+   the exporter and `CheckDoorCloudInRange:2464` to read the right flag. This is the
+   last `scene-graph-only-scope` violation (nav mutating label state).
+3. **VLM 429 / no retry** (`vlm_reasoning_node.py:508`). Any exception drops the
+   query — no retry, backoff, or re-queue. Gemini free-tier (20 req/day/model)
+   exhaustion (HTTP 429) silently left many rooms unlabeled in
+   `runlogs/20260626_193759` (12×429, 2 success). Add 429-aware retry/backoff or
+   re-queue so a transient quota/network blip doesn't permanently un-label a room.
+4. **Stage-1 image-topic lag.** Raw ~2.8 MB frames lag the cloud, so a fresh cloud
+   is paired with a stale pose and coverage (gate 6) is under-measured, starving
+   small rooms of views (the `LAG`/`PROJ` finding — transport-bound, not compute).
+5. *(optional)* recovery pass for imaged-but-unlabeled rooms; *(optional)* reconcile
+   on-disk slot jpgs with live `best_views_` (was masked by the now-removed STRIP,
+   so a much smaller concern).
 
 ---
 
@@ -206,9 +253,13 @@ break it — including code *outside* the labeling pipeline:
 - **Tags in `pipeline.log`:**
   - `[room_views]` — a view was admitted (Stage 1 success).
   - `[room_dbg] CREATE / DEATH / VIEW_ORPHAN_DROP / VIEW_REHOME` — room lifecycle.
-  - `[room_dbg] VALIDATE / STRIP` — the anchor→mask check and label strips (gate D).
+  - `[room_pia]` — interior-point (pole-of-inaccessibility) compute: an INFO
+    per-cycle aggregate (`computed interior points for N room(s) in X ms`) plus a
+    per-room DEBUG line (`room <id> interior=(x,y) clearance=<m>m took <us>us`).
+    Emitted by `room_segmentation`. (The old `VALIDATE`/`STRIP` tags are gone with
+    the STRIP.)
   - `[room_dbg] ANSWER_RECV / ANSWER_APPLY / ANSWER_APPLY_FALLBACK / ANSWER_DROP` —
-    Stage 4 apply path.
+    Stage 4 apply path; `ANSWER_RECV` now logs the `interior=` re-ID key.
   - `[room_dbg] MASK_UPDATE` — `/room_mask` cadence/extent.
   - `LAG` / `PROJ` — image-vs-cloud lag and projection timing (the lag
     investigation; transport-bound on the raw image stream).
@@ -223,9 +274,11 @@ break it — including code *outside* the labeling pipeline:
 
 | File | Role |
 |---|---|
-| `sensor_coverage_planner/sensor_coverage_planner_ground.cpp` | Owns Stages 1, 2, 4 + the STRIP and `is_labeled_` writes. The hub. |
+| `sensor_coverage_planner/sensor_coverage_planner_ground.cpp` | Owns Stages 1, 2, 4 + the `is_labeled_` writes. The hub. (STRIP removed.) |
 | `vlm_node/vlm_node/vlm_reasoning_node.py` | Stage 3: prompt, VLM call, `/room_type_answer`. |
 | `vlm_node/vlm_node/constants.py` | VLM provider / model / base-URL selection. |
-| `tare_planner/msg/RoomType.msg` | Query/answer message (image_paths, objects, room_id, anchor, room_type, room_mask, …). |
-| `representation/representation.h` | `RoomNodeRep`: `labels_`, `is_labeled_`, `best_views_`, `views_dirty_`, `objects_at_last_query_`. |
-| `room_segmentation/` | Produces the mask this pipeline *consumes* (separate, geometric, label-blind). |
+| `tare_planner/msg/RoomType.msg` | Query/answer message (image_paths, objects, room_id, anchor_point, **interior_point**, room_type, room_mask, …). |
+| `tare_planner/msg/RoomNode.msg` | Segmentation→planner room geometry; carries `centroid` + **`interior_point`** (PIA). |
+| `representation/representation.h` | `RoomNodeRep`: `labels_`, `is_labeled_`, `best_views_`, `views_dirty_`, `objects_at_last_query_`, `centroid_`, **`interior_point_`**, `anchor_point_`. |
+| `room_segmentation/room_segmentation.cpp` | Produces the mask this pipeline *consumes* + computes the **interior point (PIA)**. Label-blind otherwise. |
+| `scene_graph_exporter/scene_graph_exporter.cpp` | Exports rooms; `wp_0` = the room's **interior point**. |

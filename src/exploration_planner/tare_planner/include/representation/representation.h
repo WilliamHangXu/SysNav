@@ -186,6 +186,18 @@ public:
   {
     return anchor_point_;
   }
+  // Canonical interior point (pole of inaccessibility): a guaranteed-inside,
+  // deepest-clearance cell of the room mask. Geometric property refreshed every
+  // segmentation update (like centroid_), NOT label evidence, so it is not reset
+  // by ClearRoomLabels.
+  void SetInteriorPoint(const geometry_msgs::msg::Point &interior_point)
+  {
+    interior_point_ = interior_point;
+  }
+  const geometry_msgs::msg::Point & GetInteriorPoint() const
+  {
+    return interior_point_;
+  }
   void SetImage(const cv::Mat &image)
   {
     image_ = image.clone(); // Clone the image to ensure it is stored correctly
@@ -333,6 +345,7 @@ public:
   double last_query_time_ = 0.0;     // wall seconds of last room-type query
   int objects_at_last_query_ = -1;   // object count at last query (new-object trigger)
   geometry_msgs::msg::Point anchor_point_;
+  geometry_msgs::msg::Point interior_point_; // pole of inaccessibility (see SetInteriorPoint)
   cv::Mat image_; // Image of the room
   cv::Mat room_mask_; // Room mask
   bool is_connected_;

@@ -1,5 +1,6 @@
 std_msgs/Header header
 geometry_msgs/Point anchor_point
+geometry_msgs/Point interior_point
 string[] image_paths
 sensor_msgs/Image room_mask
 string objects

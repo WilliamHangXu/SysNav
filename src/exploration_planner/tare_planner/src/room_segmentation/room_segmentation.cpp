@@ -1653,6 +1653,9 @@ void RoomSegmentationNode::updateRooms(cv::Mat &room_mask_cropped, cv::Mat &room
     pcl::PointCloud<pcl::PointXYZRGB>::Ptr room_cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
     
     int counter = 1;
+    // [room_pia] accumulate pole-of-inaccessibility timing across all rooms this cycle.
+    long pia_total_us = 0;
+    int pia_count = 0;
     for (auto &id_room_node_pair : room_nodes_map_)
     {
         representation_ns::RoomNodeRep &room_node = id_room_node_pair.second;
@@ -1690,7 +1693,96 @@ void RoomSegmentationNode::updateRooms(cv::Mat &room_mask_cropped, cv::Mat &room
         room_centroid.y() /= room_node.points_.size();
         room_centroid.z() = robot_position_.z;
         room_node.centroid_ = room_centroid;
+
+        // Canonical interior point = pole of inaccessibility: the deepest-clearance
+        // cell of the room mask (guaranteed inside, unlike the area-mean centroid
+        // which can land in a wall for an L-shaped room). Cheap: distanceTransform
+        // over the room's own bbox crop (a few px margin so the surrounding non-id
+        // cells provide the zero boundary), then argmax. Mapped back to world with
+        // the same (row,col)->voxel->point transform the centroid loop uses.
+        if (cv::countNonZero(mask_new) > 0)
+        {
+            auto t_pia_0 = std::chrono::high_resolution_clock::now();
+            cv::Rect rect = cv::boundingRect(mask_new);
+            const int pia_margin = 2;
+            rect.x = std::max(0, rect.x - pia_margin);
+            rect.y = std::max(0, rect.y - pia_margin);
+            rect.width = std::min(mask_new.cols - rect.x, rect.width + 2 * pia_margin);
+            rect.height = std::min(mask_new.rows - rect.y, rect.height + 2 * pia_margin);
+            cv::Mat sub = mask_new(rect).clone();  // contiguous; surrounding 0-cells form the boundary
+            cv::Mat dist;
+            cv::distanceTransform(sub, dist, cv::DIST_L2, 3);
+            double max_dist = 0.0;
+            cv::minMaxLoc(dist, nullptr, &max_dist, nullptr, nullptr);
+            // The max clearance is degenerate: for a rectangle it is achieved along
+            // the whole medial axis (a line segment), so a bare argmax lands at one
+            // ridge END (off-center) and jumps between ends as the mask shifts. Take
+            // the medoid of the near-max ridge instead: ridge centroid, snapped to
+            // the nearest real max-clearance cell. Centered for a rectangle, stable
+            // across cycles, and still a genuine deepest cell (guaranteed inside).
+            const float pia_eps = 0.5f;  // cells below max still counted as ridge
+            std::vector<cv::Point> ridge;  // (col,row) in sub coords
+            for (int r = 0; r < dist.rows; ++r)
+            {
+                const float *drow = dist.ptr<float>(r);
+                for (int c = 0; c < dist.cols; ++c)
+                {
+                    if (drow[c] >= max_dist - pia_eps)
+                    {
+                        ridge.emplace_back(c, r);
+                    }
+                }
+            }
+            double mean_x = 0.0, mean_y = 0.0;
+            for (const auto &p : ridge)
+            {
+                mean_x += p.x;
+                mean_y += p.y;
+            }
+            mean_x /= ridge.size();
+            mean_y /= ridge.size();
+            cv::Point pia_cell = ridge.front();
+            double best_d2 = 1e18;
+            for (const auto &p : ridge)
+            {
+                double d2 = (p.x - mean_x) * (p.x - mean_x) + (p.y - mean_y) * (p.y - mean_y);
+                if (d2 < best_d2)
+                {
+                    best_d2 = d2;
+                    pia_cell = p;
+                }
+            }
+            // crop-local -> cropped-raster -> full-raster (add segmentation bbox origin)
+            Eigen::Vector3i pia_voxel(rect.y + pia_cell.y + bbox_[0][0],
+                                      rect.x + pia_cell.x + bbox_[0][1], 0);
+            Eigen::Vector3f pia_pos = misc_utils_ns::voxel_to_point(pia_voxel, shift_, room_resolution_);
+            room_node.interior_point_.x = pia_pos.x();
+            room_node.interior_point_.y = pia_pos.y();
+            room_node.interior_point_.z = robot_position_.z;
+            auto t_pia_1 = std::chrono::high_resolution_clock::now();
+            long us = std::chrono::duration_cast<std::chrono::microseconds>(t_pia_1 - t_pia_0).count();
+            pia_total_us += us;
+            pia_count++;
+            RCLCPP_DEBUG(this->get_logger(),
+                         "[room_pia] room %d interior=(%.2f,%.2f) clearance=%.2fm took %ldus",
+                         room_node.GetId(), pia_pos.x(), pia_pos.y(),
+                         max_dist * room_resolution_, us);
+        }
+        else
+        {
+            // Degenerate (no cells): fall back to centroid so consumers have a value.
+            room_node.interior_point_.x = room_centroid.x();
+            room_node.interior_point_.y = room_centroid.y();
+            room_node.interior_point_.z = room_centroid.z();
+        }
         room_node.neighbors_.clear();
+    }
+    if (pia_count > 0)
+    {
+        RCLCPP_INFO(this->get_logger(),
+                    "[room_pia] computed interior points for %d room(s) in %.3f ms (%.1f us/room avg)",
+                    pia_count, pia_total_us / 1000.0,
+                    static_cast<double>(pia_total_us) / pia_count);
     }
     
     sensor_msgs::msg::PointCloud2 room_cloud_msg;
@@ -2188,7 +2280,8 @@ void RoomSegmentationNode::publishRoomNodes() {
         room_node_msg.centroid.x = room_node.centroid_.x();
         room_node_msg.centroid.y = room_node.centroid_.y();
         room_node_msg.centroid.z = room_node.centroid_.z();
-        
+        room_node_msg.interior_point = room_node.interior_point_;
+
         for (const auto &neighbor : room_node.neighbors_) {
             room_node_msg.neighbors.push_back(neighbor);
         }

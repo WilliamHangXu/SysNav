@@ -2,6 +2,7 @@ int32 id
 int32 show_id
 geometry_msgs/PolygonStamped polygon
 geometry_msgs/Point centroid
+geometry_msgs/Point interior_point
 int32[] neighbors
 bool is_connected
 float32 area

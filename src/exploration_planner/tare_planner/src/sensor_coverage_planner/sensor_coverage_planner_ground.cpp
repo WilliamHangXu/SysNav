@@ -1492,46 +1492,12 @@ void SensorCoveragePlanner3D::RoomNodeListCallback(
       representation_->GetRoomNode(id).views_dirty_ = true;
     }
   }
-
-  // check the anchor point of each room node, if the room is split into multiple parts, the anchor point may not be in the room
-  for (auto &id_to_room_node : representation_->GetRoomNodesMapMutable())
-  {
-    int room_id = id_to_room_node.first;
-    auto &room_node = id_to_room_node.second;
-    std::string room_label = room_node.GetRoomLabel();
-    // RCLCPP_INFO(this->get_logger(), "Room ID: %d", room_id);
-    if (!room_node.IsLabeled())
-    {
-      continue;
-    }
-    // Diagnostic: full anchor -> voxel -> sampled-id chain this strip relies on.
-    // Logs both the stored anchor_point_ (what the check uses) and centroid_ so a
-    // divergence between them is visible.
-    DbgSampleMask(this->get_logger(), "VALIDATE", room_id, room_node.anchor_point_,
-                  room_mask_, shift_, 1.0 / room_resolution_);
-    Eigen::Vector3f anchor_point(room_node.anchor_point_.x, room_node.anchor_point_.y, room_node.anchor_point_.z);
-    Eigen::Vector3i anchor_point_voxel = misc_utils_ns::point_to_voxel(anchor_point, shift_, 1.0 / room_resolution_);
-    if (anchor_point_voxel.x() < 0 || anchor_point_voxel.x() >= room_mask_.rows ||
-        anchor_point_voxel.y() < 0 || anchor_point_voxel.y() >= room_mask_.cols)
-    {
-      ROOM_DBG("[room_dbg] STRIP id=%d reason=anchor_oob label='%s' anchor=(%.2f,%.2f,%.2f) centroid=(%.2f,%.2f,%.2f)",
-               room_id, room_label.c_str(), room_node.anchor_point_.x, room_node.anchor_point_.y,
-               room_node.anchor_point_.z, room_node.centroid_.x(), room_node.centroid_.y(), room_node.centroid_.z());
-      RCLCPP_ERROR(this->get_logger(), "Anchor point of room %d is out of room mask bounds", room_id);
-      room_node.ClearRoomLabels();
-      continue;
-    }
-    int room_id_in_mask = room_mask_.at<int>(anchor_point_voxel.x(), anchor_point_voxel.y());
-    if (room_id_in_mask != room_id)
-    {
-      ROOM_DBG("[room_dbg] STRIP id=%d reason=mask_mismatch sampled_id=%d label='%s' anchor=(%.2f,%.2f,%.2f) centroid=(%.2f,%.2f,%.2f)",
-               room_id, room_id_in_mask, room_label.c_str(), room_node.anchor_point_.x,
-               room_node.anchor_point_.y, room_node.anchor_point_.z, room_node.centroid_.x(),
-               room_node.centroid_.y(), room_node.centroid_.z());
-      RCLCPP_ERROR(this->get_logger(), "Anchor point of room %d is not in the room, removing labels", room_id);
-      room_node.ClearRoomLabels();
-    }
-  }
+  // NOTE: the per-cycle anchor mask-sample STRIP that used to live here was
+  // removed. It re-derived a room's id by sampling room_mask_ at anchor_point_
+  // every cycle and called ClearRoomLabels() on a mismatch; because anchor_point_
+  // was a drifting in-range mean, transient mis-samples wiped valid labels (and
+  // their on-disk views). Label lifecycle now follows room lifecycle: genuine
+  // id churn (split/merge/death) is handled in RoomNodeListCallback.
 }
 
 void SensorCoveragePlanner3D::RoomMaskCallback(
@@ -1636,12 +1602,12 @@ void SensorCoveragePlanner3D::RoomTypeCallback(
   // Diagnostic: the VLM echoes the query verbatim, so room_id is the room this
   // answer was asked about. The DbgSampleMask line keeps the old anchor-resolved
   // id visible so apply-by-id vs apply-by-anchor stays measurable per run.
-  ROOM_DBG("[room_dbg] ANSWER_RECV msg_room_id=%d type='%s' in_room=%d anchor=(%.2f,%.2f,%.2f) msg_id_has_node=%d",
+  ROOM_DBG("[room_dbg] ANSWER_RECV msg_room_id=%d type='%s' in_room=%d interior=(%.2f,%.2f,%.2f) msg_id_has_node=%d",
            room_type_msg->room_id, room_type_msg->room_type.c_str(), room_type_msg->in_room ? 1 : 0,
-           room_type_msg->anchor_point.x, room_type_msg->anchor_point.y, room_type_msg->anchor_point.z,
+           room_type_msg->interior_point.x, room_type_msg->interior_point.y, room_type_msg->interior_point.z,
            representation_->HasRoomNode(room_type_msg->room_id) ? 1 : 0);
   DbgSampleMask(this->get_logger(), "ANSWER", room_type_msg->room_id,
-                room_type_msg->anchor_point, room_mask_, shift_, 1.0 / room_resolution_);
+                room_type_msg->interior_point, room_mask_, shift_, 1.0 / room_resolution_);
 
   // Fix #1: apply the type to the room the query was actually issued for.
   // room_id is the stable handle (monotonic, never reused: a dead room is erased
@@ -1652,31 +1618,32 @@ void SensorCoveragePlanner3D::RoomTypeCallback(
   if (!representation_->HasRoomNode(room_id))
   {
     // Fallback: the queried room is gone by answer time (genuine split/merge/
-    // death). Re-resolve via the anchor so a merge still lands a label; only
-    // drop if that, too, points at no live room.
-    Eigen::Vector3f anchor_point(
-        room_type_msg->anchor_point.x, room_type_msg->anchor_point.y,
-        room_type_msg->anchor_point.z);
-    Eigen::Vector3i anchor_point_voxel = misc_utils_ns::point_to_voxel(
-        anchor_point, shift_, 1.0 / room_resolution_);
-    if (anchor_point_voxel.x() < 0 || anchor_point_voxel.x() >= room_mask_.rows ||
-        anchor_point_voxel.y() < 0 || anchor_point_voxel.y() >= room_mask_.cols)
+    // death). Re-resolve via the interior point snapshot so a merge still lands a
+    // label; only drop if that, too, points at no live room. The interior point
+    // is deep inside the room, so this sample is robust to mask growth/churn.
+    Eigen::Vector3f interior_point(
+        room_type_msg->interior_point.x, room_type_msg->interior_point.y,
+        room_type_msg->interior_point.z);
+    Eigen::Vector3i interior_point_voxel = misc_utils_ns::point_to_voxel(
+        interior_point, shift_, 1.0 / room_resolution_);
+    if (interior_point_voxel.x() < 0 || interior_point_voxel.x() >= room_mask_.rows ||
+        interior_point_voxel.y() < 0 || interior_point_voxel.y() >= room_mask_.cols)
     {
-      ROOM_DBG("[room_dbg] ANSWER_DROP reason=msgid_gone_anchor_oob msg_room_id=%d",
+      ROOM_DBG("[room_dbg] ANSWER_DROP reason=msgid_gone_interior_oob msg_room_id=%d",
                room_type_msg->room_id);
-      RCLCPP_ERROR(this->get_logger(), "Anchor point is out of room mask bounds");
+      RCLCPP_ERROR(this->get_logger(), "Interior point is out of room mask bounds");
       return;
     }
-    int fallback_id = room_mask_.at<int>(anchor_point_voxel.x(),
-                                         anchor_point_voxel.y());
+    int fallback_id = room_mask_.at<int>(interior_point_voxel.x(),
+                                         interior_point_voxel.y());
     if (!representation_->HasRoomNode(fallback_id))
     {
-      ROOM_DBG("[room_dbg] ANSWER_DROP reason=msgid_gone_anchor_no_node msg_room_id=%d fallback_id=%d",
+      ROOM_DBG("[room_dbg] ANSWER_DROP reason=msgid_gone_interior_no_node msg_room_id=%d fallback_id=%d",
                room_type_msg->room_id, fallback_id);
       RCLCPP_ERROR(this->get_logger(), "Room id %d is out of bounds", fallback_id);
       return;
     }
-    ROOM_DBG("[room_dbg] ANSWER_APPLY_FALLBACK msg_room_id=%d resolved_via_anchor=%d type='%s'",
+    ROOM_DBG("[room_dbg] ANSWER_APPLY_FALLBACK msg_room_id=%d resolved_via_interior=%d type='%s'",
              room_type_msg->room_id, fallback_id, room_type_msg->room_type.c_str());
     room_id = fallback_id;
   }
@@ -4737,6 +4704,10 @@ void SensorCoveragePlanner3D::PublishRoomTypeQueries()
     anchor.z = room_node.centroid_.z();
     msg.anchor_point = anchor;
     room_node.SetAnchorPoint(anchor);  // keep anchor consistent for answer re-resolve
+    // Snapshot the canonical interior point for async re-ID: if this room's id has
+    // churned by answer time, sampling the mask at this deep-interior point
+    // reliably re-resolves it (unlike the drifting anchor).
+    msg.interior_point = room_node.GetInteriorPoint();
     msg.room_id = room_id;
     msg.in_room = (room_id == current_room_id_);
     for (const auto &v : room_node.GetBestViews())
@@ -5125,12 +5096,12 @@ void SensorCoveragePlanner3D::PublishRoomTypeVisualization()
       marker.id = room_node.show_id_;
       marker.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
       marker.action = visualization_msgs::msg::Marker::ADD;
-      // marker.pose.position.x = room_node.centroid_.x();
-      // marker.pose.position.y = room_node.centroid_.y();
-      // marker.pose.position.z = room_node.centroid_.z();
-      marker.pose.position.x = room_node.anchor_point_.x;
-      marker.pose.position.y = room_node.anchor_point_.y;
-      marker.pose.position.z = room_node.anchor_point_.z;
+      // Label sits on the canonical interior point (stable, guaranteed inside),
+      // not the drifting anchor_point_ (nav's in-range mean) or the centroid
+      // (which can land in a wall for a non-convex room).
+      marker.pose.position.x = room_node.interior_point_.x;
+      marker.pose.position.y = room_node.interior_point_.y;
+      marker.pose.position.z = room_node.interior_point_.z;
       marker.pose.orientation.w = 0.65;
       marker.scale.z = 1.0;
       marker.color.a = 1.0;

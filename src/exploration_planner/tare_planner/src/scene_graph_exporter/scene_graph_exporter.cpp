@@ -139,16 +139,17 @@ nlohmann::json SceneGraphExporter::BuildRoomJson(
     });
   }
 
-  // --- waypoints: wp_0 = room centroid, wp_1..N = the room's NavGraph nodes ---
+  // --- waypoints: wp_0 = room interior point (pole of inaccessibility, a
+  // guaranteed-inside cell), wp_1..N = the room's NavGraph nodes ---
   nlohmann::json waypoints = nlohmann::json::array();
-  const Eigen::Vector3d centroid_world =
-      ToWorld(world_from_source, room.centroid_.x(), room.centroid_.y(),
-              room.centroid_.z());
+  const Eigen::Vector3d interior_world =
+      ToWorld(world_from_source, room.interior_point_.x, room.interior_point_.y,
+              room.interior_point_.z);
   waypoints.push_back(nlohmann::json{
       {"id", room_key + "-wp_0"},
-      {"x", centroid_world.x()},
-      {"y", centroid_world.y()},
-      {"z", centroid_world.z()},
+      {"x", interior_world.x()},
+      {"y", interior_world.y()},
+      {"z", interior_world.z()},
   });
   int wp_index = 1;
   for (const navgraph_ns::NavNode* node : room_nav_nodes)  // ascending node id
