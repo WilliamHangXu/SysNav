@@ -47,3 +47,6 @@ tare_planner_node:
     scene_graph_export.building: "HomeBuilding"
     scene_graph_export.floor_level: 1
     scene_graph_export.floor_id: "floor_04"
+    # Length (m) of the compass arms drawn in layout.metadata.compass. <= 0 =>
+    # auto (half the larger environment-AABB extent).
+    scene_graph_export.compass_radius_m: 0.0

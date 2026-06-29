@@ -101,6 +101,17 @@ tare_planner_node:
     navigation_graph/kNavNodeMinDist : 3.0
     navigation_graph/kNavGraphUpdateInterval : 4
 
+    # Quadrant / room-area tagging: one global building orientation (minAreaRect
+    # over all room polygons), frozen once stable; buckets each waypoint into
+    # NE/NW/SE/SW of its room. quadrant/debug_log is a runtime toggle.
+    quadrant/kUpdateInterval : 4
+    quadrant/kWarmupMinRooms : 1
+    kMaxWarmupCycles : 30
+    quadrant/kFreezeStableCycles : 8
+    quadrant/kFreezeAngleEpsDeg : 2.0
+    quadrant/kCrossLineWidth : 0.08
+    quadrant/debug_log : false
+
     # ViewPointManager
     viewpoint_manager/number_x : 45
     viewpoint_manager/number_y : 45

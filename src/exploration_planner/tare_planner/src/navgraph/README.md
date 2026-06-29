@@ -35,9 +35,9 @@ true walking distance. The result is a "subway map" of the explored building.
 
 Owned and driven by the main planner
 (`SensorCoveragePlanner3D` in `sensor_coverage_planner_ground.cpp`): member
-`navgraph_` (`.h:204`), constructed in `InitializeData` (`.cpp:436`), updated once
-per planning cycle (`.cpp:3909`). Consumed by the
-[scene graph exporter](../scene_graph_exporter/README.md) (`.cpp:5227`).
+`navgraph_` (`.h:205`), constructed in `InitializeData` (`.cpp:519`), updated once
+per planning cycle (`.cpp:4081`). Consumed by the
+[scene graph exporter](../scene_graph_exporter/README.md) (`.cpp:5546`).
 
 ---
 
@@ -52,7 +52,7 @@ per planning cycle (`.cpp:3909`). Consumed by the
    execute(): after UpdateKeyposeGraph()  ──►  navgraph_->Update(...)
                           │
             ┌─────────────┴───────────────────────────────────┐
-            │  Reconcile():  seed → label → delete → edges     │  (throttled
+            │  Reconcile(): seed→reanchor→label→delete→edges  │  (throttled
             │  TagRooms():   voxelize into room_mask           │   every N
             │  AssignNames(): "<room_key>-wp_<n>"              │   calls)
             │  PublishVisualization(): nodes/edges/labels      │
@@ -73,6 +73,7 @@ per planning cycle (`.cpp:3909`). Consumed by the
 |---|---|
 | `id` | Stable, monotonic, **never reused** node id. |
 | `position` | xyz, **copied from a keypose node** at birth and frozen forever (never moved/re-centered). |
+| `seed_keypose_ind` | Keypose-node index this waypoint was seeded from, **frozen at birth**. It is the BFS source for the geodesic region labeling (Phase 2) and the anchor the re-anchor salvage (Phase 1.5) rebinds when that keypose node drops out of the connected component. `-1` before assignment. |
 | `room_id` | Room affiliation (`-1` = unknown), re-tagged each pass from the room mask. |
 | `name` | Scene-graph waypoint id, e.g. `"kitchen-room_1-wp_3"`. Exactly the id the exporter emits, so RViz labels and the JSON stay identical. Empty if the node has no room. |
 
@@ -91,54 +92,73 @@ per planning cycle (`.cpp:3909`). Consumed by the
 | `edges_` | `std::vector<NavEdge>` — **rebuilt from scratch every reconcile** (idempotent; no stale edges). |
 | `next_id_` | Monotonic id counter; only ever increments. |
 | `update_call_count_` | Throttle counter for `Update`. |
-| `nodes_cloud_` + `kdtree_nodes_` | Spatial index over current node positions; the node `id` is smuggled through PCL's intensity channel (`navgraph.cpp:90`, mirrors the keypose graph). |
+| `nodes_cloud_` + `kdtree_nodes_` | Spatial index over current node positions; the node `id` is smuggled through PCL's intensity channel (`navgraph.cpp:99`, mirrors the keypose graph). |
 | `node_marker_pub_` / `edge_marker_pub_` / `label_marker_pub_` | RViz publishers the module owns. |
 
 ---
 
 ## The reconcile pass — `Update()` → `Reconcile()`
 
-`Update` (`navgraph.cpp:50`) is the **single entry point** the planner calls each
+`Update` (`navgraph.cpp:52`) is the **single entry point** the planner calls each
 cycle. It **self-throttles**: the full reconcile runs on every
 `kNavGraphUpdateInterval`-th call (the first call runs immediately), so the planner
 side is one line. A run does: `Reconcile` → `TagRooms` → `AssignNames` →
-`PublishVisualization` (+ a temporary count log).
+`PublishVisualization` (+ a temporary per-phase timing log).
 
-`Reconcile` (`navgraph.cpp:121`) operates **only on the keypose graph's connected
+`Reconcile` (`navgraph.cpp:130`) operates **only on the keypose graph's connected
 component** (`GetConnectedGraphNodeIndices`), so disconnected/edgeless keypose junk
-never enters the NavGraph. Four phases:
+never enters the NavGraph. Five phases (numbered to match the code):
 
-1. **Seed** (`:132`) — greedy distance-gated coverage. For each connected keypose
-   position, if it is farther than `kNavNodeMinDist` from every existing node (via
-   the kdtree) **and** every node seeded earlier this pass (checked linearly — the
-   set is small), mint a new `NavNode` there with a fresh id. **Seeding is purely
-   additive**: existing nodes are never moved or touched. Seeds come from **both**
-   keypose (trajectory) and connector nodes, since the bulk read makes no
-   distinction. Invariant afterwards: every connected keypose node is within
-   `kNavNodeMinDist` of some NavGraph node.
-2. **Label** (`:169`) — nearest-node Voronoi. Each connected keypose node is
-   assigned to its nearest NavGraph node (its *region*); a per-node member count is
-   tallied. No orphan/distance-cap case is needed thanks to the Phase-1 invariant.
-3. **Hard-delete** (`:188`) — any NavGraph node whose region got **no** connected
-   members this pass is erased. (Newly seeded nodes always keep ≥ 1 member — their
-   own seed — so they survive.) Ids are retired, never reused.
-4. **Edges** (`:203`) — region adjacency. For each connected keypose edge `(a, b)`,
-   if `region(a) ≠ region(b)` those two NavGraph nodes are adjacent. The weight is
-   the shortest **crossing distance** `‖navnode_u − a‖ + len(a,b) + ‖b − navnode_v‖`
-   over all keypose edges that cross that region pair (`len(a,b)` read from
-   `GetNeighborDistances`). Both endpoints sit within `kNavNodeMinDist` of their nav
-   node (Phase-1 invariant), so for adjacent regions this is a tight estimate of the
-   traversable distance — computed with **no per-edge A\* search**. (This used to
-   call `GetShortestPath` once per nav edge, which is `O(nav_edges × keypose_nodes)`
-   per reconcile and stalled the planning loop as the map grew; see the gotchas.)
+- **Phase 1 — Seed** (`:146`) — greedy distance-gated coverage. For each connected
+  keypose position, if it is farther than `kNavNodeMinDist` from every existing node
+  (via the kdtree) **and** every node seeded earlier this pass (checked linearly —
+  the set is small), mint a new `NavNode` there with a fresh id, stashing the keypose
+  index it came from in `seed_keypose_ind` (the anchor Phases 1.5 and 2 use).
+  **Seeding is purely additive**: existing nodes are never moved or touched. Seeds
+  come from **both** keypose (trajectory) and connector nodes, since the bulk read
+  makes no distinction. Invariant afterwards: every connected keypose node is within
+  `kNavNodeMinDist` of some NavGraph node.
+- **Phase 1.5 — Re-anchor** (`:192`) — orphan salvage to keep ids stable across
+  connectivity blips. A node whose `seed_keypose_ind` has dropped out of the
+  connected component would get zero members in Phase 2 and be hard-deleted, churning
+  its id. Before that, for each such node, scan the **dead anchor's own keypose
+  neighbors** for a still-connected, unclaimed one within `kNavNodeReanchorDist` of
+  the node's (frozen) position; if one exists, rebind `seed_keypose_ind` to it so the
+  node — and its id — survive. The position never moves; only the BFS source shifts
+  (by ≤ `kNavNodeReanchorDist`, far below the node spacing, so the salvaged node
+  rejoins through a real edge). No near connected neighbor ⇒ the node stays orphaned
+  and is hard-deleted in Phase 3. Each keypose anchor is claimed by at most one node.
+- **Phase 2 — Label** (`:250`) — **geodesic Voronoi via multi-source BFS** (this
+  replaced an Euclidean nearest-node Voronoi). Each node's `seed_keypose_ind` is a
+  BFS source; the search floods the connected component along **real keypose edges
+  only**, and the first source to reach a keypose node (fewest hops) claims it as a
+  member of that node's *region*; per-node member counts are tallied. Because keypose
+  edges are collision-checked, a region label can **never leak across a wall** —
+  which is exactly what produced false cross-wall NavGraph edges under the old
+  Euclidean labeling (two same-room keypose nodes whose nearest representatives sat
+  on opposite sides of a wall). It also costs less than the kdtree build + N
+  nearest-queries it replaced.
+- **Phase 3 — Hard-delete** (`:309`) — any NavGraph node whose region got **no**
+  connected members this pass is erased. (Newly seeded nodes always keep ≥ 1 member —
+  their own seed — so they survive.) Ids are retired, never reused.
+- **Phase 4 — Edges** (`:325`) — region adjacency. For each connected keypose edge
+  `(a, b)`, if `region(a) ≠ region(b)` those two NavGraph nodes are adjacent. The
+  weight is the shortest **crossing distance**
+  `‖navnode_u − a‖ + len(a,b) + ‖b − navnode_v‖` over all keypose edges that cross
+  that region pair (`len(a,b)` read from `GetNeighborDistances`). Both endpoints sit
+  within `kNavNodeMinDist` of their nav node (Phase-1 invariant), so for adjacent
+  regions this is a tight estimate of the traversable distance — computed with **no
+  per-edge A\* search**. (This used to call `GetShortestPath` once per nav edge,
+  which is `O(nav_edges × keypose_nodes)` per reconcile and stalled the planning loop
+  as the map grew; see the gotchas.)
 
-### `TagRooms()` (`navgraph.cpp:253`)
+### `TagRooms()` (`navgraph.cpp:417`)
 
 Voxelizes each node's position into the planner's `room_mask_` and reads the room
 id — mirroring `Representation::UpdateViewpointRoomIdsFromMask` (same
 `misc_utils_ns::point_to_voxel`). Out-of-bounds or no-mask ⇒ `room_id = -1`.
 
-### `AssignNames()` (`navgraph.cpp:281`)
+### `AssignNames()` (`navgraph.cpp:445`)
 
 Assigns each node its scene-graph waypoint id `"<room_key>-wp_<n>"`. Nodes are
 grouped by room and numbered **`wp_1..N` in ascending node-id order** — exactly the
@@ -168,7 +188,7 @@ strictly room-organized, with no "no-room" bucket.
 
 ## Visualization
 
-`PublishVisualization` (`navgraph.cpp:302`) owns all three RViz outputs (the
+`PublishVisualization` (`navgraph.cpp:466`) owns all three RViz outputs (the
 planner is not involved):
 
 | Topic | Type | Style |
@@ -183,13 +203,14 @@ All published in `world_frame_id_` (default `"map"`, = the keypose graph's frame
 
 ## Parameters (`navigation_graph/...`)
 
-Declared by the planner (`sensor_coverage_planner_ground.cpp:120`), read by
-`NavGraph::ReadParameters` (`navgraph.cpp:39`). Override per scenario in the
+Declared by the planner (`sensor_coverage_planner_ground.cpp:162`), read by
+`NavGraph::ReadParameters` (`navgraph.cpp:40`). Override per scenario in the
 scenario yaml next to `keypose_graph/*` (set in `config/go2w_bag_direct.yaml`).
 
 | Param | Role | Default |
 |---|---|---|
 | `kNavNodeMinDist` | Node spacing — the in-room-waypoint granularity knob. | 1.25 |
+| `kNavNodeReanchorDist` | Max distance to salvage an orphaned node by re-anchoring it to a still-connected keypose neighbor (Phase 1.5), instead of deleting it. Kept well below `kNavNodeMinDist`. | 0.2 |
 | `kNavGraphUpdateInterval` | Run the full reconcile every Nth `Update()` call (clamped ≥ 1). | 2 |
 | `world_frame_id` | Frame for the RViz markers. | `map` |
 
@@ -201,9 +222,13 @@ scenario yaml next to `keypose_graph/*` (set in `config/go2w_bag_direct.yaml`).
   between these regions" with the true keypose walking distance — it is *not* a
   collision-checked straight line. Two nodes a short Euclidean distance apart but
   separated by a wall are correctly *not* edged; two far nodes down a corridor are.
-- **Id churn at a re-created location is accepted.** Nodes are hard-deleted when
-  their keypose support disconnects; if the spot is revisited later it gets a
-  **new** id (ids are never reused). Within a node's lifetime its id is stable.
+- **Id churn at a re-created location is accepted (but transient blips are
+  salvaged).** A brief anchor disconnect is repaired by the re-anchor pass (Phase
+  1.5) when a still-connected keypose node sits within `kNavNodeReanchorDist` of the
+  frozen node position, so the id survives. Only a *sustained* disconnect (no
+  still-connected keypose node that close) hard-deletes the node; if the spot is
+  revisited later it gets a **new** id (ids are never reused). Within a node's
+  lifetime its id is stable.
 - **Names can lag a snapshot by a label change.** `name` is computed at reconcile
   time from the current room label; if the VLM relabels a room between a reconcile
   and a snapshot, the prefix may briefly differ from the room's dict key. Resolves

@@ -57,6 +57,7 @@
 #include "grid_world/grid_world.h"
 #include "keypose_graph/keypose_graph.h"
 #include "navgraph/navgraph.h"
+#include "quadrant_manager/quadrant_manager.h"
 #include "local_coverage_planner/local_coverage_planner.h"
 #include "planning_env/planning_env.h"
 #include "rolling_occupancy_grid/rolling_occupancy_grid.h"
@@ -203,6 +204,7 @@ private:
 
   std::shared_ptr<keypose_graph_ns::KeyposeGraph> keypose_graph_;
   std::shared_ptr<navgraph_ns::NavGraph> navgraph_;
+  std::shared_ptr<quadrant_ns::QuadrantManager> quadrant_mgr_;
   std::shared_ptr<planning_env_ns::PlanningEnv> planning_env_;
   std::shared_ptr<viewpoint_manager_ns::ViewPointManager> viewpoint_manager_;
   std::shared_ptr<local_coverage_planner_ns::LocalCoveragePlanner>

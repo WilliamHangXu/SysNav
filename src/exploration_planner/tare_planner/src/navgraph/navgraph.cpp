@@ -14,7 +14,40 @@
 
 #include <opencv2/core.hpp>
 
+#include <std_msgs/msg/color_rgba.hpp>
+
 #include <utils/misc_utils.h>
+
+namespace
+{
+// Fixed per-quadrant node color for RViz. A Marker with per-point colors enforces
+// these regardless of RViz's color transformer (mirrors why the node marker is a
+// Marker, not a PointCloud2). kUnknown (pre-freeze / no room) -> grey.
+std_msgs::msg::ColorRGBA AreaColor(navgraph_ns::Area area)
+{
+  std_msgs::msg::ColorRGBA c;
+  c.a = 1.0;
+  switch (area)
+  {
+    case navgraph_ns::Area::kNorthEast:
+      c.r = 0.0; c.g = 0.9; c.b = 0.0;  // green
+      break;
+    case navgraph_ns::Area::kNorthWest:
+      c.r = 0.1; c.g = 0.4; c.b = 1.0;  // blue
+      break;
+    case navgraph_ns::Area::kSouthEast:
+      c.r = 1.0; c.g = 0.55; c.b = 0.0;  // orange
+      break;
+    case navgraph_ns::Area::kSouthWest:
+      c.r = 1.0; c.g = 0.0; c.b = 1.0;  // magenta
+      break;
+    default:
+      c.r = 0.6; c.g = 0.6; c.b = 0.6;  // grey
+      break;
+  }
+  return c;
+}
+}  // namespace
 
 namespace navgraph_ns
 {
@@ -51,7 +84,9 @@ void NavGraph::ReadParameters(rclcpp::Node::SharedPtr nh)
 
 void NavGraph::Update(const std::shared_ptr<keypose_graph_ns::KeyposeGraph>& keypose_graph,
                       const cv::Mat& room_mask, const Eigen::Vector3f& shift, float room_resolution,
-                      const std::map<int, std::string>& room_keys)
+                      const std::map<int, std::string>& room_keys,
+                      const std::map<int, Eigen::Vector3f>& room_centroids,
+                      const navgraph_ns::BuildingAxes& axes)
 {
   if (!keypose_graph)
   {
@@ -69,10 +104,20 @@ void NavGraph::Update(const std::shared_ptr<keypose_graph_ns::KeyposeGraph>& key
   const auto t1 = nav_clock::now();
   TagRooms(room_mask, shift, room_resolution);
   const auto t2 = nav_clock::now();
+  TagAreas(room_centroids, axes);
+  const auto t2a = nav_clock::now();
   AssignNames(room_keys);
   const auto t3 = nav_clock::now();
   PublishVisualization();
   const auto t4 = nav_clock::now();
+
+  // Per-quadrant node tally for the log. Index = static_cast<int>(area)+1, so
+  // kUnknown(-1)->0, NE..SW -> 1..4.
+  int area_counts[5] = { 0, 0, 0, 0, 0 };
+  for (const auto& kv : nodes_)
+  {
+    ++area_counts[static_cast<int>(kv.second.area) + 1];
+  }
 
   // TEMP timing instrumentation: per-reconcile-cycle wall-clock cost. This whole
   // body runs synchronously inside the planner's execute() loop, so it directly
@@ -82,9 +127,11 @@ void NavGraph::Update(const std::shared_ptr<keypose_graph_ns::KeyposeGraph>& key
   };
   RCLCPP_INFO(rclcpp::get_logger("navgraph"),
               "[navgraph] Update %.2f ms total | reconcile %.2f, tag_rooms %.2f, "
-              "assign_names %.2f, publish %.2f | nav_nodes=%zu nav_edges=%zu",
-              ms(t0, t4), ms(t0, t1), ms(t1, t2), ms(t2, t3), ms(t3, t4),
-              nodes_.size(), edges_.size());
+              "tag_areas %.2f, assign_names %.2f, publish %.2f | nav_nodes=%zu nav_edges=%zu | "
+              "areas NE=%d NW=%d SE=%d SW=%d unk=%d",
+              ms(t0, t4), ms(t0, t1), ms(t1, t2), ms(t2, t2a), ms(t2a, t3), ms(t3, t4),
+              nodes_.size(), edges_.size(), area_counts[1], area_counts[2], area_counts[3],
+              area_counts[4], area_counts[0]);
 }
 
 void NavGraph::BuildKdtree()
@@ -442,6 +489,27 @@ void NavGraph::TagRooms(const cv::Mat& room_mask, const Eigen::Vector3f& shift, 
   }
 }
 
+void NavGraph::TagAreas(const std::map<int, Eigen::Vector3f>& room_centroids,
+                        const navgraph_ns::BuildingAxes& axes)
+{
+  // Bucket each node into its room's quadrant by the sign of (pos-centroid)
+  // projected onto the frozen building axes. No room / unknown centroid / axes
+  // not yet frozen -> kUnknown (drawn grey, not exported).
+  for (auto& kv : nodes_)
+  {
+    NavNode& node = kv.second;
+    const auto it = room_centroids.find(node.room_id);
+    if (node.room_id < 0 || it == room_centroids.end())
+    {
+      node.area = Area::kUnknown;
+      continue;
+    }
+    const Eigen::Vector2d p(node.position.x, node.position.y);
+    const Eigen::Vector2d origin(it->second.x(), it->second.y());
+    node.area = AssignArea(p, origin, axes);  // kUnknown if !axes.valid
+  }
+}
+
 void NavGraph::AssignNames(const std::map<int, std::string>& room_keys)
 {
   // nodes_ is ordered by id, so iterating it yields ascending node ids within
@@ -467,8 +535,9 @@ void NavGraph::PublishVisualization()
 {
   const rclcpp::Time stamp = clock_->now();
 
-  // Nodes as a fixed-color POINTS marker (orange) -- a marker enforces the color
-  // regardless of RViz's point-cloud color transformer.
+  // Nodes as a POINTS marker, colored per-point by room quadrant (Area). A marker
+  // with per-point colors enforces the palette regardless of RViz's color
+  // transformer. Pre-freeze / no-room nodes are grey (kUnknown).
   visualization_msgs::msg::Marker node_marker;
   node_marker.header.frame_id = world_frame_id_;
   node_marker.header.stamp = stamp;
@@ -478,14 +547,12 @@ void NavGraph::PublishVisualization()
   node_marker.action = visualization_msgs::msg::Marker::ADD;
   node_marker.scale.x = 0.35;
   node_marker.scale.y = 0.35;
-  node_marker.color.r = 1.0;
-  node_marker.color.g = 0.5;
-  node_marker.color.b = 0.0;
-  node_marker.color.a = 1.0;
+  node_marker.color.a = 1.0;  // fallback; per-point colors below take precedence
   node_marker.pose.orientation.w = 1.0;
   for (const auto& kv : nodes_)
   {
     node_marker.points.push_back(kv.second.position);
+    node_marker.colors.push_back(AreaColor(kv.second.area));
   }
   node_marker_pub_->publish(node_marker);
 

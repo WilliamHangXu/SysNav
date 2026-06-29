@@ -73,6 +73,10 @@ struct SceneGraphExportConfig
   std::string building;
   int floor_level = 1;
   std::string floor_id;
+
+  // Length of the compass arms drawn in layout.metadata.compass. <= 0 => auto
+  // (half the larger environment-AABB extent).
+  double compass_radius_m = 0.0;
 };
 
 class SceneGraphExporter
@@ -97,6 +101,11 @@ public:
    * @param world_from_source  Rigid transform mapping source-frame points into
    *                    world_frame. Pass identity to emit source-frame
    *                    coordinates unchanged.
+   * @param axes        Frozen global building axes. Each waypoint gets an "area"
+   *                    (NE/NW/SE/SW quadrant of its room); wp_1..N read it from
+   *                    the NavGraph node, wp_0 is computed from the room centroid.
+   *                    A compass is added to metadata. Invalid (default) => areas
+   *                    "unknown" and no compass.
    * @return The serialized scene graph as a nlohmann::json object.
    */
   nlohmann::json Build(
@@ -106,7 +115,8 @@ public:
       const std::vector<navgraph_ns::NavEdge>& nav_edges,
       const pcl::PointCloud<pcl::PointXYZRGBL>& door_cloud,
       const Eigen::Isometry3d& world_from_source =
-          Eigen::Isometry3d::Identity()) const;
+          Eigen::Isometry3d::Identity(),
+      const navgraph_ns::BuildingAxes& axes = {}) const;
 
   // Stable, human-readable room key, e.g. "kitchen-room_1". Public so the
   // planner can name NavGraph nodes with the same key the exporter uses.
@@ -132,7 +142,8 @@ private:
       const std::vector<const navgraph_ns::NavNode*>& room_nav_nodes,
       const pcl::PointCloud<pcl::PointXYZRGBL>& door_cloud,
       const Eigen::Isometry3d& world_from_source,
-      std::map<int, std::string>& nav_id_to_wpid) const;
+      std::map<int, std::string>& nav_id_to_wpid,
+      const navgraph_ns::BuildingAxes& axes) const;
 
   // Emits one object's JSON. Its centroid (ObjectNodeRep::GetPosition) is
   // transformed into world_frame via world_from_source and written as the
@@ -146,6 +157,15 @@ private:
       const std::map<int, representation_ns::RoomNodeRep>& rooms,
       const Eigen::Isometry3d& world_from_source, double& width,
       double& height);
+
+  // Source-frame AABB over every room polygon: its center (the compass anchor)
+  // plus extents (for the auto compass radius). NOT transformed, so it stays
+  // consistent with the source-frame building axes; the 5 finished compass points
+  // are transformed afterwards. Returns false (leaving outputs untouched) when
+  // there are no polygon vertices.
+  static bool ComputeAabbCenterSource(
+      const std::map<int, representation_ns::RoomNodeRep>& rooms,
+      Eigen::Vector3d& center, double& width, double& height);
 
   SceneGraphExportConfig config_;
 };

@@ -106,9 +106,15 @@ nlohmann::json SceneGraphExporter::BuildRoomJson(
     const std::vector<const navgraph_ns::NavNode*>& room_nav_nodes,
     const pcl::PointCloud<pcl::PointXYZRGBL>& door_cloud,
     const Eigen::Isometry3d& world_from_source,
-    std::map<int, std::string>& nav_id_to_wpid) const
+    std::map<int, std::string>& nav_id_to_wpid,
+    const navgraph_ns::BuildingAxes& axes) const
 {
   const std::string room_key = RoomKey(room);
+
+  // Quadrant origin = the room centroid (the axes are centered there). Both wp_0
+  // (below, computed here) and the NavGraph nodes (wp_1..N, tagged upstream) use
+  // this same centroid + the same frozen axes, so they agree by construction.
+  const Eigen::Vector2d room_centroid(room.centroid_.x(), room.centroid_.y());
 
   // --- entrances: one per door-adjacent neighbor with door geometry ---
   nlohmann::json entrances = nlohmann::json::array();
@@ -145,11 +151,16 @@ nlohmann::json SceneGraphExporter::BuildRoomJson(
   const Eigen::Vector3d interior_world =
       ToWorld(world_from_source, room.interior_point_.x, room.interior_point_.y,
               room.interior_point_.z);
+  // wp_0 area is assigned like any other point (origin = centroid), so it is not a
+  // special "center" -- the interior point lies wherever it lies in the quadrants.
+  const navgraph_ns::Area wp0_area = navgraph_ns::AssignArea(
+      Eigen::Vector2d(room.interior_point_.x, room.interior_point_.y), room_centroid, axes);
   waypoints.push_back(nlohmann::json{
       {"id", room_key + "-wp_0"},
       {"x", interior_world.x()},
       {"y", interior_world.y()},
       {"z", interior_world.z()},
+      {"area", navgraph_ns::AreaName(wp0_area)},
   });
   int wp_index = 1;
   for (const navgraph_ns::NavNode* node : room_nav_nodes)  // ascending node id
@@ -166,6 +177,8 @@ nlohmann::json SceneGraphExporter::BuildRoomJson(
         {"x", world.x()},
         {"y", world.y()},
         {"z", world.z()},
+        // Read the area tagged upstream by the NavGraph (same centroid + axes).
+        {"area", navgraph_ns::AreaName(node->area)},
     });
     nav_id_to_wpid[node->id] = wp_id;  // so Build() can wire NavGraph edges
     ++wp_index;
@@ -220,13 +233,49 @@ void SceneGraphExporter::ComputeDimensions(
   height = any ? (max_y - min_y) : 0.0;
 }
 
+bool SceneGraphExporter::ComputeAabbCenterSource(
+    const std::map<int, representation_ns::RoomNodeRep>& rooms,
+    Eigen::Vector3d& center, double& width, double& height)
+{
+  double min_x = std::numeric_limits<double>::max();
+  double min_y = std::numeric_limits<double>::max();
+  double min_z = std::numeric_limits<double>::max();
+  double max_x = std::numeric_limits<double>::lowest();
+  double max_y = std::numeric_limits<double>::lowest();
+  double max_z = std::numeric_limits<double>::lowest();
+  bool any = false;
+  for (const auto& id_room : rooms)
+  {
+    for (const auto& pt : id_room.second.polygon_.polygon.points)
+    {
+      // Source frame (NO transform): consistent with the source-frame axes.
+      any = true;
+      min_x = std::min(min_x, static_cast<double>(pt.x));
+      min_y = std::min(min_y, static_cast<double>(pt.y));
+      min_z = std::min(min_z, static_cast<double>(pt.z));
+      max_x = std::max(max_x, static_cast<double>(pt.x));
+      max_y = std::max(max_y, static_cast<double>(pt.y));
+      max_z = std::max(max_z, static_cast<double>(pt.z));
+    }
+  }
+  if (!any)
+  {
+    return false;
+  }
+  center = Eigen::Vector3d(0.5 * (min_x + max_x), 0.5 * (min_y + max_y), 0.5 * (min_z + max_z));
+  width = max_x - min_x;
+  height = max_y - min_y;
+  return true;
+}
+
 nlohmann::json SceneGraphExporter::Build(
     const std::map<int, representation_ns::RoomNodeRep>& rooms,
     const std::unordered_map<int, representation_ns::ObjectNodeRep>& objects,
     const std::map<int, navgraph_ns::NavNode>& nav_nodes,
     const std::vector<navgraph_ns::NavEdge>& nav_edges,
     const pcl::PointCloud<pcl::PointXYZRGBL>& door_cloud,
-    const Eigen::Isometry3d& world_from_source) const
+    const Eigen::Isometry3d& world_from_source,
+    const navgraph_ns::BuildingAxes& axes) const
 {
   nlohmann::json rooms_json = nlohmann::json::object();
   nlohmann::json all_waypoints = nlohmann::json::array();
@@ -252,7 +301,7 @@ nlohmann::json SceneGraphExporter::Build(
         (nodes_it != nodes_by_room.end()) ? nodes_it->second : kNoNavNodes;
     nlohmann::json room_json =
         BuildRoomJson(room, rooms, objects, room_nav_nodes, door_cloud,
-                      world_from_source, nav_id_to_wpid);
+                      world_from_source, nav_id_to_wpid, axes);
     // Mirror every waypoint id into the flat top-level list.
     for (const auto& wp : room_json["waypoints"])
     {
@@ -285,6 +334,41 @@ nlohmann::json SceneGraphExporter::Build(
   double height = 0.0;
   ComputeDimensions(rooms, world_from_source, width, height);
 
+  nlohmann::json metadata = {
+      {"units", config_.units},
+      {"frame", config_.frame},
+      {"building", config_.building},
+      {"floor_level", config_.floor_level},
+      {"floor_id", config_.floor_id},
+      {"dimensions", {{"width", width}, {"height", height}}},
+  };
+
+  // Compass: 5 points (center + N/S/E/W tips) describing the global building axes
+  // so a frontend can draw an oriented compass. Computed in the source frame then
+  // each point transformed by world_from_source (like every other coordinate).
+  // Omitted until the axes are frozen / there are rooms.
+  Eigen::Vector3d aabb_center;
+  double aabb_w = 0.0;
+  double aabb_h = 0.0;
+  if (axes.valid && ComputeAabbCenterSource(rooms, aabb_center, aabb_w, aabb_h))
+  {
+    const double radius = (config_.compass_radius_m > 0.0) ? config_.compass_radius_m
+                                                           : 0.5 * std::max(aabb_w, aabb_h);
+    const Eigen::Vector3d e(axes.east.x(), axes.east.y(), 0.0);
+    const Eigen::Vector3d n(axes.north.x(), axes.north.y(), 0.0);
+    auto pt = [&world_from_source](const Eigen::Vector3d& s) {
+      const Eigen::Vector3d w = world_from_source * s;
+      return nlohmann::json{ { "x", w.x() }, { "y", w.y() }, { "z", w.z() } };
+    };
+    metadata["compass"] = {
+        { "center", pt(aabb_center) },
+        { "north", pt(aabb_center + radius * n) },
+        { "south", pt(aabb_center - radius * n) },
+        { "east", pt(aabb_center + radius * e) },
+        { "west", pt(aabb_center - radius * e) },
+    };
+  }
+
   return nlohmann::json{
       {"map_id", config_.map_id},
       {"warehouse_id", config_.warehouse_id},
@@ -296,15 +380,7 @@ nlohmann::json SceneGraphExporter::Build(
            {"zones", {{config_.zone, {{"rooms", std::move(rooms_json)}}}}},
            {"waypoints", std::move(all_waypoints)},
            {"edges", std::move(edges)},
-           {"metadata",
-            {
-                {"units", config_.units},
-                {"frame", config_.frame},
-                {"building", config_.building},
-                {"floor_level", config_.floor_level},
-                {"floor_id", config_.floor_id},
-                {"dimensions", {{"width", width}, {"height", height}}},
-            }},
+           {"metadata", std::move(metadata)},
        }},
   };
 }

@@ -7,8 +7,8 @@
 //
 // Designed to feed an LLM path planner via the scene graph. The dense keypose
 // graph is left untouched; NavGraph is a read-only-ish coarsened view of it,
-// reconciled (seed -> label -> delete -> edges -> room-tag) once every N
-// planning cycles.
+// reconciled (seed -> re-anchor -> label -> delete -> edges -> room-tag) once
+// every N planning cycles.
 //
 
 #ifndef NAVGRAPH_NAVGRAPH_H
@@ -50,9 +50,13 @@ public:
   // mask used to tag each node with a room id (pass an empty mask to skip).
   // `room_keys` maps room id -> scene-graph room key (e.g. "kitchen-room_1") so
   // each node can be named with its eventual scene-graph waypoint id.
+  // `room_centroids` maps room id -> centroid (the quadrant origin) and `axes`
+  // are the frozen global building axes; together they tag each node's `area`.
   void Update(const std::shared_ptr<keypose_graph_ns::KeyposeGraph>& keypose_graph,
               const cv::Mat& room_mask, const Eigen::Vector3f& shift, float room_resolution,
-              const std::map<int, std::string>& room_keys);
+              const std::map<int, std::string>& room_keys,
+              const std::map<int, Eigen::Vector3f>& room_centroids,
+              const navgraph_ns::BuildingAxes& axes);
 
   // Read API for downstream consumers (e.g. the scene-graph exporter).
   const std::map<int, NavNode>& GetNodes() const
@@ -74,12 +78,18 @@ public:
 
 private:
   // Full reconcile pass over the keypose graph's connected component:
-  // seed (distance-gated) -> label (nearest-node Voronoi) -> hard-delete
+  // seed (distance-gated) -> re-anchor (salvage orphaned nodes' ids) -> label
+  // (geodesic Voronoi via multi-source BFS along keypose edges) -> hard-delete
   // (empty regions) -> rederive edges (region adjacency).
   void Reconcile(const std::shared_ptr<keypose_graph_ns::KeyposeGraph>& keypose_graph);
   // Tag every surviving node with a room id by voxelizing its position into the
   // room mask (mirrors Representation::UpdateViewpointRoomIdsFromMask).
   void TagRooms(const cv::Mat& room_mask, const Eigen::Vector3f& shift, float room_resolution);
+  // Tag every node with its room quadrant (Area) from its room centroid + the
+  // frozen building axes. kUnknown if the node has no room or the axes are not
+  // yet frozen. Runs after TagRooms (needs room_id) and before AssignNames.
+  void TagAreas(const std::map<int, Eigen::Vector3f>& room_centroids,
+                const navgraph_ns::BuildingAxes& axes);
   // Assign each node its scene-graph waypoint id ("<room_key>-wp_<n>"), grouping
   // by room and numbering wp_1..N in ascending node-id order -- exactly the order
   // the exporter emits (wp_0 is reserved for the room centroid). Nodes with no

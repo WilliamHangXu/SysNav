@@ -1,7 +1,8 @@
 //
 // Plain-old-data types for the NavGraph, split out so consumers (e.g. the
 // scene-graph exporter) can use them without pulling in rclcpp/PCL via the full
-// navgraph.h. Depends only on geometry_msgs (a message struct, no ROS runtime).
+// navgraph.h. Depends only on geometry_msgs (a message struct, no ROS runtime)
+// and Eigen (via building_axes.h, for the per-node Area).
 //
 
 #ifndef NAVGRAPH_NAVGRAPH_TYPES_H
@@ -10,6 +11,8 @@
 #include <string>
 
 #include <geometry_msgs/msg/point.hpp>
+
+#include <navgraph/building_axes.h>
 
 namespace navgraph_ns
 {
@@ -29,6 +32,10 @@ struct NavNode
   // reconcile from the node's room; this is exactly the id the exporter emits,
   // so RViz labels and the JSON stay in lockstep. Empty if the node has no room.
   std::string name;
+  // Room quadrant, tagged each reconcile from the node's room centroid + the
+  // frozen building axes. Stored here so it is available LIVE (RViz node color)
+  // and read verbatim by the exporter. kUnknown until the axes freeze / no room.
+  Area area = Area::kUnknown;
 };
 
 // An undirected NavGraph edge. (u, v) is canonical with u < v. `meters` is the
