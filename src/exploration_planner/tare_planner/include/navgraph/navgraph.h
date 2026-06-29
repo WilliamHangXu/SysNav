@@ -50,13 +50,12 @@ public:
   // mask used to tag each node with a room id (pass an empty mask to skip).
   // `room_keys` maps room id -> scene-graph room key (e.g. "kitchen-room_1") so
   // each node can be named with its eventual scene-graph waypoint id.
-  // `room_centroids` maps room id -> centroid (the quadrant origin) and `axes`
-  // are the frozen global building axes; together they tag each node's `area`.
+  // `room_grids` maps room id -> its 3x3 grid (oriented-bbox thirds in the frozen
+  // axes); each node's `area` is its cell in its room's grid.
   void Update(const std::shared_ptr<keypose_graph_ns::KeyposeGraph>& keypose_graph,
               const cv::Mat& room_mask, const Eigen::Vector3f& shift, float room_resolution,
               const std::map<int, std::string>& room_keys,
-              const std::map<int, Eigen::Vector3f>& room_centroids,
-              const navgraph_ns::BuildingAxes& axes);
+              const std::map<int, navgraph_ns::RoomGrid>& room_grids);
 
   // Read API for downstream consumers (e.g. the scene-graph exporter).
   const std::map<int, NavNode>& GetNodes() const
@@ -85,11 +84,10 @@ private:
   // Tag every surviving node with a room id by voxelizing its position into the
   // room mask (mirrors Representation::UpdateViewpointRoomIdsFromMask).
   void TagRooms(const cv::Mat& room_mask, const Eigen::Vector3f& shift, float room_resolution);
-  // Tag every node with its room quadrant (Area) from its room centroid + the
-  // frozen building axes. kUnknown if the node has no room or the axes are not
-  // yet frozen. Runs after TagRooms (needs room_id) and before AssignNames.
-  void TagAreas(const std::map<int, Eigen::Vector3f>& room_centroids,
-                const navgraph_ns::BuildingAxes& axes);
+  // Tag every node with its 3x3-grid cell (Area) from its room's grid. kUnknown if
+  // the node has no room or the room's grid is invalid (axes not yet frozen). Runs
+  // after TagRooms (needs room_id) and before AssignNames.
+  void TagAreas(const std::map<int, navgraph_ns::RoomGrid>& room_grids);
   // Assign each node its scene-graph waypoint id ("<room_key>-wp_<n>"), grouping
   // by room and numbering wp_1..N in ascending node-id order -- exactly the order
   // the exporter emits (wp_0 is reserved for the room centroid). Nodes with no

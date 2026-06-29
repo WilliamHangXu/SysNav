@@ -75,7 +75,7 @@ Visualization Manager:
       Enabled: true
       Invert Rainbow: false
       Max Color: 255; 255; 255
-      Max Intensity: 163
+      Max Intensity: 255
       Min Color: 0; 0; 0
       Min Intensity: 0
       Name: PointCloud2
@@ -104,85 +104,85 @@ Visualization Manager:
           Value: true
         ar_marker_4_corrected:
           Value: true
-        go2w_026/FL_calf:
+        go2w_008/FL_calf:
           Value: true
-        go2w_026/FL_calflower:
+        go2w_008/FL_calflower:
           Value: true
-        go2w_026/FL_calflower1:
+        go2w_008/FL_calflower1:
           Value: true
-        go2w_026/FL_foot:
+        go2w_008/FL_foot:
           Value: true
-        go2w_026/FL_foot_motor:
+        go2w_008/FL_foot_motor:
           Value: true
-        go2w_026/FL_hip:
+        go2w_008/FL_hip:
           Value: true
-        go2w_026/FL_thigh:
+        go2w_008/FL_thigh:
           Value: true
-        go2w_026/FR_calf:
+        go2w_008/FR_calf:
           Value: true
-        go2w_026/FR_calflower:
+        go2w_008/FR_calflower:
           Value: true
-        go2w_026/FR_calflower1:
+        go2w_008/FR_calflower1:
           Value: true
-        go2w_026/FR_foot:
+        go2w_008/FR_foot:
           Value: true
-        go2w_026/FR_foot_motor:
+        go2w_008/FR_foot_motor:
           Value: true
-        go2w_026/FR_hip:
+        go2w_008/FR_hip:
           Value: true
-        go2w_026/FR_thigh:
+        go2w_008/FR_thigh:
           Value: true
-        go2w_026/Head_lower:
+        go2w_008/Head_lower:
           Value: true
-        go2w_026/Head_upper:
+        go2w_008/Head_upper:
           Value: true
-        go2w_026/RL_calf:
+        go2w_008/RL_calf:
           Value: true
-        go2w_026/RL_calflower:
+        go2w_008/RL_calflower:
           Value: true
-        go2w_026/RL_calflower1:
+        go2w_008/RL_calflower1:
           Value: true
-        go2w_026/RL_foot:
+        go2w_008/RL_foot:
           Value: true
-        go2w_026/RL_foot_motor:
+        go2w_008/RL_foot_motor:
           Value: true
-        go2w_026/RL_hip:
+        go2w_008/RL_hip:
           Value: true
-        go2w_026/RL_thigh:
+        go2w_008/RL_thigh:
           Value: true
-        go2w_026/RR_calf:
+        go2w_008/RR_calf:
           Value: true
-        go2w_026/RR_calflower:
+        go2w_008/RR_calflower:
           Value: true
-        go2w_026/RR_calflower1:
+        go2w_008/RR_calflower1:
           Value: true
-        go2w_026/RR_foot:
+        go2w_008/RR_foot:
           Value: true
-        go2w_026/RR_foot_motor:
+        go2w_008/RR_foot_motor:
           Value: true
-        go2w_026/RR_hip:
+        go2w_008/RR_hip:
           Value: true
-        go2w_026/RR_thigh:
+        go2w_008/RR_thigh:
           Value: true
-        go2w_026/base:
+        go2w_008/base:
           Value: true
-        go2w_026/base_ground:
+        go2w_008/base_ground:
           Value: true
-        go2w_026/depth_cam_link:
+        go2w_008/depth_cam_link:
           Value: true
-        go2w_026/front_cam:
+        go2w_008/front_cam:
           Value: true
-        go2w_026/front_cam_ar:
+        go2w_008/front_cam_ar:
           Value: true
-        go2w_026/imu:
+        go2w_008/imu:
           Value: true
-        go2w_026/lidar:
+        go2w_008/lidar:
           Value: true
-        go2w_026/livox_frame:
+        go2w_008/livox_frame:
           Value: true
-        go2w_026/odom:
+        go2w_008/odom:
           Value: true
-        go2w_026/radar:
+        go2w_008/radar:
           Value: true
         map:
           Value: true
@@ -196,65 +196,65 @@ Visualization Manager:
       Show Axes: true
       Show Names: false
       Tree:
-        go2w_026/odom:
-          go2w_026/base:
-            go2w_026/FL_hip:
-              go2w_026/FL_thigh:
-                go2w_026/FL_calf:
-                  go2w_026/FL_calflower:
-                    go2w_026/FL_calflower1:
+        go2w_008/odom:
+          go2w_008/base:
+            go2w_008/FL_hip:
+              go2w_008/FL_thigh:
+                go2w_008/FL_calf:
+                  go2w_008/FL_calflower:
+                    go2w_008/FL_calflower1:
                       {}
-                  go2w_026/FL_foot:
+                  go2w_008/FL_foot:
                     {}
-                  go2w_026/FL_foot_motor:
+                  go2w_008/FL_foot_motor:
                     {}
-            go2w_026/FR_hip:
-              go2w_026/FR_thigh:
-                go2w_026/FR_calf:
-                  go2w_026/FR_calflower:
-                    go2w_026/FR_calflower1:
+            go2w_008/FR_hip:
+              go2w_008/FR_thigh:
+                go2w_008/FR_calf:
+                  go2w_008/FR_calflower:
+                    go2w_008/FR_calflower1:
                       {}
-                  go2w_026/FR_foot:
+                  go2w_008/FR_foot:
                     {}
-                  go2w_026/FR_foot_motor:
+                  go2w_008/FR_foot_motor:
                     {}
-            go2w_026/Head_upper:
-              go2w_026/Head_lower:
+            go2w_008/Head_upper:
+              go2w_008/Head_lower:
                 {}
-            go2w_026/RL_hip:
-              go2w_026/RL_thigh:
-                go2w_026/RL_calf:
-                  go2w_026/RL_calflower:
-                    go2w_026/RL_calflower1:
+            go2w_008/RL_hip:
+              go2w_008/RL_thigh:
+                go2w_008/RL_calf:
+                  go2w_008/RL_calflower:
+                    go2w_008/RL_calflower1:
                       {}
-                  go2w_026/RL_foot:
+                  go2w_008/RL_foot:
                     {}
-                  go2w_026/RL_foot_motor:
+                  go2w_008/RL_foot_motor:
                     {}
-            go2w_026/RR_hip:
-              go2w_026/RR_thigh:
-                go2w_026/RR_calf:
-                  go2w_026/RR_calflower:
-                    go2w_026/RR_calflower1:
+            go2w_008/RR_hip:
+              go2w_008/RR_thigh:
+                go2w_008/RR_calf:
+                  go2w_008/RR_calflower:
+                    go2w_008/RR_calflower1:
                       {}
-                  go2w_026/RR_foot:
+                  go2w_008/RR_foot:
                     {}
-                  go2w_026/RR_foot_motor:
+                  go2w_008/RR_foot_motor:
                     {}
-            go2w_026/base_ground:
+            go2w_008/base_ground:
               {}
-            go2w_026/depth_cam_link:
+            go2w_008/depth_cam_link:
               {}
-            go2w_026/front_cam:
-              go2w_026/front_cam_ar:
+            go2w_008/front_cam:
+              go2w_008/front_cam_ar:
                 {}
-            go2w_026/imu:
+            go2w_008/imu:
               {}
-            go2w_026/lidar:
+            go2w_008/lidar:
               {}
-            go2w_026/livox_frame:
+            go2w_008/livox_frame:
               {}
-            go2w_026/radar:
+            go2w_008/radar:
               {}
           map:
             {}
@@ -383,7 +383,7 @@ Visualization Manager:
       Enabled: true
       Name: MarkerArray
       Namespaces:
-        {}
+        room_type: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -512,7 +512,7 @@ Visualization Manager:
       Enabled: true
       Name: Marker
       Namespaces:
-        {}
+        quadrant_cross: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -566,7 +566,7 @@ Visualization Manager:
   Value: true
   Views:
     Current:
-      Angle: 1.2150007486343384
+      Angle: 1.6350005865097046
       Class: rviz_default_plugins/TopDownOrtho
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
@@ -576,11 +576,11 @@ Visualization Manager:
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Scale: 55.32664108276367
+      Scale: 61.96583938598633
       Target Frame: <Fixed Frame>
       Value: TopDownOrtho (rviz_default_plugins)
-      X: -1.4517297744750977
-      Y: 3.091567277908325
+      X: -6.377328395843506
+      Y: 3.0717933177948
     Saved: ~
 Window Geometry:
   Displays:

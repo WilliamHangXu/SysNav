@@ -41,10 +41,11 @@ public:
 
   // Self-throttled (every kUpdateInterval-th call). While not frozen: the PRIMARY
   // axis source is the latest /wall_axis (dominant building-wall orientation),
-  // frozen once it is confident + stable; the min-rect FitAxes fallback is used
-  // ONLY at the hard cap. Once frozen, stops fitting and only republishes the
-  // per-room cross-lines. `debug_log` gates verbose warmup/fit logs; the one-time
-  // FREEZE line is always shown.
+  // frozen once it is confident + stable -- this needs NO room, so the axis can
+  // freeze before any room is segmented. The min-rect FitAxes fallback (which needs
+  // room polygons) is used ONLY at the hard cap. Once frozen, stops fitting and only
+  // republishes the per-room "#" glyphs. `debug_log` gates verbose warmup/fit logs;
+  // the one-time FREEZE line is always shown.
   void Update(const std::map<int, representation_ns::RoomNodeRep>& rooms, bool debug_log = false);
 
   // The global axes. valid == false until the warmup freeze completes.
@@ -57,6 +58,12 @@ public:
     return frozen_;
   }
 
+  // Build each alive room's 3x3 grid (oriented-bounding-box thirds) from the frozen
+  // axes + kCenterFraction. Consumed by NavGraph (node area tagging) and the
+  // exporter (wp_0). Grids are invalid (=> kUnknown areas) until the axes freeze.
+  std::map<int, navgraph_ns::RoomGrid> BuildRoomGrids(
+      const std::map<int, representation_ns::RoomNodeRep>& rooms) const;
+
 private:
   // Fit + canonicalize the global axes from all alive-room polygon vertices.
   // Returns false (leaving the previous `out` untouched) on too little/degenerate
@@ -67,9 +74,10 @@ private:
   // theta to (-45,45] deg so east is within +/-45 deg of map +X, north = +90 CCW.
   // Identical canonicalization to FitAxes, so downstream is source-agnostic.
   navgraph_ns::BuildingAxes AxesFromAngle(double theta) const;
-  // Draw, per alive room, the two axis lines through its centroid spanning the
-  // room (one LINE_LIST marker, rewritten each publish so dead rooms vanish).
-  // No-op until the axes are valid.
+  // Draw, per alive room, a small "#" glyph at the center of its 3x3 grid (the four
+  // third-boundary segments, with a short overhang, NOT spanning the room). One
+  // LINE_LIST marker, rewritten each publish so dead rooms vanish. No-op until the
+  // axes are valid.
   void PublishCrossLines(const std::map<int, representation_ns::RoomNodeRep>& rooms);
 
   navgraph_ns::BuildingAxes axes_;  // frozen result (valid == false until freeze)
@@ -105,6 +113,7 @@ private:
   double kCrossLineWidth_;
   double kWallMinConfidence_;  // min /wall_axis confidence to trust it as primary
   double kWallMinSupportM_;    // min /wall_axis aligned wall length to trust it (m)
+  double kCenterFraction_;     // center-band size as fraction of each room extent (1/3 = equal thirds)
 };
 }  // namespace quadrant_ns
 

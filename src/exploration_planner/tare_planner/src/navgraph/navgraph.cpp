@@ -20,9 +20,10 @@
 
 namespace
 {
-// Fixed per-quadrant node color for RViz. A Marker with per-point colors enforces
-// these regardless of RViz's color transformer (mirrors why the node marker is a
-// Marker, not a PointCloud2). kUnknown (pre-freeze / no room) -> grey.
+// Node color for RViz. Only the four CORNER cells (NE/NW/SE/SW) are colored; the
+// center + the four edge cells (N/E/S/W) + kUnknown are grey -- the full 9-way
+// area is still in the JSON, but the node viz only highlights the corners. A
+// Marker with per-point colors enforces these regardless of RViz's transformer.
 std_msgs::msg::ColorRGBA AreaColor(navgraph_ns::Area area)
 {
   std_msgs::msg::ColorRGBA c;
@@ -85,8 +86,7 @@ void NavGraph::ReadParameters(rclcpp::Node::SharedPtr nh)
 void NavGraph::Update(const std::shared_ptr<keypose_graph_ns::KeyposeGraph>& keypose_graph,
                       const cv::Mat& room_mask, const Eigen::Vector3f& shift, float room_resolution,
                       const std::map<int, std::string>& room_keys,
-                      const std::map<int, Eigen::Vector3f>& room_centroids,
-                      const navgraph_ns::BuildingAxes& axes)
+                      const std::map<int, navgraph_ns::RoomGrid>& room_grids)
 {
   if (!keypose_graph)
   {
@@ -104,16 +104,16 @@ void NavGraph::Update(const std::shared_ptr<keypose_graph_ns::KeyposeGraph>& key
   const auto t1 = nav_clock::now();
   TagRooms(room_mask, shift, room_resolution);
   const auto t2 = nav_clock::now();
-  TagAreas(room_centroids, axes);
+  TagAreas(room_grids);
   const auto t2a = nav_clock::now();
   AssignNames(room_keys);
   const auto t3 = nav_clock::now();
   PublishVisualization();
   const auto t4 = nav_clock::now();
 
-  // Per-quadrant node tally for the log. Index = static_cast<int>(area)+1, so
-  // kUnknown(-1)->0, NE..SW -> 1..4.
-  int area_counts[5] = { 0, 0, 0, 0, 0 };
+  // Per-cell node tally for the log. Index = static_cast<int>(area)+1, so
+  // kUnknown(-1)->0, then center(1) N(2) NE(3) E(4) SE(5) S(6) SW(7) W(8) NW(9).
+  int area_counts[10] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
   for (const auto& kv : nodes_)
   {
     ++area_counts[static_cast<int>(kv.second.area) + 1];
@@ -128,10 +128,11 @@ void NavGraph::Update(const std::shared_ptr<keypose_graph_ns::KeyposeGraph>& key
   RCLCPP_INFO(rclcpp::get_logger("navgraph"),
               "[navgraph] Update %.2f ms total | reconcile %.2f, tag_rooms %.2f, "
               "tag_areas %.2f, assign_names %.2f, publish %.2f | nav_nodes=%zu nav_edges=%zu | "
-              "areas NE=%d NW=%d SE=%d SW=%d unk=%d",
+              "areas C=%d N=%d NE=%d E=%d SE=%d S=%d SW=%d W=%d NW=%d unk=%d",
               ms(t0, t4), ms(t0, t1), ms(t1, t2), ms(t2, t2a), ms(t2a, t3), ms(t3, t4),
               nodes_.size(), edges_.size(), area_counts[1], area_counts[2], area_counts[3],
-              area_counts[4], area_counts[0]);
+              area_counts[4], area_counts[5], area_counts[6], area_counts[7], area_counts[8],
+              area_counts[9], area_counts[0]);
 }
 
 void NavGraph::BuildKdtree()
@@ -489,24 +490,20 @@ void NavGraph::TagRooms(const cv::Mat& room_mask, const Eigen::Vector3f& shift, 
   }
 }
 
-void NavGraph::TagAreas(const std::map<int, Eigen::Vector3f>& room_centroids,
-                        const navgraph_ns::BuildingAxes& axes)
+void NavGraph::TagAreas(const std::map<int, navgraph_ns::RoomGrid>& room_grids)
 {
-  // Bucket each node into its room's quadrant by the sign of (pos-centroid)
-  // projected onto the frozen building axes. No room / unknown centroid / axes
-  // not yet frozen -> kUnknown (drawn grey, not exported).
+  // Bucket each node into its room's 3x3 grid cell. No room / no grid / unfrozen
+  // axes -> kUnknown (drawn grey, not exported).
   for (auto& kv : nodes_)
   {
     NavNode& node = kv.second;
-    const auto it = room_centroids.find(node.room_id);
-    if (node.room_id < 0 || it == room_centroids.end())
+    const auto it = room_grids.find(node.room_id);
+    if (node.room_id < 0 || it == room_grids.end())
     {
       node.area = Area::kUnknown;
       continue;
     }
-    const Eigen::Vector2d p(node.position.x, node.position.y);
-    const Eigen::Vector2d origin(it->second.x(), it->second.y());
-    node.area = AssignArea(p, origin, axes);  // kUnknown if !axes.valid
+    node.area = AssignArea(Eigen::Vector2d(node.position.x, node.position.y), it->second);
   }
 }
 

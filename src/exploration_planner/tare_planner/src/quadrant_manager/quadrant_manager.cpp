@@ -50,6 +50,7 @@ QuadrantManager::QuadrantManager(rclcpp::Node::SharedPtr nh)
   , kCrossLineWidth_(0.08)
   , kWallMinConfidence_(0.5)
   , kWallMinSupportM_(3.0)
+  , kCenterFraction_(1.0 / 3.0)
 {
   ReadParameters(nh);
   clock_ = nh->get_clock();
@@ -76,6 +77,7 @@ void QuadrantManager::ReadParameters(rclcpp::Node::SharedPtr nh)
   nh->get_parameter("quadrant/kCrossLineWidth", kCrossLineWidth_);
   nh->get_parameter("quadrant/kWallMinConfidence", kWallMinConfidence_);
   nh->get_parameter("quadrant/kWallMinSupportM", kWallMinSupportM_);
+  nh->get_parameter("quadrant/kCenterFraction", kCenterFraction_);
   nh->get_parameter("quadrant/world_frame_id", world_frame_id_);
   double eps_deg = kFreezeAngleEpsRad_ * 180.0 / kPi;
   nh->get_parameter("quadrant/kFreezeAngleEpsDeg", eps_deg);
@@ -113,10 +115,12 @@ void QuadrantManager::Update(const std::map<int, representation_ns::RoomNodeRep>
     return;
   }
 
-  // Geometry gate: need >=1 alive room (cross-lines/areas are per-room) with enough
-  // polygon vertices for the eventual min-rect fallback. warmup_cycles_ advances on
-  // GEOMETRY alone, so the hard cap is a real timeout even if a confident wall axis
-  // never arrives (and single-room envs no longer hang).
+  // Geometry presence (>=1 alive room with enough polygon vertices). This is NOT a
+  // hard gate on the freeze: the wall-stability path below runs on a confident wall
+  // axis ALONE, so the building orientation can freeze BEFORE any room is segmented
+  // (the cross-lines/areas just render once rooms appear). Geometry is only required
+  // for (a) the min-rect cap fallback, which needs room polygons, and (b) as an
+  // alternative cap-timer driver so the timeout still fires when there is no wall.
   int alive_rooms = 0;
   int total_vertices = 0;
   for (const auto& id_room : rooms)
@@ -128,22 +132,27 @@ void QuadrantManager::Update(const std::map<int, representation_ns::RoomNodeRep>
     ++alive_rooms;
     total_vertices += static_cast<int>(id_room.second.GetPolygon().polygon.points.size());
   }
-  if (alive_rooms < kWarmupMinRooms_ || total_vertices < kWarmupMinVertices_)
-  {
-    if (debug_log)
-    {
-      RCLCPP_INFO(rclcpp::get_logger("quadrant"),
-                  "[quadrant] waiting for geometry: rooms=%d (need>=%d) verts=%d (need>=%d)",
-                  alive_rooms, kWarmupMinRooms_, total_vertices, kWarmupMinVertices_);
-    }
-    return;  // pre-freeze: axes_ invalid -> nothing shown (grey nodes, no cross-lines)
-  }
-  ++warmup_cycles_;
+  const bool geometry_ok = (alive_rooms >= kWarmupMinRooms_ && total_vertices >= kWarmupMinVertices_);
 
   // PRIMARY source: the latest /wall_axis, when confident enough to trust.
   const WallAxisState wa = wall_axis_;
   const bool wall_ok =
       wa.valid && wa.confidence >= kWallMinConfidence_ && wa.support_length >= kWallMinSupportM_;
+
+  // Nothing usable yet (no trustworthy wall AND no geometry) -> wait. warmup_cycles_
+  // (the cap timer) only advances once we have at least one source, so the hard cap
+  // is a real timeout for both the wall and the min-rect paths.
+  if (!wall_ok && !geometry_ok)
+  {
+    if (debug_log)
+    {
+      RCLCPP_INFO(rclcpp::get_logger("quadrant"),
+                  "[quadrant] waiting: no confident wall axis and no geometry yet (rooms=%d verts=%d)",
+                  alive_rooms, total_vertices);
+    }
+    return;  // pre-freeze: axes_ invalid -> nothing shown (grey nodes, no cross-lines)
+  }
+  ++warmup_cycles_;
   if (wall_ok)
   {
     if (have_last_angle_ && AngleDiff(wa.yaw_rad, last_angle_rad_) <= kFreezeAngleEpsRad_)
@@ -190,7 +199,7 @@ void QuadrantManager::Update(const std::map<int, representation_ns::RoomNodeRep>
                   warmup_cycles_, wa.yaw_rad * 180.0 / kPi, wa.confidence);
       PublishCrossLines(rooms);
     }
-    else if (FitAxes(rooms, axes_))  // min-rect bounding-box fallback (sets axes_.valid)
+    else if (geometry_ok && FitAxes(rooms, axes_))  // min-rect fallback (needs room polygons)
     {
       const double ang = std::atan2(axes_.east.y(), axes_.east.x());
       frozen_ = true;
@@ -212,9 +221,9 @@ void QuadrantManager::Update(const std::map<int, representation_ns::RoomNodeRep>
   if (debug_log)
   {
     RCLCPP_INFO(rclcpp::get_logger("quadrant"),
-                "[quadrant] fitting: wall_ok=%d yaw=%.1f deg conf=%.2f stable=%d/%d warmup=%d/%d",
-                static_cast<int>(wall_ok), wa.yaw_rad * 180.0 / kPi, wa.confidence, stable_count_,
-                kFreezeStableCycles_, warmup_cycles_, kMaxWarmupCycles_);
+                "[quadrant] fitting: wall_ok=%d geom=%d yaw=%.1f deg conf=%.2f stable=%d/%d warmup=%d/%d",
+                static_cast<int>(wall_ok), static_cast<int>(geometry_ok), wa.yaw_rad * 180.0 / kPi,
+                wa.confidence, stable_count_, kFreezeStableCycles_, warmup_cycles_, kMaxWarmupCycles_);
   }
 }
 
@@ -271,6 +280,41 @@ bool QuadrantManager::FitAxes(const std::map<int, representation_ns::RoomNodeRep
   return true;
 }
 
+std::map<int, navgraph_ns::RoomGrid> QuadrantManager::BuildRoomGrids(
+    const std::map<int, representation_ns::RoomNodeRep>& rooms) const
+{
+  std::map<int, navgraph_ns::RoomGrid> grids;
+  for (const auto& id_room : rooms)
+  {
+    const representation_ns::RoomNodeRep& room = id_room.second;
+    if (!room.IsAlive())
+    {
+      continue;
+    }
+    const double cx = room.centroid_.x();
+    const double cy = room.centroid_.y();
+    // Oriented bbox extents = polygon vertices projected onto east/north, relative
+    // to the centroid (the grid origin). MakeRoomGrid returns an invalid grid if
+    // axes_ is not frozen or the extent is degenerate (< 2 vertices).
+    double e_min = std::numeric_limits<double>::max();
+    double e_max = std::numeric_limits<double>::lowest();
+    double n_min = std::numeric_limits<double>::max();
+    double n_max = std::numeric_limits<double>::lowest();
+    for (const auto& p : room.GetPolygon().polygon.points)
+    {
+      const double dx = p.x - cx;
+      const double dy = p.y - cy;
+      e_min = std::min(e_min, dx * axes_.east.x() + dy * axes_.east.y());
+      e_max = std::max(e_max, dx * axes_.east.x() + dy * axes_.east.y());
+      n_min = std::min(n_min, dx * axes_.north.x() + dy * axes_.north.y());
+      n_max = std::max(n_max, dx * axes_.north.x() + dy * axes_.north.y());
+    }
+    grids[room.GetId()] = navgraph_ns::MakeRoomGrid(Eigen::Vector2d(cx, cy), axes_, e_min, e_max,
+                                                    n_min, n_max, kCenterFraction_);
+  }
+  return grids;
+}
+
 void QuadrantManager::PublishCrossLines(const std::map<int, representation_ns::RoomNodeRep>& rooms)
 {
   if (!axes_.valid)
@@ -288,19 +332,24 @@ void QuadrantManager::PublishCrossLines(const std::map<int, representation_ns::R
   marker.color.a = 1.0;  // fallback; per-vertex colors below take precedence
   marker.pose.orientation.w = 1.0;
 
-  std_msgs::msg::ColorRGBA east_color;
+  std_msgs::msg::ColorRGBA east_color;  // separators running ALONG east (the n_lo/n_hi cuts)
   east_color.r = 1.0;
   east_color.g = 0.0;
   east_color.b = 0.0;
-  east_color.a = 1.0;  // east axis = red
-  std_msgs::msg::ColorRGBA north_color;
+  east_color.a = 1.0;  // red
+  std_msgs::msg::ColorRGBA north_color;  // separators running ALONG north (the e_lo/e_hi cuts)
   north_color.r = 0.1;
   north_color.g = 0.4;
   north_color.b = 1.0;
-  north_color.a = 1.0;  // north axis = blue
+  north_color.a = 1.0;  // blue
+
+  // "#" overhang: each separator extends this fraction of the center-cell size past
+  // the cell corners, so the four lines read as a # rather than a closed box.
+  constexpr double kOverhangFrac = 0.45;
 
   const Eigen::Vector2d e = axes_.east;
   const Eigen::Vector2d n = axes_.north;
+  const std::map<int, navgraph_ns::RoomGrid> grids = BuildRoomGrids(rooms);
   for (const auto& id_room : rooms)
   {
     const representation_ns::RoomNodeRep& room = id_room.second;
@@ -308,51 +357,44 @@ void QuadrantManager::PublishCrossLines(const std::map<int, representation_ns::R
     {
       continue;
     }
-    const auto& pts = room.GetPolygon().polygon.points;
-    if (pts.size() < 2)
+    const auto git = grids.find(room.GetId());
+    if (git == grids.end() || !git->second.valid)
     {
       continue;
     }
+    const navgraph_ns::RoomGrid& g = git->second;
     const double cx = room.centroid_.x();
     const double cy = room.centroid_.y();
     const double cz = room.centroid_.z();
-    double te_min = std::numeric_limits<double>::max();
-    double te_max = std::numeric_limits<double>::lowest();
-    double tn_min = std::numeric_limits<double>::max();
-    double tn_max = std::numeric_limits<double>::lowest();
-    for (const auto& p : pts)
-    {
-      const double dx = p.x - cx;
-      const double dy = p.y - cy;
-      const double te = dx * e.x() + dy * e.y();
-      const double tn = dx * n.x() + dy * n.y();
-      te_min = std::min(te_min, te);
-      te_max = std::max(te_max, te);
-      tn_min = std::min(tn_min, tn);
-      tn_max = std::max(tn_max, tn);
-    }
-    auto make_point = [cz](double x, double y) {
-      geometry_msgs::msg::Point pt;
-      pt.x = x;
-      pt.y = y;
-      pt.z = cz;
-      return pt;
+    const double oh_e = kOverhangFrac * (g.e_hi - g.e_lo);
+    const double oh_n = kOverhangFrac * (g.n_hi - g.n_lo);
+    // (e,n) in the axes frame (origin = centroid) -> world point at the centroid z.
+    auto pt = [&](double pe, double pn) {
+      geometry_msgs::msg::Point p;
+      p.x = cx + pe * e.x() + pn * n.x();
+      p.y = cy + pe * e.y() + pn * n.y();
+      p.z = cz;
+      return p;
     };
-    // East axis line: spans [te_min, te_max] along east, through the centroid.
-    if (te_max - te_min > 1e-3)
+    // Two separators running along NORTH (constant e = e_lo / e_hi), short with
+    // overhang in n -> the two vertical strokes of the #. Color: north (blue).
+    marker.points.push_back(pt(g.e_lo, g.n_lo - oh_n));
+    marker.points.push_back(pt(g.e_lo, g.n_hi + oh_n));
+    marker.points.push_back(pt(g.e_hi, g.n_lo - oh_n));
+    marker.points.push_back(pt(g.e_hi, g.n_hi + oh_n));
+    // Two separators running along EAST (constant n = n_lo / n_hi) -> the two
+    // horizontal strokes. Color: east (red).
+    marker.points.push_back(pt(g.e_lo - oh_e, g.n_lo));
+    marker.points.push_back(pt(g.e_hi + oh_e, g.n_lo));
+    marker.points.push_back(pt(g.e_lo - oh_e, g.n_hi));
+    marker.points.push_back(pt(g.e_hi + oh_e, g.n_hi));
+    for (int k = 0; k < 4; ++k)
     {
-      marker.points.push_back(make_point(cx + te_min * e.x(), cy + te_min * e.y()));
-      marker.points.push_back(make_point(cx + te_max * e.x(), cy + te_max * e.y()));
-      marker.colors.push_back(east_color);
-      marker.colors.push_back(east_color);
+      marker.colors.push_back(north_color);  // first 2 segments (4 verts) = north strokes
     }
-    // North axis line.
-    if (tn_max - tn_min > 1e-3)
+    for (int k = 0; k < 4; ++k)
     {
-      marker.points.push_back(make_point(cx + tn_min * n.x(), cy + tn_min * n.y()));
-      marker.points.push_back(make_point(cx + tn_max * n.x(), cy + tn_max * n.y()));
-      marker.colors.push_back(north_color);
-      marker.colors.push_back(north_color);
+      marker.colors.push_back(east_color);  // next 2 segments (4 verts) = east strokes
     }
   }
   cross_marker_pub_->publish(marker);

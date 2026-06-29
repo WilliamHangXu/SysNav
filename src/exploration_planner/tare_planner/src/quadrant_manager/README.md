@@ -1,11 +1,12 @@
 # Quadrant / Room-Area pipeline
 
-Buckets every scene-graph **waypoint** into one of four room **quadrants** —
-`northeast` / `northwest` / `southeast` / `southwest` — so the exported JSON (and its
-LLM / frontend consumers) can reason about "the NE corner of the kitchen". The
-quadrants are defined by a **single global building orientation** that is **frozen
-once stable** and reused for the run, with each room's axes centered at its
-**centroid**.
+Buckets every scene-graph **waypoint** into one cell of a **3×3 grid** of its room —
+the `center` cell plus the eight compass directions (`north`, `northeast`, `east`,
+`southeast`, `south`, `southwest`, `west`, `northwest`) — so the exported JSON (and
+its LLM / frontend consumers) can reason about "the NE corner of the kitchen". The
+grid is aligned to a **single global building orientation** that is **frozen once
+stable**; each room's **oriented bounding box** is split into equal thirds along each
+axis, and a point's cell is which third it falls in on each axis.
 
 The orientation comes from the building's **walls**. `room_segmentation` already
 detects persistent wall planes, so it estimates the **dominant Manhattan wall
@@ -20,15 +21,16 @@ The feature spans four places but is small and additive:
 1. **`room_segmentation::publishWallAxis()`** estimates the dominant wall orientation
    from `plane_infos_` and publishes `tare_planner/msg/WallAxis` on `/wall_axis`.
 2. **`QuadrantManager`** (this module) subscribes, **freezes** the global axes (wall
-   primary, min-rect fallback at the cap), and draws the per-room cross-lines.
+   primary, min-rect fallback at the cap), builds each room's 3×3 grid, and draws the
+   per-room "#" glyphs.
 3. The **[NavGraph](../navgraph/README.md)** tags each node's `area` live (node
    coloring), reading the frozen axes.
 4. The **[scene-graph exporter](../scene_graph_exporter/README.md)** writes `"area"`
    onto every waypoint and a `compass` into `layout.metadata`.
 
-All consumers read the **same** frozen `BuildingAxes` and the **same** room centroids,
-so the live RViz color and the JSON `area` are literally the same field — they can
-never disagree.
+All consumers read the **same** per-room `RoomGrid`s (built once by `QuadrantManager`),
+so the live RViz node color and the JSON `area` are literally the same field — they
+can never disagree.
 
 ---
 
@@ -36,9 +38,9 @@ never disagree.
 
 | File | Contents |
 |---|---|
-| `include/navgraph/building_axes.h` | Shared primitives: `enum class Area`, `AreaName()`, `struct BuildingAxes`, pure `AssignArea()`. **Eigen-only, ROS-free, OpenCV-free** — the lowest layer, usable by the ROS-free `NavNode` and the OpenCV-free exporter. `navgraph_ns`. |
+| `include/navgraph/building_axes.h` | Shared primitives: `enum class Area` (9 cells), `AreaName()`, `struct BuildingAxes`, `struct RoomGrid` + `MakeRoomGrid()`, pure `AssignArea(p, grid)`. **Eigen-only, ROS-free, OpenCV-free** — the lowest layer, usable by the ROS-free `NavNode` and the OpenCV-free exporter. `navgraph_ns`. |
 | `include/quadrant_manager/quadrant_manager.h` | `QuadrantManager` class declaration (`quadrant_ns`). |
-| `src/quadrant_manager/quadrant_manager.cpp` | `/wall_axis` subscription, `AxesFromAngle` (wall yaw → axes), the freeze state machine (wall primary, min-rect at cap), `FitAxes` (the min-rect fallback), and cross-line viz. The **only** TU pulling `<opencv2/imgproc.hpp>`. |
+| `src/quadrant_manager/quadrant_manager.cpp` | `/wall_axis` subscription, `AxesFromAngle` (wall yaw → axes), the freeze state machine (wall primary, min-rect at cap), `FitAxes` (the min-rect fallback), `BuildRoomGrids` (per-room 3×3 grids), and the "#" grid viz. The **only** TU pulling `<opencv2/imgproc.hpp>`. |
 | `msg/WallAxis.msg` | The wall-orientation message: `yaw_rad`, `confidence`, `support_length`, `valid`. |
 
 Touched elsewhere:
@@ -47,9 +49,9 @@ Touched elsewhere:
 |---|---|
 | `room_segmentation.cpp` / `room_segmentation_node.h` | `publishWallAxis()` (the wall-orientation estimator) + `/wall_axis` publisher + `wall_axis/*` params. |
 | `navgraph_types.h` | `NavNode` gains `Area area`. |
-| `navgraph.{h,cpp}` | `Update()` takes `room_centroids` + `axes`; `TagAreas()`; node marker recolored per quadrant. |
-| `scene_graph_exporter.{h,cpp}` | `Build()`/`BuildRoomJson()` take `axes`; `"area"` per waypoint; `compass`; `compass_radius_m`; `ComputeAabbCenterSource()`. |
-| `sensor_coverage_planner_ground.{cpp,h}` | Owns `quadrant_mgr_`; declares `quadrant/*` params; builds `room_centroids`; orders `quadrant_mgr_->Update()` → `navgraph_->Update()`; passes axes into `Build()`. |
+| `navgraph.{h,cpp}` | `Update()` takes `room_grids`; `TagAreas()` buckets each node into its room's 3×3 grid; node marker colored on the 4 corner cells only. |
+| `scene_graph_exporter.{h,cpp}` | `Build()` takes `axes` + `room_grids`; `BuildRoomJson()` takes the room's grid (wp_0 area); `"area"` per waypoint; `compass`; `ComputeAabbCenterSource()`. |
+| `sensor_coverage_planner_ground.{cpp,h}` | Owns `quadrant_mgr_`; declares `quadrant/*` params; orders `quadrant_mgr_->Update()` → `BuildRoomGrids()` → `navgraph_->Update()`; passes the grids into `Build()`. |
 
 ---
 
@@ -66,14 +68,14 @@ Touched elsewhere:
       │   once per planning cycle (execute()), self-throttled
       ├─ PRIMARY : freeze on a CONFIDENT + STABLE wall yaw  → source=wall
       ├─ FALLBACK: min-rect FitAxes ONLY at the hard cap    → source=minrect_cap
-      └─ PublishCrossLines(): per-room cross ──► RViz /quadrant/cross_marker
-            │  GetAxes()  (frozen BuildingAxes; invalid until freeze)
+      └─ PublishCrossLines(): per-room "#" glyph ──► RViz /quadrant/cross_marker
+            │  GetAxes() + BuildRoomGrids(rooms)  (per-room 3×3 grids; invalid until freeze)
             ├───────────────────────────────┐
             ▼                                ▼
-   NavGraph::Update(..., room_centroids, axes)   SceneGraphExporter::Build(..., axes)
-      └─ TagAreas(): node.area =                    ├─ waypoint "area"
-         AssignArea(node.pos, centroid, axes)       └─ layout.metadata.compass
-      └─ nodes colored by area ──► /navgraph/node_marker
+   NavGraph::Update(..., room_grids)   SceneGraphExporter::Build(..., axes, room_grids)
+      └─ TagAreas(): node.area =          ├─ waypoint "area" (wp_0 via its grid)
+         AssignArea(node.pos, grid)       └─ layout.metadata.compass (uses axes)
+      └─ corner cells colored ──► /navgraph/node_marker
 ```
 
 ---
@@ -88,19 +90,21 @@ unions of rooms), not wall *direction*. So the primary source is the **dominant
 Manhattan wall orientation** estimated from the wall planes: assuming ~90% of walls
 share two orthogonal directions, the wall set has a single grid angle θ∈[0,90°), and
 the axes are {θ, θ+90°}. Building orientation is a *static* property, so it is
-**frozen once** (when a confident wall estimate has held steady) and reused —
-assignment is then a pure, stateless function of (point, room centroid, frozen axes).
-The room centroid is the axis **origin**, so a point's quadrant is the sign of its
-offset projected onto the two axes.
+**frozen once** (when a confident wall estimate has held steady) and reused. Each room
+is then divided into a **3×3 grid**: its polygon is projected onto the frozen axes to
+get an oriented bounding box, each axis extent is split into equal thirds, and a
+point's cell is which third it lands in on each axis (middle × middle = `center`).
+Assignment is a pure, stateless function of (point, that room's `RoomGrid`).
 
 ---
 
 ## Core data structures (`building_axes.h`)
 
 ### `enum class Area`
-`kUnknown(-1)`, `kNorthEast(0)`, `kNorthWest(1)`, `kSouthEast(2)`, `kSouthWest(3)`.
-`AreaName(Area)` maps to the canonical strings emitted into the JSON and the RViz
-labels (`"northeast"`…, `"unknown"`), so the two cannot drift.
+`kUnknown(-1)`, then the nine 3×3 cells: `kCenter(0)`, `kNorth`, `kNorthEast`, `kEast`,
+`kSouthEast`, `kSouth`, `kSouthWest`, `kWest`, `kNorthWest`. `AreaName(Area)` maps to
+the canonical strings (`"center"`, `"north"`, … / `"unknown"`) emitted into the JSON
+and used in the RViz labels, so the two cannot drift.
 
 ### `struct BuildingAxes`
 ```cpp
@@ -111,15 +115,23 @@ bool valid = false;                       // false until the freeze
 (so `north.y > 0`, "up"). A **default-constructed `BuildingAxes{}` is the "not ready"
 sentinel** — `AssignArea` returns `kUnknown` and the exporter omits the compass.
 
-### `Area AssignArea(p, origin, axes)` (pure)
-`d = p − origin`; `east_pos = d·east ≥ 0`; `north_pos = d·north ≥ 0`; map
-`(north_pos, east_pos)` → NE/NW/SE/SW. Tiebreak `≥ 0 → positive` (deterministic). 2D
-only — pass the x,y of 3D positions.
+### `struct RoomGrid` + `MakeRoomGrid(...)`
+A room's 3×3 grid: the global `axes`, the projection `origin` (room centroid), and the
+two third-boundaries on each axis (`e_lo/e_hi`, `n_lo/n_hi`, origin-relative).
+`MakeRoomGrid(origin, axes, e_min, e_max, n_min, n_max, center_fraction)` (pure) splits
+each oriented-bbox extent into bands: the center band spans `center_fraction` of the
+extent (`1/3` ⇒ equal thirds). Invalid axes / degenerate extent ⇒ an invalid grid.
+
+### `Area AssignArea(p, grid)` (pure)
+Project `d = p − origin` onto the axes; classify `e = d·east` and `n = d·north` into
+low / middle / high by the grid's third-boundaries; map the pair to a cell
+(middle × middle = `center`). Boundary points fall into the middle (center-ward) band.
+2D only. `kUnknown` if the grid is invalid (axes not frozen).
 
 ### `NavNode::area` (`navgraph_types.h`)
-The per-node quadrant, tagged each reconcile from the node's room centroid + the
-frozen axes. Stored on the node so it is available **live** (RViz color) and read
-verbatim by the exporter. `kUnknown` until the axes freeze / a node has no room.
+The per-node 3×3 cell, tagged each reconcile from the node's room `RoomGrid`. Stored on
+the node so it is available **live** (RViz color) and read verbatim by the exporter.
+`kUnknown` until the axes freeze / a node has no room.
 
 ---
 
@@ -200,9 +212,9 @@ timeout fired, not stability):
 [quadrant] axes FROZEN source=wall after 7 cycles (stable=5): yaw=18.0 deg conf=0.86 support=24.3 m | east=(0.951,0.309) north=(-0.309,0.951)
 ```
 
-Before freeze, `GetAxes().valid == false` → grey nodes, no cross-lines, no compass;
+Before freeze, `GetAxes().valid == false` → grey nodes, no "#" glyphs, no compass;
 the markers appear at the freeze instant. Once frozen the direction is latched and
-never refit (only each room's cross *center / length* keep tracking the live
+never refit (only each room's "#" *position / size* keeps tracking the live
 centroid/polygon).
 
 ---
@@ -210,11 +222,10 @@ centroid/polygon).
 ## How nodes get tagged — `NavGraph::TagAreas`
 
 Runs after `TagRooms` (needs `room_id`) and before `AssignNames`. For each node with a
-known room and centroid:
-`node.area = AssignArea({pos.x, pos.y}, {centroid.x, centroid.y}, axes)`. No room /
-unknown centroid / unfrozen axes → `kUnknown`. The planner builds the
-`room_id → centroid` map from `Representation::GetRoomNodesMap()` in the same loop that
-builds the room keys, so it covers exactly the alive rooms the exporter emits.
+known room and grid: `node.area = AssignArea({pos.x, pos.y}, room_grids[room_id])`. No
+room / no grid / unfrozen axes → `kUnknown`. The planner builds `room_grids` once via
+`QuadrantManager::BuildRoomGrids(GetRoomNodesMap())` and hands the **same** map to both
+the NavGraph and the exporter — so node cells and `wp_0` cells agree by construction.
 
 ---
 
@@ -228,9 +239,9 @@ Each waypoint object gains an `"area"`:
 
 - **`wp_1..N`** (NavGraph nodes) read `AreaName(node->area)` — the field tagged
   upstream. No recomputation.
-- **`wp_0`** (the room interior point) is assigned the same way, from the room centroid:
-  `AreaName(AssignArea(interior_point, centroid, axes))`. It is **not** a special
-  "center" — the interior point lands wherever it lands in the quadrants.
+- **`wp_0`** (the room interior point) is assigned the same way, from the same room
+  grid: `AreaName(AssignArea(interior_point, room_grids[room.id_]))`. It can be
+  `"center"` or any of the eight directions — wherever the interior point falls.
 
 A **compass** is added to `layout.metadata` so a frontend can draw an oriented compass
 at the right place:
@@ -255,10 +266,10 @@ are not yet frozen or there are no rooms (a frontend treats absence as "not read
 
 | Topic | Type | Style |
 |---|---|---|
-| `quadrant/cross_marker` | `Marker` `LINE_LIST` | Per alive room, two lines through the centroid spanning the room (extents = polygon vertices projected onto the axes). **East line red, north line blue.** One marker, rewritten each publish so dead rooms vanish. Width `kCrossLineWidth`. Only published once the axes are valid. |
-| `navgraph/node_marker` | `Marker` `POINTS` | NavGraph nodes, **per-point colored by quadrant**: NE green, NW blue, SE orange, SW magenta, `kUnknown` grey. Same topic as before — an existing RViz display recolors automatically. |
+| `quadrant/cross_marker` | `Marker` `LINE_LIST` | Per alive room, a small **"#" glyph** at the center of its 3×3 grid — the four third-boundary segments (`e_lo/e_hi/n_lo/n_hi`) drawn short with a 0.45×cell overhang, **not** spanning the room. North-running strokes blue, east-running strokes red. One marker, rewritten each publish so dead rooms vanish. Width `kCrossLineWidth`. Only published once the axes are valid. |
+| `navgraph/node_marker` | `Marker` `POINTS` | NavGraph nodes, colored only on the **four corner cells** (NE green, NW blue, SE orange, SW magenta); `center` + the four edge cells (N/E/S/W) + `kUnknown` are grey. The full 9-way area is still in the JSON — the node viz just highlights corners. Same topic — an existing RViz display recolors automatically. |
 
-All in `world_frame_id` (`map`). To see the cross-lines add a `Marker` display on
+All in `world_frame_id` (`map`). To see the "#" glyphs add a `Marker` display on
 `/quadrant/cross_marker`.
 
 ---
@@ -278,6 +289,7 @@ yaml (`config/go2w_bag_direct.yaml`).
 | `wall_axis/refine_iters` (room_seg) | 2 | circular-mean refine iterations |
 | `quadrant/kWallMinConfidence` | 0.5 | min `/wall_axis` confidence to trust it as primary |
 | `quadrant/kWallMinSupportM` | 3.0 | min `/wall_axis` aligned wall length to trust it (m) |
+| `quadrant/kCenterFraction` | 0.333 | 3×3 center-band size as a fraction of each room extent (1/3 = equal thirds) |
 | `quadrant/kWarmupMinRooms` | 1 | geometry gate (≥ this many alive rooms); fixes single-room/timeout |
 | `quadrant/kWarmupMinVertices` | 8 | geometry gate (≥ total polygon vertices) |
 | `quadrant/kFreezeStableCycles` | 5 | consecutive stable wall-yaw cycles → freeze |
@@ -297,7 +309,7 @@ yaml (`config/go2w_bag_direct.yaml`).
   refine passes) at ~2 Hz — negligible.
 - **QuadrantManager**: one POD copy + a couple of dot products per cycle. `FitAxes`
   (min-rect) now runs at most a few times near the cap, not every warmup cycle.
-- **TagAreas / node recolor / cross-lines**: `O(nodes)` / `O(Σ vertices)`, piggyback
+- **TagAreas / node recolor / "#" glyphs**: `O(nodes)` / `O(Σ vertices)`, piggyback
   existing throttles. Observed `tag_areas 0.00 ms` in the NavGraph Update log.
 
 ---
@@ -316,10 +328,11 @@ yaml (`config/go2w_bag_direct.yaml`).
   schema, and the viz are already per-room-origin).
 - **Pre-freeze is the only path to `"area":"unknown"`** for a roomed, exported node (and
   the only time `compass` is omitted). Freeze is early once walls + rooms exist.
-- **`wp_0` is bucketed, not "center".** The interior point gets a real quadrant relative
-  to the centroid; there is no `"center"` value.
-- **Uneven buckets are expected.** Rooms aren't symmetric about their centroids, so a
-  room can have many NW nodes and no SE node — geometry, not a bug.
+- **9-cell vocabulary.** Each waypoint's `"area"` is one of nine values (`center` + 8
+  directions) — a vocabulary change the JSON/LLM consumer must learn (`center` is now a
+  real value). `wp_0` is bucketed like any other point and can be `center`.
+- **Uneven cell occupancy is expected.** Rooms aren't filled uniformly, so a room can
+  have several `northwest` nodes and no `southeast` node — geometry, not a bug.
 - **Frame.** Axes + assignment live in the source/map frame; the exporter transforms
   only the *finished* compass points through `world_from_source`.
 
@@ -332,10 +345,10 @@ yaml (`config/go2w_bag_direct.yaml`).
 2. `ros2 param set /tare_planner_node quadrant/debug_log true` → repeated
    `fitting: wall_ok=1 yaw=… stable=x/5 …`, then exactly one `axes FROZEN source=wall …`
    (or `source=wall_cap` / `source=minrect_cap` on a no-wall/ambiguous run).
-3. NavGraph Update log: `… | areas NE=.. NW=.. SE=.. SW=.. unk=0` (all `unk` before
-   freeze, none after).
-4. RViz: post-freeze `/quadrant/cross_marker` aligns to the **wall grid** (eyeball vs
-   `/walls`), not the old min-rect diagonal; nodes colored by quadrant.
+3. NavGraph Update log: `… | areas C=.. N=.. NE=.. E=.. SE=.. S=.. SW=.. W=.. NW=.. unk=0`
+   (all `unk` before freeze, none after).
+4. RViz: post-freeze a **"#" glyph** appears at each room's center, aligned to the wall
+   grid (eyeball vs `/walls`); the four corner cells' nodes are colored, the rest grey.
 5. Snapshot JSON: `"area"` per waypoint + `layout.metadata.compass` present, **identical
    shape** to the min-rect version — only the axis angle differs.
 
@@ -345,10 +358,12 @@ yaml (`config/go2w_bag_direct.yaml`).
 
 ```cpp
 // building_axes.h (Eigen-only, ROS-free)
-enum class Area { kUnknown=-1, kNorthEast, kNorthWest, kSouthEast, kSouthWest };
+enum class Area { kUnknown=-1, kCenter, kNorth, kNorthEast, kEast, kSouthEast, kSouth, kSouthWest, kWest, kNorthWest };
 const char* AreaName(Area);
 struct BuildingAxes { Eigen::Vector2d east, north; bool valid; };
-Area AssignArea(const Eigen::Vector2d& p, const Eigen::Vector2d& origin, const BuildingAxes&);
+struct RoomGrid { Eigen::Vector2d origin; BuildingAxes axes; double e_lo,e_hi,n_lo,n_hi; bool valid; };
+RoomGrid MakeRoomGrid(origin, axes, e_min, e_max, n_min, n_max, center_fraction);  // oriented-bbox thirds
+Area AssignArea(const Eigen::Vector2d& p, const RoomGrid& grid);                   // -> one of 9 cells
 
 // tare_planner/msg/WallAxis   (room_segmentation -> /wall_axis, the primary source)
 //   std_msgs/Header header; float64 yaw_rad; float64 confidence; float64 support_length; bool valid
@@ -356,6 +371,7 @@ Area AssignArea(const Eigen::Vector2d& p, const Eigen::Vector2d& origin, const B
 // QuadrantManager (quadrant_ns) — owned and driven by the planner; subscribes /wall_axis
 explicit QuadrantManager(rclcpp::Node::SharedPtr nh);
 void Update(const std::map<int, representation_ns::RoomNodeRep>& rooms, bool debug_log = false);
+std::map<int, navgraph_ns::RoomGrid> BuildRoomGrids(const std::map<int, RoomNodeRep>& rooms) const;
 const navgraph_ns::BuildingAxes& GetAxes() const;   // valid == false until frozen
 bool IsFrozen() const;
 ```

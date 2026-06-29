@@ -116,7 +116,8 @@ public:
       const pcl::PointCloud<pcl::PointXYZRGBL>& door_cloud,
       const Eigen::Isometry3d& world_from_source =
           Eigen::Isometry3d::Identity(),
-      const navgraph_ns::BuildingAxes& axes = {}) const;
+      const navgraph_ns::BuildingAxes& axes = {},
+      const std::map<int, navgraph_ns::RoomGrid>& room_grids = {}) const;
 
   // Stable, human-readable room key, e.g. "kitchen-room_1". Public so the
   // planner can name NavGraph nodes with the same key the exporter uses.
@@ -143,7 +144,7 @@ private:
       const pcl::PointCloud<pcl::PointXYZRGBL>& door_cloud,
       const Eigen::Isometry3d& world_from_source,
       std::map<int, std::string>& nav_id_to_wpid,
-      const navgraph_ns::BuildingAxes& axes) const;
+      const navgraph_ns::RoomGrid& grid) const;
 
   // Emits one object's JSON. Its centroid (ObjectNodeRep::GetPosition) is
   // transformed into world_frame via world_from_source and written as the

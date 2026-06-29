@@ -175,6 +175,7 @@ void SensorCoveragePlanner3D::ReadParameters() {
   this->declare_parameter<double>("quadrant/kCrossLineWidth", 0.08);
   this->declare_parameter<double>("quadrant/kWallMinConfidence", 0.5);  // trust /wall_axis above this
   this->declare_parameter<double>("quadrant/kWallMinSupportM", 3.0);    // and this aligned wall length (m)
+  this->declare_parameter<double>("quadrant/kCenterFraction", 1.0 / 3.0);  // 3x3 center band (1/3 = equal thirds)
   this->declare_parameter<std::string>("quadrant/world_frame_id", kWorldFrameID);
   this->declare_parameter<bool>("quadrant/debug_log", false);  // runtime toggle
 
@@ -4089,23 +4090,20 @@ void SensorCoveragePlanner3D::execute() {
     // tags each NavGraph node with its room id; room_keys names each node with
     // its eventual scene-graph waypoint id (same key the exporter uses).
     std::map<int, std::string> navgraph_room_keys;
-    std::map<int, Eigen::Vector3f> navgraph_room_centroids;
     for (const auto& id_room : representation_->GetRoomNodesMap())
     {
       navgraph_room_keys[id_room.second.id_] =
           scene_graph_exporter_ns::SceneGraphExporter::RoomKey(id_room.second);
-      // Quadrant origin per room: the centroid (same point the exporter uses).
-      navgraph_room_centroids[id_room.second.id_] = id_room.second.centroid_;
     }
-    // Fit + freeze the global building axes (self-throttled) from the room
-    // polygons, then hand the (frozen-or-invalid) axes + centroids to the
-    // NavGraph so each node gets tagged with its room quadrant for live RViz.
+    // Fit + freeze the global building axes (self-throttled), then hand the NavGraph
+    // each room's 3x3 grid so nodes get tagged with their grid cell for live RViz.
     bool quadrant_debug_log = false;
     this->get_parameter("quadrant/debug_log", quadrant_debug_log);
     quadrant_mgr_->Update(representation_->GetRoomNodesMap(), quadrant_debug_log);
+    const auto navgraph_room_grids =
+        quadrant_mgr_->BuildRoomGrids(representation_->GetRoomNodesMap());
     navgraph_->Update(keypose_graph_, room_mask_, shift_, room_resolution_,
-                      navgraph_room_keys, navgraph_room_centroids,
-                      quadrant_mgr_->GetAxes());
+                      navgraph_room_keys, navgraph_room_grids);
 
     int uncovered_point_num = 0;
     int uncovered_frontier_point_num = 0;
@@ -5570,7 +5568,8 @@ void SensorCoveragePlanner3D::SaveSceneGraphSnapshot(const std::string &reason)
   json snapshot = scene_graph_exporter_->Build(
       representation_->GetRoomNodesMap(), representation_->GetObjectNodeRepMap(),
       navgraph_->GetNodes(), navgraph_->GetEdges(), *door_cloud_,
-      scene_graph_world_from_map_, quadrant_mgr_->GetAxes());
+      scene_graph_world_from_map_, quadrant_mgr_->GetAxes(),
+      quadrant_mgr_->BuildRoomGrids(representation_->GetRoomNodesMap()));
 
   // The exporter writes config_.frame as a default; set the true coordinate
   // frame based on whether the world transform was actually applied.

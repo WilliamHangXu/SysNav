@@ -98,14 +98,14 @@ tare_planner_node:
     keypose_graph/kAddEdgeCollisionCheckPointNumThr : 1
 
     # NavGraph (lightweight contraction of the keypose graph for path planning)
-    navigation_graph/kNavNodeMinDist : 3.0
+    navigation_graph/kNavNodeMinDist : 2.5
     navigation_graph/kNavGraphUpdateInterval : 4
 
     # Quadrant / room-area tagging: ONE global building orientation; buckets each
-    # waypoint into NE/NW/SE/SW of its room. Primary source = dominant wall
-    # orientation (/wall_axis from room_segmentation); the minAreaRect-over-room-
-    # polygons fit is used ONLY as a hard-cap fallback. Frozen once stable.
-    # quadrant/debug_log is a runtime toggle.
+    # waypoint into a 3x3 grid of its room (center + 8 compass cells, equal thirds).
+    # Primary source = dominant wall orientation (/wall_axis from room_segmentation);
+    # the minAreaRect-over-room-polygons fit is used ONLY as a hard-cap fallback.
+    # Frozen once stable. quadrant/debug_log is a runtime toggle.
     quadrant/kUpdateInterval : 6
     quadrant/kWarmupMinRooms : 1
     quadrant/kFreezeStableCycles : 5
@@ -113,6 +113,7 @@ tare_planner_node:
     quadrant/kCrossLineWidth : 0.08
     quadrant/kWallMinConfidence : 0.5
     quadrant/kWallMinSupportM : 3.0
+    quadrant/kCenterFraction : 0.333
     quadrant/debug_log : false
 
     # ViewPointManager

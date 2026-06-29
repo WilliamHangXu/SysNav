@@ -107,14 +107,9 @@ nlohmann::json SceneGraphExporter::BuildRoomJson(
     const pcl::PointCloud<pcl::PointXYZRGBL>& door_cloud,
     const Eigen::Isometry3d& world_from_source,
     std::map<int, std::string>& nav_id_to_wpid,
-    const navgraph_ns::BuildingAxes& axes) const
+    const navgraph_ns::RoomGrid& grid) const
 {
   const std::string room_key = RoomKey(room);
-
-  // Quadrant origin = the room centroid (the axes are centered there). Both wp_0
-  // (below, computed here) and the NavGraph nodes (wp_1..N, tagged upstream) use
-  // this same centroid + the same frozen axes, so they agree by construction.
-  const Eigen::Vector2d room_centroid(room.centroid_.x(), room.centroid_.y());
 
   // --- entrances: one per door-adjacent neighbor with door geometry ---
   nlohmann::json entrances = nlohmann::json::array();
@@ -151,10 +146,10 @@ nlohmann::json SceneGraphExporter::BuildRoomJson(
   const Eigen::Vector3d interior_world =
       ToWorld(world_from_source, room.interior_point_.x, room.interior_point_.y,
               room.interior_point_.z);
-  // wp_0 area is assigned like any other point (origin = centroid), so it is not a
-  // special "center" -- the interior point lies wherever it lies in the quadrants.
+  // wp_0 area is assigned like any other point in the room's 3x3 grid -- the
+  // interior point falls wherever it falls (often, but not necessarily, center).
   const navgraph_ns::Area wp0_area = navgraph_ns::AssignArea(
-      Eigen::Vector2d(room.interior_point_.x, room.interior_point_.y), room_centroid, axes);
+      Eigen::Vector2d(room.interior_point_.x, room.interior_point_.y), grid);
   waypoints.push_back(nlohmann::json{
       {"id", room_key + "-wp_0"},
       {"x", interior_world.x()},
@@ -275,7 +270,8 @@ nlohmann::json SceneGraphExporter::Build(
     const std::vector<navgraph_ns::NavEdge>& nav_edges,
     const pcl::PointCloud<pcl::PointXYZRGBL>& door_cloud,
     const Eigen::Isometry3d& world_from_source,
-    const navgraph_ns::BuildingAxes& axes) const
+    const navgraph_ns::BuildingAxes& axes,
+    const std::map<int, navgraph_ns::RoomGrid>& room_grids) const
 {
   nlohmann::json rooms_json = nlohmann::json::object();
   nlohmann::json all_waypoints = nlohmann::json::array();
@@ -299,9 +295,14 @@ nlohmann::json SceneGraphExporter::Build(
     auto nodes_it = nodes_by_room.find(room.id_);
     const std::vector<const navgraph_ns::NavNode*>& room_nav_nodes =
         (nodes_it != nodes_by_room.end()) ? nodes_it->second : kNoNavNodes;
+    // The room's 3x3 grid for wp_0 (wp_1..N read node->area, tagged upstream from
+    // the SAME grids). Missing => default-invalid grid => wp_0 area "unknown".
+    const auto grid_it = room_grids.find(room.id_);
+    const navgraph_ns::RoomGrid grid =
+        (grid_it != room_grids.end()) ? grid_it->second : navgraph_ns::RoomGrid{};
     nlohmann::json room_json =
         BuildRoomJson(room, rooms, objects, room_nav_nodes, door_cloud,
-                      world_from_source, nav_id_to_wpid, axes);
+                      world_from_source, nav_id_to_wpid, grid);
     // Mirror every waypoint id into the flat top-level list.
     for (const auto& wp : room_json["waypoints"])
     {
