@@ -42,16 +42,28 @@ double AngleDiff(double a, double b)
 QuadrantManager::QuadrantManager(rclcpp::Node::SharedPtr nh)
   : world_frame_id_("map")
   , kUpdateInterval_(4)
-  , kWarmupMinRooms_(2)
+  , kWarmupMinRooms_(1)
   , kWarmupMinVertices_(8)
   , kFreezeStableCycles_(5)
   , kMaxWarmupCycles_(60)
   , kFreezeAngleEpsRad_(2.0 * kPi / 180.0)
   , kCrossLineWidth_(0.08)
+  , kWallMinConfidence_(0.5)
+  , kWallMinSupportM_(3.0)
 {
   ReadParameters(nh);
   clock_ = nh->get_clock();
   cross_marker_pub_ = nh->create_publisher<visualization_msgs::msg::Marker>("quadrant/cross_marker", 2);
+  // Primary axis source: the dominant wall orientation from room_segmentation.
+  // Single-threaded executor (this callback + Update both on the planner node) =>
+  // no mutex needed to store the latest measurement.
+  wall_axis_sub_ = nh->create_subscription<tare_planner::msg::WallAxis>(
+      "/wall_axis", 5, [this](const tare_planner::msg::WallAxis::SharedPtr m) {
+        wall_axis_.yaw_rad = m->yaw_rad;
+        wall_axis_.confidence = m->confidence;
+        wall_axis_.support_length = m->support_length;
+        wall_axis_.valid = m->valid;
+      });
 }
 
 void QuadrantManager::ReadParameters(rclcpp::Node::SharedPtr nh)
@@ -62,6 +74,8 @@ void QuadrantManager::ReadParameters(rclcpp::Node::SharedPtr nh)
   nh->get_parameter("quadrant/kFreezeStableCycles", kFreezeStableCycles_);
   nh->get_parameter("quadrant/kMaxWarmupCycles", kMaxWarmupCycles_);
   nh->get_parameter("quadrant/kCrossLineWidth", kCrossLineWidth_);
+  nh->get_parameter("quadrant/kWallMinConfidence", kWallMinConfidence_);
+  nh->get_parameter("quadrant/kWallMinSupportM", kWallMinSupportM_);
   nh->get_parameter("quadrant/world_frame_id", world_frame_id_);
   double eps_deg = kFreezeAngleEpsRad_ * 180.0 / kPi;
   nh->get_parameter("quadrant/kFreezeAngleEpsDeg", eps_deg);
@@ -72,9 +86,21 @@ void QuadrantManager::ReadParameters(rclcpp::Node::SharedPtr nh)
   }
 }
 
+navgraph_ns::BuildingAxes QuadrantManager::AxesFromAngle(double theta) const
+{
+  navgraph_ns::BuildingAxes out;
+  // Reduce to (-pi/4, pi/4] so east is within +/-45 deg of map +X. std::remainder
+  // rounds half-to-even, sending exactly +/-45 deg to +45 deg deterministically.
+  const double tp = std::remainder(theta, kPi / 2.0);
+  out.east = Eigen::Vector2d(std::cos(tp), std::sin(tp));    // east.x = cos(tp) > 0
+  out.north = Eigen::Vector2d(-std::sin(tp), std::cos(tp));  // north.y = cos(tp) > 0 ("up")
+  out.valid = true;
+  return out;
+}
+
 void QuadrantManager::Update(const std::map<int, representation_ns::RoomNodeRep>& rooms, bool debug_log)
 {
-  // Self-throttle (rooms evolve slowly; fitting + viz need not run every cycle).
+  // Self-throttle (rooms/walls evolve slowly; fitting + viz need not run every cycle).
   if ((update_call_count_++ % kUpdateInterval_) != 0)
   {
     return;
@@ -87,7 +113,10 @@ void QuadrantManager::Update(const std::map<int, representation_ns::RoomNodeRep>
     return;
   }
 
-  // Warmup-evidence gate: enough alive rooms + polygon vertices before fitting.
+  // Geometry gate: need >=1 alive room (cross-lines/areas are per-room) with enough
+  // polygon vertices for the eventual min-rect fallback. warmup_cycles_ advances on
+  // GEOMETRY alone, so the hard cap is a real timeout even if a confident wall axis
+  // never arrives (and single-room envs no longer hang).
   int alive_rooms = 0;
   int total_vertices = 0;
   for (const auto& id_room : rooms)
@@ -99,49 +128,93 @@ void QuadrantManager::Update(const std::map<int, representation_ns::RoomNodeRep>
     ++alive_rooms;
     total_vertices += static_cast<int>(id_room.second.GetPolygon().polygon.points.size());
   }
-
-  navgraph_ns::BuildingAxes cand;
-  if (alive_rooms < kWarmupMinRooms_ || total_vertices < kWarmupMinVertices_ || !FitAxes(rooms, cand))
+  if (alive_rooms < kWarmupMinRooms_ || total_vertices < kWarmupMinVertices_)
   {
     if (debug_log)
     {
       RCLCPP_INFO(rclcpp::get_logger("quadrant"),
-                  "[quadrant] warmup waiting: rooms=%d (need>=%d) verts=%d (need>=%d) fit_ok=%d",
-                  alive_rooms, kWarmupMinRooms_, total_vertices, kWarmupMinVertices_,
-                  static_cast<int>(cand.valid));
+                  "[quadrant] waiting for geometry: rooms=%d (need>=%d) verts=%d (need>=%d)",
+                  alive_rooms, kWarmupMinRooms_, total_vertices, kWarmupMinVertices_);
     }
-    return;  // axes_ stays invalid -> no cross-lines, nodes grey
+    return;  // pre-freeze: axes_ invalid -> nothing shown (grey nodes, no cross-lines)
   }
+  ++warmup_cycles_;
 
-  const double ang = std::atan2(cand.east.y(), cand.east.x());
-  if (have_last_angle_ && AngleDiff(ang, last_angle_rad_) <= kFreezeAngleEpsRad_)
+  // PRIMARY source: the latest /wall_axis, when confident enough to trust.
+  const WallAxisState wa = wall_axis_;
+  const bool wall_ok =
+      wa.valid && wa.confidence >= kWallMinConfidence_ && wa.support_length >= kWallMinSupportM_;
+  if (wall_ok)
   {
-    ++stable_count_;
+    if (have_last_angle_ && AngleDiff(wa.yaw_rad, last_angle_rad_) <= kFreezeAngleEpsRad_)
+    {
+      ++stable_count_;
+    }
+    else
+    {
+      stable_count_ = 0;
+    }
+    last_angle_rad_ = wa.yaw_rad;
+    have_last_angle_ = true;
+    if (stable_count_ >= kFreezeStableCycles_)
+    {
+      axes_ = AxesFromAngle(wa.yaw_rad);
+      frozen_ = true;
+      RCLCPP_INFO(rclcpp::get_logger("quadrant"),
+                  "[quadrant] axes FROZEN source=wall after %d cycles (stable=%d): yaw=%.1f deg "
+                  "conf=%.2f support=%.2f m | east=(%.3f,%.3f) north=(%.3f,%.3f)",
+                  warmup_cycles_, stable_count_, wa.yaw_rad * 180.0 / kPi, wa.confidence,
+                  wa.support_length, axes_.east.x(), axes_.east.y(), axes_.north.x(),
+                  axes_.north.y());
+      PublishCrossLines(rooms);
+      return;
+    }
   }
   else
   {
+    // Not trustworthy this cycle -> break the stability streak. Freezing requires a
+    // CONTIGUOUS confident streak, so a flickering wall axis can never accumulate one.
     stable_count_ = 0;
+    have_last_angle_ = false;
   }
-  last_angle_rad_ = ang;
-  have_last_angle_ = true;
-  ++warmup_cycles_;
 
-  if (stable_count_ >= kFreezeStableCycles_ || warmup_cycles_ >= kMaxWarmupCycles_)
+  // HARD CAP: time's up. This is the ONLY place the min-rect fallback is used.
+  if (warmup_cycles_ >= kMaxWarmupCycles_)
   {
-    axes_ = cand;  // latch (cand.valid == true); never refit after this
-    frozen_ = true;
-    RCLCPP_INFO(rclcpp::get_logger("quadrant"),
-                "[quadrant] axes FROZEN after %d cycles (stable=%d): east=(%.3f,%.3f) "
-                "north=(%.3f,%.3f) angle=%.1f deg",
-                warmup_cycles_, stable_count_, axes_.east.x(), axes_.east.y(), axes_.north.x(),
-                axes_.north.y(), ang * 180.0 / kPi);
-    PublishCrossLines(rooms);
+    if (wall_ok)
+    {
+      axes_ = AxesFromAngle(wa.yaw_rad);  // confident wall now wins over min-rect
+      frozen_ = true;
+      RCLCPP_INFO(rclcpp::get_logger("quadrant"),
+                  "[quadrant] axes FROZEN source=wall_cap after %d cycles: yaw=%.1f deg conf=%.2f",
+                  warmup_cycles_, wa.yaw_rad * 180.0 / kPi, wa.confidence);
+      PublishCrossLines(rooms);
+    }
+    else if (FitAxes(rooms, axes_))  // min-rect bounding-box fallback (sets axes_.valid)
+    {
+      const double ang = std::atan2(axes_.east.y(), axes_.east.x());
+      frozen_ = true;
+      RCLCPP_INFO(rclcpp::get_logger("quadrant"),
+                  "[quadrant] axes FROZEN source=minrect_cap after %d cycles (no confident wall): "
+                  "angle=%.1f deg | east=(%.3f,%.3f)",
+                  warmup_cycles_, ang * 180.0 / kPi, axes_.east.x(), axes_.east.y());
+      PublishCrossLines(rooms);
+    }
+    else if (debug_log)
+    {
+      RCLCPP_INFO(rclcpp::get_logger("quadrant"),
+                  "[quadrant] cap reached but no axis source yet (rooms=%d) -- retrying next cycle",
+                  alive_rooms);
+    }
+    return;
   }
-  else if (debug_log)
+
+  if (debug_log)
   {
     RCLCPP_INFO(rclcpp::get_logger("quadrant"),
-                "[quadrant] fitting: angle=%.1f deg stable=%d/%d warmup=%d/%d", ang * 180.0 / kPi,
-                stable_count_, kFreezeStableCycles_, warmup_cycles_, kMaxWarmupCycles_);
+                "[quadrant] fitting: wall_ok=%d yaw=%.1f deg conf=%.2f stable=%d/%d warmup=%d/%d",
+                static_cast<int>(wall_ok), wa.yaw_rad * 180.0 / kPi, wa.confidence, stable_count_,
+                kFreezeStableCycles_, warmup_cycles_, kMaxWarmupCycles_);
   }
 }
 

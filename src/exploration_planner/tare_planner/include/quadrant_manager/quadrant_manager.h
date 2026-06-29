@@ -27,6 +27,7 @@
 
 #include <navgraph/building_axes.h>
 #include <representation/representation.h>
+#include <tare_planner/msg/wall_axis.hpp>
 
 namespace quadrant_ns
 {
@@ -38,11 +39,12 @@ public:
 
   void ReadParameters(rclcpp::Node::SharedPtr nh);
 
-  // Self-throttled (every kUpdateInterval-th call). While not frozen, fits the
-  // global building axes from all alive-room polygons and freezes on warmup
-  // stability; once frozen, stops fitting and only republishes the per-room
-  // quadrant cross-lines. `debug_log` (a runtime planner param, passed in each
-  // call) gates verbose warmup/fit logs; the one-time FREEZE line is always shown.
+  // Self-throttled (every kUpdateInterval-th call). While not frozen: the PRIMARY
+  // axis source is the latest /wall_axis (dominant building-wall orientation),
+  // frozen once it is confident + stable; the min-rect FitAxes fallback is used
+  // ONLY at the hard cap. Once frozen, stops fitting and only republishes the
+  // per-room cross-lines. `debug_log` gates verbose warmup/fit logs; the one-time
+  // FREEZE line is always shown.
   void Update(const std::map<int, representation_ns::RoomNodeRep>& rooms, bool debug_log = false);
 
   // The global axes. valid == false until the warmup freeze completes.
@@ -61,6 +63,10 @@ private:
   // geometry this cycle. On success `out.valid == true`.
   bool FitAxes(const std::map<int, representation_ns::RoomNodeRep>& rooms,
                navgraph_ns::BuildingAxes& out) const;
+  // Build canonicalized axes from a grid angle theta (the wall-axis source): reduce
+  // theta to (-45,45] deg so east is within +/-45 deg of map +X, north = +90 CCW.
+  // Identical canonicalization to FitAxes, so downstream is source-agnostic.
+  navgraph_ns::BuildingAxes AxesFromAngle(double theta) const;
   // Draw, per alive room, the two axis lines through its centroid spanning the
   // room (one LINE_LIST marker, rewritten each publish so dead rooms vanish).
   // No-op until the axes are valid.
@@ -71,8 +77,20 @@ private:
   int update_call_count_ = 0;       // self-throttle counter
   int warmup_cycles_ = 0;           // successful-fit cycles before freeze
   int stable_count_ = 0;            // consecutive angle-stable fits
-  double last_angle_rad_ = 0.0;     // east angle of the previous fit
+  double last_angle_rad_ = 0.0;     // last grid angle tracked for stability
   bool have_last_angle_ = false;
+
+  // Latest /wall_axis measurement (the primary axis source). Written by the
+  // subscription callback, read in Update(). Both run on the planner's
+  // single-threaded executor, so no mutex is needed.
+  struct WallAxisState
+  {
+    double yaw_rad = 0.0;
+    double confidence = 0.0;
+    double support_length = 0.0;
+    bool valid = false;
+  } wall_axis_;
+  rclcpp::Subscription<tare_planner::msg::WallAxis>::SharedPtr wall_axis_sub_;
 
   rclcpp::Clock::SharedPtr clock_;
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr cross_marker_pub_;
@@ -85,6 +103,8 @@ private:
   int kMaxWarmupCycles_;
   double kFreezeAngleEpsRad_;  // angle-stability tolerance (param given in deg)
   double kCrossLineWidth_;
+  double kWallMinConfidence_;  // min /wall_axis confidence to trust it as primary
+  double kWallMinSupportM_;    // min /wall_axis aligned wall length to trust it (m)
 };
 }  // namespace quadrant_ns
 

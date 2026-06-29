@@ -74,6 +74,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/TargetObjectInstruction.msg"
   "msg/TargetObject.msg"
   "msg/TargetObjectWithSpatial.msg"
+  "msg/WallAxis.msg"
  DEPENDENCIES std_msgs geometry_msgs sensor_msgs
 )
 

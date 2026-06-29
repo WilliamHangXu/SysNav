@@ -167,12 +167,14 @@ void SensorCoveragePlanner3D::ReadParameters() {
 
   // quadrant (room area / building-axes tagging; read by QuadrantManager)
   this->declare_parameter<int>("quadrant/kUpdateInterval", 4);
-  this->declare_parameter<int>("quadrant/kWarmupMinRooms", 2);
+  this->declare_parameter<int>("quadrant/kWarmupMinRooms", 1);  // geometry gate (>=1 room)
   this->declare_parameter<int>("quadrant/kWarmupMinVertices", 8);
   this->declare_parameter<int>("quadrant/kFreezeStableCycles", 5);
   this->declare_parameter<double>("quadrant/kFreezeAngleEpsDeg", 2.0);
   this->declare_parameter<int>("quadrant/kMaxWarmupCycles", 60);
   this->declare_parameter<double>("quadrant/kCrossLineWidth", 0.08);
+  this->declare_parameter<double>("quadrant/kWallMinConfidence", 0.5);  // trust /wall_axis above this
+  this->declare_parameter<double>("quadrant/kWallMinSupportM", 3.0);    // and this aligned wall length (m)
   this->declare_parameter<std::string>("quadrant/world_frame_id", kWorldFrameID);
   this->declare_parameter<bool>("quadrant/debug_log", false);  // runtime toggle
 

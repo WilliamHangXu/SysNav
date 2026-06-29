@@ -52,6 +52,7 @@
 // Custom messages
 #include "tare_planner/msg/room_node.hpp"
 #include "tare_planner/msg/room_node_list.hpp"
+#include "tare_planner/msg/wall_axis.hpp"
 #include "representation/representation.h"
 
 
@@ -121,6 +122,8 @@ private:
     void publishRoomNodes();
     void publishRoomPolygon();
     void publishDoorCloud();
+    // Estimate + publish the dominant building-wall orientation from plane_infos_.
+    void publishWallAxis();
 
     // ==================== ROS2 Interfaces ====================
     
@@ -145,6 +148,7 @@ private:
     rclcpp::Publisher<tare_planner::msg::RoomNode>::SharedPtr pub_room_node_;
     rclcpp::Publisher<tare_planner::msg::RoomNodeList>::SharedPtr pub_room_node_list_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_room_map_cloud_;
+    rclcpp::Publisher<tare_planner::msg::WallAxis>::SharedPtr pub_wall_axis_;
 
     // Timer
     rclcpp::TimerBase::SharedPtr timer_;
@@ -174,6 +178,12 @@ private:
     bool is_debug_; // whether to save debug images
     std::vector<int> room_voxel_dimension_;
     float cloud_pose_lag_dist_; // freshness gate: skip destructive wall ops when the registered cloud lags the pose by more than this (m)
+    // Wall-axis estimator (dominant building orientation from plane_infos_).
+    float wall_axis_min_wall_len_;       // drop walls shorter than this (m) from voting
+    int   wall_axis_hist_bins_;          // phi histogram bins (4 deg/bin = 1 deg in theta)
+    float wall_axis_inlier_window_deg_;  // inlier half-window in theta-degrees (x4 in phi)
+    float wall_axis_min_total_len_;      // min total wall length for a valid estimate (m)
+    int   wall_axis_refine_iters_;       // circular-mean refine iterations
 
     // ==================== Point Clouds ====================
     pcl::PointCloud<pcl::PointXYZINormal>::Ptr laser_cloud_;

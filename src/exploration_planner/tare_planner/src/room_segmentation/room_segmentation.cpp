@@ -113,6 +113,18 @@ RoomSegmentationNode::RoomSegmentationNode()
     this->declare_parameter<float>("cloud_pose_lag_dist", 0.3f);
     this->get_parameter("cloud_pose_lag_dist", cloud_pose_lag_dist_);
 
+    // Wall-axis estimator (dominant building orientation from plane_infos_).
+    this->declare_parameter<float>("wall_axis/min_wall_len", 0.5f);
+    this->declare_parameter<int>("wall_axis/hist_bins", 90);
+    this->declare_parameter<float>("wall_axis/inlier_window_deg", 6.0f);
+    this->declare_parameter<float>("wall_axis/min_total_len", 3.0f);
+    this->declare_parameter<int>("wall_axis/refine_iters", 2);
+    this->get_parameter("wall_axis/min_wall_len", wall_axis_min_wall_len_);
+    this->get_parameter("wall_axis/hist_bins", wall_axis_hist_bins_);
+    this->get_parameter("wall_axis/inlier_window_deg", wall_axis_inlier_window_deg_);
+    this->get_parameter("wall_axis/min_total_len", wall_axis_min_total_len_);
+    this->get_parameter("wall_axis/refine_iters", wall_axis_refine_iters_);
+
     // --- Multi-robot portability: one knob (robot_namespace) ---
     // Robot-source inputs become /<robot_namespace>/<suffix>; /occupied_cloud,
     // /freespace_cloud and /keyboard_input are internal and stay constant. Empty
@@ -240,6 +252,7 @@ RoomSegmentationNode::RoomSegmentationNode()
     pub_room_node_ = this->create_publisher<tare_planner::msg::RoomNode>("/room_nodes", 50);
     pub_room_node_list_ = this->create_publisher<tare_planner::msg::RoomNodeList>("/room_nodes_list", 5);
     pub_room_map_cloud_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/room_map_cloud", 5);
+    pub_wall_axis_ = this->create_publisher<tare_planner::msg::WallAxis>("/wall_axis", 5);
 
     // ==================== Create Timer ====================
     timer_ = this->create_wall_timer(
@@ -261,6 +274,7 @@ void RoomSegmentationNode::timerCallback() {
             publishRoomNodes();
             publishDoorCloud();
             publishRoomPolygon();
+            publishWallAxis();
         }
         return;
     }
@@ -270,6 +284,7 @@ void RoomSegmentationNode::timerCallback() {
         publishRoomNodes();
         publishDoorCloud();
         publishRoomPolygon();
+        publishWallAxis();
     }
 }
 
@@ -2334,6 +2349,99 @@ void RoomSegmentationNode::publishRoomPolygon() {
         marker_array.markers.push_back(marker);
     }
     pub_polygon_->publish(marker_array);
+}
+
+void RoomSegmentationNode::publishWallAxis() {
+    // Estimate ONE dominant Manhattan grid angle from the persistent wall planes
+    // and publish it. The two building axes are {yaw, yaw + pi/2}. Robust to the
+    // non-Manhattan minority via length-weighted circular histogram MODE + refine.
+    constexpr double kPi = 3.14159265358979323846;
+    constexpr double kTwoPi = 2.0 * kPi;
+
+    tare_planner::msg::WallAxis msg;
+    msg.header.frame_id = "map";
+    msg.header.stamp = this->now();
+
+    // One vote per real wall: skip absorbed (merged) / dead planes (mirrors the
+    // /walls-mask draw predicate -> no double-count) and drop stubs. u_dir is the
+    // unit horizontal along-wall direction in the map frame; width is its length.
+    std::vector<double> phi;     // folded angle wrap2pi(4 * along-wall-angle)
+    std::vector<double> weight;  // wall length
+    double total_w = 0.0;
+    for (const auto &plane : plane_infos_) {
+        if (plane.merged || !plane.alive) continue;
+        if (plane.width < wall_axis_min_wall_len_) continue;
+        const double a = std::atan2(static_cast<double>(plane.u_dir.y()),
+                                    static_cast<double>(plane.u_dir.x()));
+        // x4 collapses the two orthogonal Manhattan families AND the 180-deg line
+        // ambiguity onto a single point of the circle.
+        double p = std::fmod(4.0 * a, kTwoPi);
+        if (p < 0.0) p += kTwoPi;
+        phi.push_back(p);
+        weight.push_back(static_cast<double>(plane.width));
+        total_w += static_cast<double>(plane.width);
+    }
+
+    if (phi.empty() || total_w < wall_axis_min_total_len_) {
+        msg.valid = false;
+        msg.yaw_rad = 0.0;
+        msg.confidence = 0.0;
+        msg.support_length = 0.0;
+        pub_wall_axis_->publish(msg);
+        return;
+    }
+
+    // Length-weighted circular histogram over [0, 2pi), 3-tap RING-smoothed, then
+    // argmax -> seed. Circular smoothing keeps an axis-aligned cluster that
+    // straddles the phi=0/2pi seam (the common ~0-deg building) from hiding its peak.
+    const int B = std::max(8, wall_axis_hist_bins_);
+    std::vector<double> hist(B, 0.0);
+    const double bin_w = kTwoPi / B;
+    for (size_t i = 0; i < phi.size(); ++i) {
+        int b = static_cast<int>(phi[i] / bin_w);
+        if (b >= B) b = B - 1;
+        if (b < 0) b = 0;
+        hist[b] += weight[i];
+    }
+    int best_b = 0;
+    double best_s = -1.0;
+    for (int b = 0; b < B; ++b) {
+        const double s = hist[(b - 1 + B) % B] + hist[b] + hist[(b + 1) % B];
+        if (s > best_s) { best_s = s; best_b = b; }
+    }
+    double seed = (best_b + 0.5) * bin_w;
+
+    // Refine: gather inliers within +/-window (circular distance), take their
+    // length-weighted circular mean (atan2 is wrap-correct). Repeat a couple times.
+    const double window = static_cast<double>(wall_axis_inlier_window_deg_) * kPi / 180.0 * 4.0;
+    double support = 0.0;
+    const int iters = std::max(1, wall_axis_refine_iters_);
+    for (int it = 0; it < iters; ++it) {
+        double C = 0.0, S = 0.0, Win = 0.0;
+        for (size_t i = 0; i < phi.size(); ++i) {
+            const double d = std::atan2(std::sin(phi[i] - seed), std::cos(phi[i] - seed));
+            if (std::fabs(d) <= window) {
+                C += weight[i] * std::cos(phi[i]);
+                S += weight[i] * std::sin(phi[i]);
+                Win += weight[i];
+            }
+        }
+        if (Win > 0.0) seed = std::atan2(S, C);
+        support = Win;
+    }
+
+    double theta = std::fmod(seed / 4.0, kPi / 2.0);  // grid angle
+    if (theta < 0.0) theta += kPi / 2.0;              // -> [0, pi/2)
+
+    msg.yaw_rad = theta;
+    msg.support_length = support;
+    msg.confidence = (total_w > 0.0) ? (support / total_w) : 0.0;
+    msg.valid = (support > 0.0);
+    pub_wall_axis_->publish(msg);
+
+    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                         "[wall_axis] yaw=%.1f deg conf=%.2f support=%.2f m walls=%zu",
+                         theta * 180.0 / kPi, msg.confidence, support, phi.size());
 }
 
 void RoomSegmentationNode::publishDoorCloud() {
