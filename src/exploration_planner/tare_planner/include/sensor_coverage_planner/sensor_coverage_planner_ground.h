@@ -24,11 +24,9 @@
 #include <message_filters/time_synchronizer.h>
 #include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/rclcpp.hpp>
-#include <sensor_msgs/msg/joy.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
 #include <std_msgs/msg/bool.hpp>
-#include <std_msgs/msg/empty.hpp>
 #include <std_msgs/msg/float32.hpp>
 #include <std_msgs/msg/int32.hpp>
 #include <std_msgs/msg/string.hpp>
@@ -77,9 +75,6 @@
 #include "tare_planner/msg/room_node.hpp"
 #include "tare_planner/msg/room_node_list.hpp"
 #include "tare_planner/msg/room_type.hpp"
-#include "tare_planner/msg/room_early_stop1.hpp"
-#include "tare_planner/msg/vlm_answer.hpp"
-#include "tare_planner/msg/navigation_query.hpp"
 #include <filesystem>
 #include <unordered_map>
 #include <nlohmann/json.hpp>
@@ -105,7 +100,6 @@ public:
 private:
   // Parameters
   // String
-  std::string sub_start_exploration_topic_;
   std::string sub_keypose_topic_;
   std::string sub_state_estimation_topic_;
   std::string sub_registered_scan_topic_;
@@ -114,10 +108,7 @@ private:
   std::string sub_terrain_map_ext_topic_;
   std::string sub_coverage_boundary_topic_;
   std::string sub_viewpoint_boundary_topic_;
-  std::string sub_viewpoint_room_boundary_topic_;
   std::string sub_nogo_boundary_topic_;
-  std::string sub_joystick_topic_;
-  std::string sub_reset_waypoint_topic_;
 
   std::string pub_exploration_finish_topic_;
   std::string pub_runtime_breakdown_topic_;
@@ -126,7 +117,6 @@ private:
   std::string pub_momentum_activation_count_topic_;
 
   // Bool
-  bool kAutoStart;
   bool kRushHome;
   bool kUseTerrainHeight;
   bool kCheckTerrainCollision;
@@ -147,7 +137,6 @@ private:
   // Int
   int kDirectionChangeCounterThr;
   int kDirectionNoChangeCounterThr;
-  int kResetWaypointJoystickAxesID;
   int previous_room_id_;
 
   std::shared_ptr<pointcloud_utils_ns::PCLCloud<PlannerCloudPointType>>
@@ -218,7 +207,6 @@ private:
   bool initialized_;
   bool lookahead_point_update_;
   bool relocation_;
-  bool start_exploration_;
   bool exploration_finished_;
   bool near_home_;
   bool at_home_;
@@ -245,12 +233,10 @@ private:
 
   double start_time_;
   double global_direction_switch_time_;
-  double reset_waypoint_joystick_axis_value_;
 
   rclcpp::TimerBase::SharedPtr execution_timer_;
 
   // ROS subscribers
-  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr exploration_start_sub_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr
       registered_scan_sub_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr
@@ -264,11 +250,7 @@ private:
   rclcpp::Subscription<geometry_msgs::msg::PolygonStamped>::SharedPtr
       viewpoint_boundary_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PolygonStamped>::SharedPtr
-      viewpoint_room_boundary_sub_;
-  rclcpp::Subscription<geometry_msgs::msg::PolygonStamped>::SharedPtr
       nogo_boundary_sub_;
-  rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joystick_sub_;
-  rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr reset_waypoint_sub_;
 
   // ROS publishers
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr global_path_full_publisher_;
@@ -293,8 +275,6 @@ private:
   void InitializeData();
 
   // Callback functions
-  void
-  ExplorationStartCallback(const std_msgs::msg::Bool::ConstSharedPtr start_msg);
   void StateEstimationCallback(
       const nav_msgs::msg::Odometry::ConstSharedPtr state_estimation_msg);
   void RegisteredScanCallback(
@@ -309,8 +289,6 @@ private:
       const geometry_msgs::msg::PolygonStamped::ConstSharedPtr polygon_msg);
   void NogoBoundaryCallback(
       const geometry_msgs::msg::PolygonStamped::ConstSharedPtr polygon_msg);
-  void JoystickCallback(const sensor_msgs::msg::Joy::ConstSharedPtr joy_msg);
-  void ResetWaypointCallback(const std_msgs::msg::Empty::ConstSharedPtr empty_msg);
 
   void SendInitialWaypoint();
   void UpdateKeyposeGraph();
@@ -415,8 +393,7 @@ private:
                          float lidarRoll, float lidarPitch, float lidarYaw,
                          float &depth_out) const;
   // Emit a room-type query (best-3 image paths + object inventory) for each
-  // room whose evidence changed since its last query (rate-limited). Separate
-  // from UpdateRoomLabel so the navigation early-stop logic stays untouched.
+  // room whose evidence changed since its last query (rate-limited).
   void PublishRoomTypeQueries();
   // Debug: dump a room-type query's payload (paths + objects + scalars) as JSON.
   void LogRoomTypeQuery(const tare_planner::msg::RoomType &msg);
@@ -539,8 +516,6 @@ private:
   int room_finished_counter_;
   float room_resolution_;
   float occupancy_grid_resolution_;
-  double kRushRoomDist_1;
-  double kRushRoomDist_2;
   
   // Object detection parameters
   rclcpp::Time last_object_update_time_;
