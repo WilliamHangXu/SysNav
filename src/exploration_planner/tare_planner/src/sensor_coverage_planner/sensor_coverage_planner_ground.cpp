@@ -622,20 +622,9 @@ void SensorCoveragePlanner3D::InitializeData() {
       shared_from_this(), "door_cloud_vis", kWorldFrameID);
   door_cloud_in_range_ = std::make_shared<pointcloud_utils_ns::PCLCloud<pcl::PointXYZLNormal>>(
       shared_from_this(), "door_cloud_in_range", kWorldFrameID);
-  door_position_ = Eigen::Vector3d(-10000.0, -10000.0, -10000.0);
-  door_normal_ = Eigen::Vector3d(0.0, 0.0, 0.0);
 
   // Room state flags initialization
-  ask_vlm_near_room_ = false;
-  ask_vlm_finish_room_ = false;
-  ask_vlm_change_room_ = false;
-  transit_across_room_ = false;
-  at_room_ = false;
-  near_room_1_ = false;
-  near_room_2_ = false;
   enter_wrong_room_ = false;
-  asked_in_advance_ = false;
-  has_candidate_room_position_ = false;
 
   // Room data structures initialization
   adjacency_matrix = Eigen::MatrixXi::Zero(200, 200);
@@ -651,22 +640,11 @@ void SensorCoveragePlanner3D::InitializeData() {
 
   // Room IDs and positions initialization
   current_room_id_ = -1;
-  target_room_id_ = -1;
-  start_room_id_ = -1;
-  end_room_id_ = -1;
-  prev_room_id_ = -1;
   previous_room_id_ = -1;
   robot_position_old_ = robot_position_;
-  goal_position_.x = -10000.0;
-  goal_position_.y = -10000.0;
-  goal_position_.z = -10000.0;
-  candidate_room_position_ = geometry_msgs::msg::Point();
 
   // Room counters and parameters initialization
-  room_guide_counter_ = 0;
   room_id_change_counter_ = 0;
-  room_navigation_query_counter_ = 0;
-  stayed_in_room_counter_ = 0;
   room_finished_counter_ = 0;
   room_resolution_ = this->get_parameter("room_resolution").as_double();
   occupancy_grid_resolution_ = resolution;
@@ -707,7 +685,7 @@ SensorCoveragePlanner3D::SensorCoveragePlanner3D()
       reset_waypoint_(false), registered_cloud_count_(0), keypose_count_(0),
       direction_change_count_(0), direction_no_change_count_(0),
       momentum_activation_count_(0), reset_waypoint_joystick_axis_value_(-1.0),
-      add_viewpoint_rep_(false), at_room_(false), near_room_1_(false), near_room_2_(false),
+      add_viewpoint_rep_(false),
       scene_graph_snapshot_count_(0), scene_graph_final_saved_(false),
       scene_graph_clock_started_(false)
 {
@@ -905,10 +883,6 @@ bool SensorCoveragePlanner3D::initialize() {
       "/room_nodes_list", 5,
       std::bind(&SensorCoveragePlanner3D::RoomNodeListCallback, this,
                 std::placeholders::_1));
-  goal_point_sub_ = this->create_subscription<geometry_msgs::msg::PointStamped>(
-      "/goal_point", 5,
-      std::bind(&SensorCoveragePlanner3D::GoalPointCallback, this,
-                std::placeholders::_1));
   room_mask_sub_ = this->create_subscription<sensor_msgs::msg::Image>(
       "/room_mask", 5,
       std::bind(&SensorCoveragePlanner3D::RoomMaskCallback, this,
@@ -934,10 +908,6 @@ bool SensorCoveragePlanner3D::initialize() {
   room_type_sub_ = this->create_subscription<tare_planner::msg::RoomType>(
       "/room_type_answer", 10,
       std::bind(&SensorCoveragePlanner3D::RoomTypeCallback, this,
-                std::placeholders::_1));
-  room_navigation_answer_sub_ = this->create_subscription<tare_planner::msg::VlmAnswer>(
-      "/room_navigation_answer", 5,
-      std::bind(&SensorCoveragePlanner3D::RoomNavigationAnswerCallback, this,
                 std::placeholders::_1));
   keyboard_input_sub_ = this->create_subscription<std_msgs::msg::String>(
       "/keyboard_input", 5,
@@ -977,29 +947,16 @@ bool SensorCoveragePlanner3D::initialize() {
     "object_visibility_connections", 1);
   viewpoint_visibility_pub_ = this ->create_publisher<std_msgs::msg::String>(
       "viewpoint_object_visibility", 1);
-  door_position_pub_ =
-      this->create_publisher<geometry_msgs::msg::PointStamped>(
-          "/door_position", 1);
-  door_normal_pub_ = this->create_publisher<visualization_msgs::msg::Marker>(
-      "/door_normal", 1);
   room_cloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
       "/room_cloud", 1);
   room_type_pub_ = this->create_publisher<tare_planner::msg::RoomType>(
       "/room_type_query", 10);
-  room_early_stop_1_pub_ = this->create_publisher<tare_planner::msg::RoomEarlyStop1>(
-      "/room_early_stop_1", 10);
   room_type_vis_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>(
       "/room_type_vis", 5);
   viewpoint_room_id_marker_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>(
       "viewpoint_room_ids", 1);
-  room_navigation_query_pub_ = this->create_publisher<tare_planner::msg::NavigationQuery>(
-      "/room_navigation_query", 5);
   object_node_marker_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>(
       "/object_node_markers", 1);
-  chosen_room_boundary_pub_ = this->create_publisher<visualization_msgs::msg::Marker>(
-      "/chosen_room_boundary", 1);
-  room_anchor_point_pub_ = this->create_publisher<geometry_msgs::msg::PointStamped>(
-      "/room_anchor_point", 5);
 
   PrintExplorationStatus("Exploration Started", false);
   return true;
@@ -1500,67 +1457,6 @@ void SensorCoveragePlanner3D::RoomMaskCallback(
   }
 }
 
-void SensorCoveragePlanner3D::GoalPointCallback(
-  const geometry_msgs::msg::PointStamped::ConstSharedPtr goal_point_msg)
-{
-  if (!initialized_)
-  {
-    return;
-  }
-  // Check if current room id is initialized
-  if (current_room_id_ == -1)
-  {
-    RCLCPP_ERROR(this->get_logger(), "Current room id is -1, not initialized");
-    return;
-  }
-
-  // Convert goal point to Eigen
-  Eigen::Vector3f goal_position_float(
-    goal_point_msg->point.x,
-    goal_point_msg->point.y,
-    goal_point_msg->point.z);
-  Eigen::Vector3i goal_position_voxel = misc_utils_ns::point_to_voxel(
-    goal_position_float, shift_, 1.0 / room_resolution_);
-
-  // Check bounds
-  if (goal_position_voxel.x() < 0 || goal_position_voxel.x() >= room_mask_.rows ||
-    goal_position_voxel.y() < 0 || goal_position_voxel.y() >= room_mask_.cols)
-  {
-    RCLCPP_ERROR(this->get_logger(), "Goal point is out of room mask bounds");
-    return;
-  }
-
-  geometry_msgs::msg::Point goal_position;
-  goal_position.x = goal_point_msg->point.x;
-  goal_position.y = goal_point_msg->point.y;
-  goal_position.z = goal_point_msg->point.z;
-
-  target_room_id_ = room_mask_.at<int>(goal_position_voxel.x(), goal_position_voxel.y());
-  // RCLCPP_INFO(this->get_logger(), "Target room id: %d", target_room_id_);
-
-  // If goal is in the same room, no need to transit
-  if (target_room_id_ == current_room_id_ && !transit_across_room_)
-  {
-    // RCLCPP_INFO(this->get_logger(), "Goal point is in the same room as the robot");
-    ResetRoomInfo();
-    return;
-  }
-
-  transit_across_room_ = true;
-
-  // Update goal position
-  goal_position_.x = goal_point_msg->point.x;
-  goal_position_.y = goal_point_msg->point.y;
-  goal_position_.z = goal_point_msg->point.z;
-
-  // republish the goal point using room_anchor_point_pub_
-  geometry_msgs::msg::PointStamped goal_point_repub;
-  goal_point_repub.header.frame_id = "map";
-  goal_point_repub.header.stamp = this->now();
-  goal_point_repub.point = goal_position;
-  room_anchor_point_pub_->publish(goal_point_repub);
-}
-
 void SensorCoveragePlanner3D::RoomTypeCallback(
     const tare_planner::msg::RoomType::ConstSharedPtr room_type_msg)
 {
@@ -1632,57 +1528,6 @@ void SensorCoveragePlanner3D::RoomTypeCallback(
                     current_room_type_new_);
 }
 
-void SensorCoveragePlanner3D::RoomNavigationAnswerCallback(
-    const tare_planner::msg::VlmAnswer::ConstSharedPtr msg)
-{
-  if (!initialized_ || transit_across_room_)
-  {
-    return;
-  }
-  if (msg->answer_type == 1) // answer_type == 1, ask vlm for early stop
-  {
-    int answer = msg->room_id;
-    if (!representation_->HasRoomNode(answer)) {
-      RCLCPP_WARN(this->get_logger(), "Room with id %d does not exist in representation, cannot process answer", answer);
-      return;
-    }
-    // always trust the anchor point in the message
-    auto &room_node = representation_->GetRoomNode(answer);
-    ask_vlm_finish_room_ = false;
-    // create a new pointer (geomsg) point to the room_node.anchor_point
-    geometry_msgs::msg::PointStamped::SharedPtr geomsg(
-        new geometry_msgs::msg::PointStamped());
-    geomsg->header.frame_id = "map";
-    geomsg->header.stamp = this->now();
-    geomsg->point.x = msg->anchor_point.x;
-    geomsg->point.y = msg->anchor_point.y;
-    geomsg->point.z = msg->anchor_point.z;
-    GoalPointCallback(geomsg);
-  }
-  else // answer_type == 0, room navigation query
-  {
-    // get the answer of ask vlm finish room in advance
-    int answer = msg->room_id;
-    if (!representation_->HasRoomNode(answer))
-    {
-      RCLCPP_ERROR(this->get_logger(), "Next chosen room id %d is out of bounds",
-                   answer);
-      return;
-    }
-    auto &room_node = representation_->GetRoomNode(answer);
-    if (!(room_node.IsLabeled() || !room_node.GetObjectIndices().empty()) || room_node.IsCovered())
-    {
-      RCLCPP_ERROR(this->get_logger(), "Next chosen room id %d should not be in the candidate list",
-                   answer);
-      return;
-    }
-    candidate_room_position_.x = room_node.anchor_point_.x;
-    candidate_room_position_.y = room_node.anchor_point_.y;
-    candidate_room_position_.z = room_node.anchor_point_.z;
-    has_candidate_room_position_ = true;
-  }
-}
-
 void SensorCoveragePlanner3D::KeyboardInputCallback(const std_msgs::msg::String::ConstSharedPtr keyboard_input_msg)
 {
   if (keyboard_input_msg->data == "reset")
@@ -1693,104 +1538,6 @@ void SensorCoveragePlanner3D::KeyboardInputCallback(const std_msgs::msg::String:
   {
     SaveSceneGraphSnapshot("manual");
   }
-}
-
-// ================== Set and Reset Room Info ==================
-void SensorCoveragePlanner3D::SetStartAndEndRoomId()
-{
-  // determine which room the goal point is in and which room the robot is in
-  int target_room_id_ = -1;
-  Eigen::Vector3f goal_position_float(goal_position_.x, goal_position_.y, goal_position_.z);
-  Eigen::Vector3i goal_position_voxel = misc_utils_ns::point_to_voxel(
-      goal_position_float, shift_, 1.0 / room_resolution_);
-  if (goal_position_voxel.x() < 0 || goal_position_voxel.x() >= room_mask_.rows ||
-      goal_position_voxel.y() < 0 || goal_position_voxel.y() >= room_mask_.cols)
-  {
-    RCLCPP_ERROR(this->get_logger(), "Goal point is out of room mask bounds");
-  }
-  else
-  {
-    target_room_id_ = room_mask_.at<int>(goal_position_voxel.x(),
-                                         goal_position_voxel.y());
-  }
-
-  if (target_room_id_ == current_room_id_ && !transit_across_room_)
-  {
-    // RCLCPP_INFO(this->get_logger(), "Goal point is in the same room as the robot");
-    ResetRoomInfo();
-    return;
-  }
-
-  // RCLCPP_INFO(this->get_logger(), "Current room id: %d, Target room id: %d",
-  //             current_room_id_, target_room_id_);
-
-  // find a feasible path from the current room to the target room using the adjacency matrix
-  std::vector<int> path = misc_utils_ns::find_path_bfs(current_room_id_ - 1, target_room_id_ - 1, adjacency_matrix);
-
-  // print the path
-  if (path.empty() || path.size() < 2)
-  {
-    if (door_position_.x() != -10000.0)
-    {
-      RCLCPP_ERROR(this->get_logger(), "No path found from current room to target room, continue using the last room position");
-      return;
-    }
-    else
-    {
-      RCLCPP_ERROR(this->get_logger(), "No path found from current room to target room");
-      ResetRoomInfo();
-      return;
-    }
-  }
-  // RCLCPP_INFO(this->get_logger(), "Path from current room to target room:");
-  for (int i = 0; i < path.size(); i++)
-  {
-    // RCLCPP_INFO(this->get_logger(), "%d", path[i] + 1);
-  }
-  // 取出path上最后两个房间的id作为起始和结束房间id
-  start_room_id_ = path[path.size() - 2] + 1; // +1 to convert to 1-based index
-  end_room_id_ = path[path.size() - 1] + 1;   // +1 to convert to 1-based index
-
-  SetRoomPosition(start_room_id_, end_room_id_);
-
-  return;
-}
-
-void SensorCoveragePlanner3D::ResetRoomInfo()
-{
-  transit_across_room_ = false;
-
-  door_position_.x() = -10000.0;
-  door_position_.y() = -10000.0;
-  door_position_.z() = -10000.0;
-
-  goal_position_.x = -10000.0; // reset goal position
-  goal_position_.y = -10000.0;
-  goal_position_.z = -10000.0;
-
-  grid_world_->SetTransitAcrossRoom(transit_across_room_);
-  grid_world_->SetRoomPosition(door_position_);
-  local_coverage_planner_->SetTransitAcrossRoom(transit_across_room_);
-  viewpoint_manager_->SetTransitAcrossRoom(transit_across_room_);
-
-  door_cloud_final_->points.clear();
-
-  at_room_ = false;
-  near_room_1_ = false;
-  near_room_2_ = false;
-
-  target_room_id_ = -1;
-  start_room_id_ = -1;
-  end_room_id_ = -1;
-  door_normal_ = Eigen::Vector3d(0, 0, 0);
-
-  ask_vlm_finish_room_ = false;
-  ask_vlm_change_room_ = false;
-
-  asked_in_advance_ = false;
-  room_navigation_query_counter_ = 0;
-  candidate_room_position_ = geometry_msgs::msg::Point();
-  has_candidate_room_position_ = false;
 }
 
 void SensorCoveragePlanner3D::SetCurrentRoomId()
@@ -1819,8 +1566,6 @@ void SensorCoveragePlanner3D::SetCurrentRoomId()
   }
   int room_id_tmp_ = room_mask_.at<int>(robot_position_voxel_new.x(),
                                         robot_position_voxel_new.y());
-  int last_room_id_tmp_ = room_mask_.at<int>(robot_position_voxel_old.x(),
-                                             robot_position_voxel_old.y());
 
   if (room_id_tmp_ <= 0)
   {
@@ -1831,18 +1576,6 @@ void SensorCoveragePlanner3D::SetCurrentRoomId()
   if (representation_->HasRoomNode(room_id_tmp_))
   {
     representation_->GetRoomNode(room_id_tmp_).SetIsVisited(true);
-  }
-
-  if (transit_across_room_)
-  {
-    // If the robot is transiting across rooms, we can update the room id immediately
-    current_room_id_ = room_id_tmp_;
-    robot_position_old_ = robot_position_;
-    room_mask_old_ = room_mask_.clone();
-    viewpoint_manager_->SetCurrentRoomId(current_room_id_);
-    grid_world_->SetCurrentRoomId(current_room_id_);
-    // RCLCPP_INFO(this->get_logger(), "Current room id: %d", current_room_id_);
-    return;
   }
 
   if ((room_id_tmp_ == current_room_id_) || current_room_id_ == -1)
@@ -1887,9 +1620,6 @@ void SensorCoveragePlanner3D::SetCurrentRoomId()
       if (num_1 > num_2 * 0.8)
       {
         // 1. 被merge
-        // TODO: 暂时的逻辑
-        ask_vlm_change_room_ = false;
-
         // RCLCPP_INFO(this->get_logger(), "Room %d is merged into room %d", current_room_id_, room_id_tmp_);
         current_room_id_ = room_id_tmp_;
         robot_position_old_ = robot_position_;
@@ -1903,8 +1633,6 @@ void SensorCoveragePlanner3D::SetCurrentRoomId()
       {
         // 2. 被分割出去
         // RCLCPP_INFO(this->get_logger(), "Room %d is split into room %d", current_room_id_, room_id_tmp_);
-        ask_vlm_change_room_ = true;
-        prev_room_id_ = current_room_id_;
         current_room_id_ = room_id_tmp_;
         robot_position_old_ = robot_position_;
         room_mask_old_ = room_mask_.clone();
@@ -1913,316 +1641,6 @@ void SensorCoveragePlanner3D::SetCurrentRoomId()
         return;
       }
     }
-  }
-}
-
-void SensorCoveragePlanner3D::SetRoomPosition(
-    const int &start_room_id, const int &end_room_id)
-{
-  // 在door_cloud_中找到start_room_id和end_room_id之间的门
-  pcl::PointCloud<pcl::PointXYZRGBL>::Ptr door_cloud_final_tmp(
-      new pcl::PointCloud<pcl::PointXYZRGBL>());
-  for (auto &point : door_cloud_->points)
-  {
-    if (((point.r == start_room_id && point.g == end_room_id) ||
-          (point.r == end_room_id && point.g == start_room_id)) &&
-        point.label == 0)
-    {
-      door_cloud_final_tmp->points.push_back(point);
-    }
-  }
-  if (door_cloud_final_tmp->points.empty())
-  {
-    if (door_cloud_final_->points.empty())
-    {
-      RCLCPP_ERROR(this->get_logger(), "No door found between current room and target room, door cloud is empty");
-      ResetRoomInfo();
-      return;
-    }
-    else
-    {
-      RCLCPP_WARN(this->get_logger(), "No door found between current room and target room, using the last door cloud");
-    }
-  }
-  else
-  {
-    // clear the door cloud final and copy the points from door_cloud_final_tmp
-    door_cloud_final_->points.clear();
-    door_cloud_final_->points = door_cloud_final_tmp->points;
-  }
-
-  // use the center of the door cloud as the goal point
-  Eigen::Vector3d door_center(0.0, 0.0, 0.0);
-  GetDoorCentroid(door_cloud_final_, door_center);
-  // set the door_position_ to the door center
-  door_position_.x() = door_center.x();
-  door_position_.y() = door_center.y();
-  door_position_.z() = robot_position_.z; // keep the z coordinate same as the robot position
-
-  geometry_msgs::msg::PointStamped door_position_msg;
-  door_position_msg.header.frame_id = "map";
-  door_position_msg.header.stamp = this->now();
-  door_position_msg.point.x = door_position_.x();
-  door_position_msg.point.y = door_position_.y();
-  door_position_msg.point.z = door_position_.z();
-  door_position_pub_->publish(door_position_msg);
-
-  GetDoorNormal(start_room_id_, end_room_id_, door_center, door_normal_);
-  // publish the room normal vector
-  visualization_msgs::msg::Marker marker;
-  marker.header.frame_id = "map"; // 或其他坐标系
-  marker.header.stamp = this->now();
-  marker.ns = "normals";
-  marker.type = visualization_msgs::msg::Marker::ARROW;
-  marker.action = visualization_msgs::msg::Marker::ADD;
-
-  geometry_msgs::msg::Point start_point;
-  start_point.x = door_position_.x();
-  start_point.y = door_position_.y();
-  start_point.z = door_position_.z();
-
-  geometry_msgs::msg::Point end_point;
-  end_point.x = door_position_.x() + door_normal_.x() * 2.0;
-  end_point.y = door_position_.y() + door_normal_.y() * 2.0;
-  end_point.z = door_position_.z() + door_normal_.z() * 2.0;
-
-  marker.points.push_back(start_point);
-  marker.points.push_back(end_point);
-
-  marker.scale.x = 0.1; // 更粗的箭杆
-  marker.scale.y = 0.2; // 更大的箭头
-  marker.scale.z = 0.3; // 更长的箭头
-  marker.color.r = 1.0;
-  marker.color.g = 0.0;
-  marker.color.b = 0.0;
-  marker.color.a = 1.0;
-
-  marker.lifetime = rclcpp::Duration::from_seconds(8); // 设置生存时间
-  door_normal_pub_->publish(marker);
-
-  // publish the chosen room boundary
-  if (!representation_->HasRoomNode(end_room_id)) {
-    RCLCPP_WARN(this->get_logger(), "End room with id %d does not exist in representation, cannot publish boundary", end_room_id);
-    return;
-  }
-  auto &room_node = representation_->GetRoomNode(end_room_id);
-  visualization_msgs::msg::Marker room_boundary_marker;
-  room_boundary_marker.header.frame_id = "map"; // 或其他坐标系
-  room_boundary_marker.header.stamp = this->now();
-  room_boundary_marker.ns = "chosen_room_boundary";
-  room_boundary_marker.id = 0;
-  room_boundary_marker.type = visualization_msgs::msg::Marker::LINE_STRIP;
-  room_boundary_marker.action = visualization_msgs::msg::Marker::ADD;
-  const auto &poly = room_node.GetPolygon();
-  room_boundary_marker.scale.x = 0.5; // 线宽
-  room_boundary_marker.color.b = 1.0;
-  room_boundary_marker.color.g = 1.0;
-  room_boundary_marker.color.r = 1.0;
-  room_boundary_marker.color.a = 1.0;
-
-  for (const auto &pt : poly.polygon.points)
-  {
-    geometry_msgs::msg::Point p;
-    p.x = pt.x;
-    p.y = pt.y;
-    p.z = robot_position_.z-0.1; // 使用机器人的z坐标作为高度
-    room_boundary_marker.points.push_back(p);
-  }
-
-  // 闭合多边形
-  if (!room_boundary_marker.points.empty())
-  {
-    room_boundary_marker.points.push_back(room_boundary_marker.points.front());
-  }
-  room_boundary_marker.lifetime = rclcpp::Duration::from_seconds(5); // 设置生存时间
-  chosen_room_boundary_pub_->publish(room_boundary_marker);
-
-  grid_world_->SetTransitAcrossRoom(transit_across_room_);
-  grid_world_->SetRoomPosition(door_position_);
-  local_coverage_planner_->SetTransitAcrossRoom(transit_across_room_);
-  viewpoint_manager_->SetTransitAcrossRoom(transit_across_room_);
-}
-
-void SensorCoveragePlanner3D::GetDoorCentroid(const int& start_room_id, const int& end_room_id, Eigen::Vector3d& door_center)
-{
-  door_center.setZero();
-  int door_count = 0;
-  for (auto &point : door_cloud_->points)
-  {
-    if ((point.r == start_room_id && point.g == end_room_id) ||
-        (point.g == start_room_id && point.r == end_room_id))
-    {
-      door_center.x() += point.x;
-      door_center.y() += point.y;
-      door_center.z() += point.z;
-      door_count++;
-    }
-  }
-  door_center /= door_count;
-  door_center.z() = robot_position_.z; // keep the z coordinate same as the robot position
-}
-
-void SensorCoveragePlanner3D::GetDoorCentroid(const pcl::PointCloud<pcl::PointXYZRGBL>::Ptr door_cloud_final, Eigen::Vector3d& door_center)
-{
-  door_center.setZero();
-  int door_count = 0;
-  for (auto &point : door_cloud_final->points)
-  {
-    door_center.x() += point.x;
-    door_center.y() += point.y;
-    door_center.z() += point.z;
-    door_count++;
-  }
-  door_center /= door_count;
-  door_center.z() = robot_position_.z; // keep the z coordinate same as the robot position
-}
-
-void SensorCoveragePlanner3D::GetDoorNormal(const int &start_room_id, const int &end_room_id, const Eigen::Vector3d &door_center, Eigen::Vector3d &door_normal)
-{
-  auto t_0 = std::chrono::high_resolution_clock::now();
-
-  double door_normal_length = 1.5;
-  // 从0度到360度开始每隔10度遍历，记录一个范围满足正方向是end_room_id，反方向是start_room_id，取这个范围的中点作为法向
-  std::vector<double>
-      valid_directions;
-  for (double angle = 0.0; angle < 360.0; angle += 1.0)
-  {
-    Eigen::Vector3d door_normal_tmp(cos(angle * M_PI / 180.0),
-                                sin(angle * M_PI / 180.0), 0.0);
-
-    for (double length = 0.3; length < door_normal_length; length += 0.1)
-    {
-      Eigen::Vector3d door_normal_point = door_center + door_normal_tmp * length;
-      Eigen::Vector3d door_normal_point_reverse = door_center - door_normal_tmp * length;
-      Eigen::Vector3f door_normal_point_f(
-          door_normal_point.x(),
-          door_normal_point.y(),
-          door_normal_point.z());
-
-      Eigen::Vector3f door_normal_point_reverse_f(
-          door_normal_point_reverse.x(),
-          door_normal_point_reverse.y(),
-          door_normal_point_reverse.z());
-
-      Eigen::Vector3i door_normal_point_voxel = misc_utils_ns::point_to_voxel(
-          door_normal_point_f, shift_, 1.0 / room_resolution_);
-      Eigen::Vector3i door_normal_point_reverse_voxel = misc_utils_ns::point_to_voxel(
-          door_normal_point_reverse_f, shift_, 1.0 / room_resolution_);
-      // 加边界检查
-      if (door_normal_point_voxel.x() >= 0 && door_normal_point_voxel.x() < room_mask_.cols &&
-          door_normal_point_voxel.y() >= 0 && door_normal_point_voxel.y() < room_mask_.rows &&
-          door_normal_point_reverse_voxel.x() >= 0 && door_normal_point_reverse_voxel.x() < room_mask_.cols &&
-          door_normal_point_reverse_voxel.y() >= 0 && door_normal_point_reverse_voxel.y() < room_mask_.rows)
-      {
-        int door_normal_label = room_mask_.at<int>(
-            door_normal_point_voxel.x(), door_normal_point_voxel.y()); // OpenCV 是 (row, col)
-        int door_normal_reverse_label = room_mask_.at<int>(
-            door_normal_point_reverse_voxel.x(), door_normal_point_reverse_voxel.y());
-
-        if (door_normal_label == end_room_id &&
-            door_normal_reverse_label == start_room_id)
-        {
-          // 如果法向指向 end_room_id，则使用该法向
-          valid_directions.push_back(angle);
-          continue;
-        }
-      }
-    }
-  }
-  if (valid_directions.size() > 0)
-  {
-    // 做向量平均而非角度平均
-    double sum_x = 0.0;
-    double sum_y = 0.0;
-    for (double angle : valid_directions)
-    {
-      sum_x += cos(angle * M_PI / 180.0);
-      sum_y += sin(angle * M_PI / 180.0);
-    }
-    double avg_x = sum_x / valid_directions.size();
-    double avg_y = sum_y / valid_directions.size();
-    Eigen::Vector3d door_normal_tmp(avg_x, avg_y, 0.0);
-    door_normal = door_normal_tmp.normalized();
-  }
-  else
-  {
-    door_normal = Eigen::Vector3d(0.0, 0.0, 0.0);
-    RCLCPP_WARN(this->get_logger(), "No valid door normal found.");
-  }
-
-  auto t_1 = std::chrono::high_resolution_clock::now();
-  auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(t_1 - t_0);
-  // RCLCPP_INFO(this->get_logger(), "Time taken to compute door normal: %lld ms",
-  //             duration.count());
-}
-
-void SensorCoveragePlanner3D::CheckDoorCloudInRange()
-{
-  if (!initialized_)
-  {
-    RCLCPP_ERROR(this->get_logger(), "Planner not initialized, cannot check door cloud in range");
-    return;
-  }
-
-  // RCLCPP_INFO(this->get_logger(), "Room Nodes size: %d", representation_->GetRoomNodeCount());
-
-  std::vector<int> in_range_rooms;
-  // Check whether there are any door clouds in the local planning horizon
-  for (const auto &point : door_cloud_->points)
-  {
-    Eigen::Vector3d point_pos(point.x, point.y, point.z);
-    if (viewpoint_manager_->InLocalPlanningHorizonWithoutRoom(point_pos) && (point.r == current_room_id_ || point.g == current_room_id_))
-    {
-      int target_room_id = point.r != current_room_id_ ? point.r : point.g;
-      in_range_rooms.push_back(target_room_id);
-    }
-  }
-  misc_utils_ns::UniquifyIntVector(in_range_rooms);
-
-  // Force the robot to go to the door to see the new room if the door is in range
-  door_cloud_in_range_->cloud_->points.clear();
-  for (int room_id : in_range_rooms)
-  {
-    if (!representation_->HasRoomNode(room_id))
-    {
-      RCLCPP_WARN(this->get_logger(), "Room with id %d does not exist in representation, skip", room_id);
-      continue;
-    }
-    // this line will skil most of the rooms
-    if (representation_->GetRoomNode(room_id).IsLabeled())
-    {
-      continue;
-    }
-    Eigen::Vector3d door_center(0.0, 0.0, 0.0);
-    GetDoorCentroid(current_room_id_, room_id, door_center);
-    if (viewpoint_manager_->InLocalPlanningHorizonWithoutRoom(door_center))
-    {
-      Eigen::Vector3d door_normal(0.0, 0.0, 0.0);
-      GetDoorNormal(current_room_id_, room_id, door_center, door_normal);
-      if (door_normal.norm() < 0.1)
-      {
-        RCLCPP_WARN(this->get_logger(), "Door normal is not valid, skipping room %d", room_id);
-        continue;
-      }
-
-      Eigen::Vector3d candidate_viewpoint_rep_pos = door_center - door_normal * 0.5;
-      int room_candidate_viewpoint_ind = viewpoint_manager_->GetViewPointInd(candidate_viewpoint_rep_pos);
-      if (viewpoint_manager_->InRange(room_candidate_viewpoint_ind) && viewpoint_manager_->IsViewPointCandidate(room_candidate_viewpoint_ind))
-      {
-        door_cloud_in_range_->cloud_->points.push_back(
-            pcl::PointXYZLNormal(
-                candidate_viewpoint_rep_pos.x(),
-                candidate_viewpoint_rep_pos.y(),
-                candidate_viewpoint_rep_pos.z(), room_id,
-                door_normal.x(), door_normal.y(), door_normal.z()));
-        MY_ASSERT(room_candidate_viewpoint_ind >= 0);
-        viewpoint_manager_->SetViewPointRoomCandidate(room_candidate_viewpoint_ind, true);
-      }
-    }
-  }
-  if (door_cloud_in_range_->cloud_->points.size() > 0)
-  {
-    door_cloud_in_range_->Publish();
   }
 }
 
@@ -2240,36 +1658,6 @@ void SensorCoveragePlanner3D::SendInitialWaypoint()
   waypoint.point.x = robot_position_.x + dx;
   waypoint.point.y = robot_position_.y + dy;
   waypoint.point.z = robot_position_.z;
-  waypoint_pub_->publish(waypoint);
-}
-
-void SensorCoveragePlanner3D::SendInRoomWaypoint()
-{
-  double distance = 2.5 + room_guide_counter_ * 1.0; // distance to the waypoint
-  if (door_normal_.norm() < 0.01) {
-    RCLCPP_ERROR(this->get_logger(), "Room normal vector is zero, cannot send projected waypoint. Instead, send the door center as waypoint.");
-    geometry_msgs::msg::PointStamped waypoint;
-    waypoint.header.frame_id = "map";
-    waypoint.header.stamp = this->now();
-    waypoint.point.x = door_position_.x();
-    waypoint.point.y = door_position_.y();
-    waypoint.point.z = robot_position_.z;
-    waypoint_pub_->publish(waypoint);
-    return;
-  }
-  Eigen::Vector3d room_normal = door_normal_.normalized();
-  // Calculate the waypoint position based on the room normal vector
-  double dx = room_normal.x() * distance;
-  double dy = room_normal.y() * distance;
-
-  geometry_msgs::msg::PointStamped waypoint;
-  waypoint.header.frame_id = "map";
-  waypoint.header.stamp = this->now();
-  waypoint.point.x = door_position_.x() + dx;
-  waypoint.point.y = door_position_.y() + dy;
-  waypoint.point.z = robot_position_.z;
-  // RCLCPP_INFO(this->get_logger(), "Send waypoint in room: (%.2f, %.2f, %.2f)",
-              // waypoint.point.x, waypoint.point.y, waypoint.point.z);
   waypoint_pub_->publish(waypoint);
 }
 
@@ -3016,7 +2404,6 @@ void SensorCoveragePlanner3D::PublishGlobalPlanningVisualization(
     end_index = i;
   }
 
-  if (!ask_vlm_finish_room_)
   {
     nav_msgs::msg::Path global_path_trim;
     if (local_path.nodes_.size() >= 2) {
@@ -3045,15 +2432,7 @@ void SensorCoveragePlanner3D::PublishGlobalPlanningVisualization(
     global_path_trim.header.stamp = this->now();
     global_path_publisher_->publish(global_path_trim);
   }
-  else
-  {
-    // publish a blank path
-    nav_msgs::msg::Path global_path_trim;
-    global_path_trim.header.frame_id = "map";
-    global_path_trim.header.stamp = this->now();
-    global_path_publisher_->publish(global_path_trim);
-  }
-  
+
   grid_world_->GetVisualizationCloud(grid_world_vis_cloud_->cloud_);
   grid_world_vis_cloud_->Publish();
   grid_world_->GetMarker(grid_world_marker_->marker_);
@@ -3089,24 +2468,12 @@ void SensorCoveragePlanner3D::PublishLocalPlanningVisualization(
   local_coverage_planner_->GetSelectedViewPointVisCloud(
       selected_viewpoint_vis_cloud_->cloud_);
   selected_viewpoint_vis_cloud_->Publish();
-  // if finish one room, publish a blank path
-  if (!ask_vlm_finish_room_)
   {
     nav_msgs::msg::Path local_tsp_path = local_path.GetPath();
     local_tsp_path.header.frame_id = "map";
     local_tsp_path.header.stamp = this->now();
     local_tsp_path_publisher_->publish(local_tsp_path);
   }
-  else
-  {
-    // publish a blank path
-    nav_msgs::msg::Path local_tsp_path;
-    local_tsp_path.header.frame_id = "map";
-    local_tsp_path.header.stamp = this->now();
-    local_tsp_path_publisher_->publish(local_tsp_path);
-  }
-
-  // Visualize local planning horizon box
 }
 
 void SensorCoveragePlanner3D::PublishFreespaceCloud() {
@@ -3509,34 +2876,6 @@ void SensorCoveragePlanner3D::PublishWaypoint() {
     waypoint.point.y = initial_position_.y();
     waypoint.point.z = initial_position_.z();
   }
-  else if (near_room_1_ && !near_room_2_ && transit_across_room_)
-  {
-    // If the robot is near the room, go to the door position
-    waypoint.point.x = door_position_.x();
-    waypoint.point.y = door_position_.y();
-    waypoint.point.z = robot_position_.z;
-  }
-  else if (near_room_2_ && transit_across_room_)
-  {
-    // If the robot is very near the room, go to the lookahead point
-    SendInRoomWaypoint();
-    return;
-  }
-  else if ((ask_vlm_finish_room_ || ask_vlm_change_room_) && !transit_across_room_)
-  {
-    if (ask_vlm_finish_room_)
-    {
-      // RCLCPP_INFO(this->get_logger(), "Room finished, waiting for next action");
-    }
-    if (ask_vlm_change_room_)
-    {
-      // RCLCPP_INFO(this->get_logger(), "Accidentally enter a new room");
-    }
-    // If the room is finished, we just send the robot position as the waypoint(not moving)
-    waypoint.point.x = robot_position_.x;
-    waypoint.point.y = robot_position_.y;
-    waypoint.point.z = robot_position_.z;
-  }
   else {
     double dx = lookahead_point_.x() - robot_position_.x;
     double dy = lookahead_point_.y() - robot_position_.y;
@@ -3589,58 +2928,6 @@ double SensorCoveragePlanner3D::GetRobotToHomeDistance() {
   Eigen::Vector3d robot_position(robot_position_.x, robot_position_.y,
                                  robot_position_.z);
   return (robot_position - initial_position_).norm();
-}
-
-double SensorCoveragePlanner3D::GetRobotToRoomDistance()
-{
-  Eigen::Vector3d robot_position(robot_position_.x, robot_position_.y,
-                                 robot_position_.z);
-  double euler_length = (robot_position - door_position_).norm();
-  double exploration_path_length = exploration_path_.GetLength() / 2.0; // because the path is a loop
-  // RCLCPP_INFO(this->get_logger(), "Robot to room distance: %f, Exploration path length: %f",
-              // euler_length, exploration_path_length);
-  return std::max(euler_length, exploration_path_length);
-}
-
-void SensorCoveragePlanner3D::GetToRoomState(bool &at_room, bool &near_room_1, bool &near_room_2) 
-{
-  if (!transit_across_room_) {
-    at_room = false;
-    near_room_1 = false;
-    near_room_2 = false;
-    return;
-  }
-  else
-  {
-    at_room_ = (current_room_id_ == end_room_id_) && (end_room_id_ != -1);
-    near_room_1_ = (GetRobotToRoomDistance() < kRushRoomDist_1) || at_room_;
-    near_room_2_ = (GetRobotToRoomDistance() < kRushRoomDist_2) || at_room_;
-    if (near_room_2_)
-    {
-      if (door_normal_.norm() > 0.1)
-      {
-        // calculate the relative angle of the robot orientation and the room normal
-        // 判断机器人位置和房门口连线的方向
-        Eigen::Vector3d direction_1(cos(robot_yaw_), sin(robot_yaw_), 0.0);
-        Eigen::Vector3d direction_2 = door_position_ - Eigen::Vector3d(robot_position_.x, robot_position_.y, robot_position_.z);
-        direction_2.z() = 0.0;
-        direction_2.normalize();
-
-        double angle_1 = acos(direction_1.dot(door_normal_));
-        double angle_2 = acos(direction_2.dot(door_normal_));
-        RCLCPP_ERROR(this->get_logger(), "Angle 1: %f, Angle 2: %f", angle_1 / M_PI * 180.0, angle_2 / M_PI * 180.0);
-        bool yaw_flag = angle_1 < M_PI / 180.0 * 45.0;
-        bool direction_flag = angle_2 < M_PI / 180.0 * 45.0;
-        near_room_2_ = (near_room_2_ && yaw_flag) || direction_flag || at_room_;
-        if (GetRobotToRoomDistance() < kRushRoomDist_2 * 0.75)
-        {
-          near_room_2_ = true;
-        }
-      }
-    }
-    // RCLCPP_INFO(this->get_logger(), "!!!!!!!!!!!!!!Near room 1: %d, Near room 2: %d, At room: %d, Current room: %d, Target room: %d",
-                // near_room_1_, near_room_2_, at_room_, current_room_id_, end_room_id_);
-  }
 }
 
 void SensorCoveragePlanner3D::PublishExplorationState() {
@@ -3742,35 +3029,6 @@ void SensorCoveragePlanner3D::execute() {
     SetCurrentRoomId();
     PublishRoomTypeQueries();
     // prof_roomlabel.Stop(false);
-    // -------- Transit across rooms --------
-    if (transit_across_room_ && !at_room_)
-    {
-      geometry_msgs::msg::PointStamped::SharedPtr geomsg(
-          new geometry_msgs::msg::PointStamped());
-      geomsg->header.frame_id = kWorldFrameID;
-      geomsg->header.stamp = this->now();
-      geomsg->point.x = goal_position_.x;
-      geomsg->point.y = goal_position_.y;
-      geomsg->point.z = goal_position_.z;
-      GoalPointCallback(geomsg);
-      SetStartAndEndRoomId();
-    }
-    if (at_room_)
-    {
-      room_guide_counter_++;
-      reset_waypoint_ = true;
-
-      // let the local coverage planner first starting the sampling
-      local_coverage_planner_->SetTransitAcrossRoom(false);
-      viewpoint_manager_->SetTransitAcrossRoom(false);
-      if (room_guide_counter_ % 3 == 0)
-      {
-        // RCLCPP_INFO(this->get_logger(), "Arrived at the room, waiting for next action");
-        room_guide_counter_ = 0;
-        stayed_in_room_counter_ = 0;
-        ResetRoomInfo();
-      }
-    }
 
     CountDirectionChange();
 
@@ -3809,7 +3067,6 @@ void SensorCoveragePlanner3D::execute() {
                   "still updating the scene graph");
     }
 
-    CheckDoorCloudInRange();
     UpdateKeyposeGraph();
     // Derive the lightweight NavGraph from the freshly healed + connectivity-
     // checked keypose graph (self-throttled to every Nth call). The room mask
@@ -3879,48 +3136,14 @@ void SensorCoveragePlanner3D::execute() {
       stopped_ = true;
     }
 
-    // Handle room finishing and changing
-    if (current_room_id_ != -1)
+    // Reset current_room_id_ if the room disappeared from the representation
+    if (current_room_id_ != -1 && !representation_->HasRoomNode(current_room_id_))
     {
-      if (!representation_->HasRoomNode(current_room_id_)) {
-        RCLCPP_WARN(this->get_logger(), "Current room with id %d does not exist in representation, reset to -1", current_room_id_);
-        current_room_id_ = -1;
-      }
-      else {
-        auto &current_room = representation_->GetRoomNode(current_room_id_);
-        // this room is nearly finished, ask the vlm in advance
-        // if the room is too small, it can never finish the local coverage if only exploring within the room, so add the area limit
-        if ((grid_world_->IsRoomFinished() && !local_coverage_planner_->IsLocalCoverageComplete() && !transit_across_room_)
-            || (current_room.area_ < 6.0)) {
-          // RCLCPP_INFO(this->get_logger(), "Room %d is nearly finished, publishing room navigation query in advance", current_room_id_);
-          room_navigation_query_counter_++;
-          if (room_navigation_query_counter_ % 3 == 1) {
-            PublishRoomNavigationQuery();
-            asked_in_advance_ = true;
-          }
-        }
-        
-        // if the room is finished, ask the vlm for next room to explore
-        if ((grid_world_->IsRoomFinished() && local_coverage_planner_->IsLocalCoverageComplete() && !transit_across_room_)
-            || (current_room.area_ < 10.0 && stayed_in_room_counter_ > 20)) {
-          ask_vlm_finish_room_ = true;
-          // if (current_room_id_ <= representation_->GetRoomNodeCount())
-          if (representation_->HasRoomNode(current_room_id_)) {
-            representation_->GetRoomNode(current_room_id_).SetIsCovered(true);
-          }
-          GetAnswer();
-        }
-        else {
-          ask_vlm_finish_room_ = false;
-          if (representation_->HasRoomNode(current_room_id_) && !transit_across_room_) {
-            representation_->GetRoomNode(current_room_id_).SetIsCovered(false);
-          }
-        }
-      }
+      RCLCPP_WARN(this->get_logger(), "Current room with id %d does not exist in representation, reset to -1", current_room_id_);
+      current_room_id_ = -1;
     }
 
     exploration_path_ = ConcatenateGlobalLocalPath(global_path, local_path);
-    GetToRoomState(at_room_, near_room_1_, near_room_2_);
 
     PublishExplorationState();
 
@@ -3960,8 +3183,6 @@ void SensorCoveragePlanner3D::execute() {
     //             prof_roomlabel.GetDuration("ms"), update_representation_runtime_,
     //             global_planning_runtime_, local_viewpoint_sampling_runtime_,
     //             local_path_finding_runtime_, prof_publishtail.GetDuration("ms"));
-
-    stayed_in_room_counter_++;
   }
 }
 
@@ -4664,13 +3885,6 @@ void SensorCoveragePlanner3D::UpdateRoomLabel()
       room_node.SetAnchorPoint(anchor_point);
       room_node.SetLastArea(room_node.area_);
 
-      // The room-type query (best-3 images + objects) is emitted separately by
-      // PublishRoomTypeQueries(); this branch keeps only navigation bookkeeping.
-      // -------- Early Stop 1 --------
-      if (room_counts[room_id] > 100 && room_node.GetIsAsked() > 0 && !room_node.IsCovered() && !room_node.IsVisited() && !transit_across_room_)
-      {
-        ChangeRoomQuery(room_id, current_room_id_);
-      }
     }
   }
   for(int room_id : labled_rooms)
@@ -4717,18 +3931,7 @@ void SensorCoveragePlanner3D::UpdateRoomLabel()
       }
       room_node.SetLastArea(room_node.area_);
 
-      // The room-type query (best-3 images + objects) is emitted separately by
-      // PublishRoomTypeQueries(); this branch keeps only navigation bookkeeping.
-      // -------- Early Stop 1 --------
-      if (room_counts[room_id] > 200 && room_node.GetIsAsked() > 0 && flag1 && !room_node.IsCovered() && !room_node.IsVisited() && !transit_across_room_)
-      {
-        ChangeRoomQuery(room_id, current_room_id_);
-      }
     }
-  }
-  if (ask_vlm_change_room_)
-  {
-    ChangeRoomQuery(prev_room_id_, current_room_id_, true);
   }
 }
 
@@ -5081,145 +4284,6 @@ cv::Mat SensorCoveragePlanner3D::project_pcl_to_image(
   }
 }
 
-void SensorCoveragePlanner3D::PublishRoomNavigationQuery()
-{
-  json room_query_json;
-  to_json(room_query_json, *representation_);
-  // if only one room, just choose that room
-  // if (room_query_json["rooms"].size() == 1)
-  // {
-  //   int answer = room_query_json["rooms"][0]["room id"];
-  //   auto &room_node = representation_->GetRoomNode(answer);
-  //   ask_vlm_finish_room_ = false;
-  //   // create a new pointer (geomsg) point to the room_node.anchor_point
-  //   geometry_msgs::msg::PointStamped::SharedPtr geomsg(
-  //       new geometry_msgs::msg::PointStamped());
-  //   geomsg->header.frame_id = "map";
-  //   geomsg->header.stamp = this->now();
-  //   geomsg->point.x = room_node.anchor_point_.x;
-  //   geomsg->point.y = room_node.anchor_point_.y;
-  //   geomsg->point.z = room_node.anchor_point_.z;
-  //   GoalPointCallback(geomsg);
-  // }
-  // else
-  // {
-  //   auto message = std_msgs::msg::String();
-  //   message.data = room_query_json.dump();
-  //   room_navigation_query_pub_->publish(message);
-  // }
-  auto navigation_query_msg = tare_planner::msg::NavigationQuery();
-  navigation_query_msg.json = room_query_json.dump();
-  // get the image of all candidate room
-  auto rooms = room_query_json["rooms"];
-  for (const auto &room : rooms)
-  {
-    int room_id = room["room id"];
-    if (representation_->HasRoomNode(room_id))
-    {
-      auto &room_node = representation_->GetRoomNode(room_id);
-      geometry_msgs::msg::Point anchor_point = room_node.GetAnchorPoint();
-      navigation_query_msg.anchor_points.push_back(anchor_point);
-      if (!room_node.image_.empty())
-      {
-        auto img_msg = cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", room_node.image_).toImageMsg();
-        navigation_query_msg.images.push_back(*img_msg); // 注意是解引用
-      }
-      else
-      {
-        RCLCPP_WARN(this->get_logger(), "Room %d has no image", room_id);
-        // push an empty image
-        cv::Mat empty_image = cv::Mat::zeros(480, 640, CV_8UC3);
-        auto img_msg = cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", empty_image).toImageMsg();
-        navigation_query_msg.images.push_back(*img_msg); // 注意是解引用
-      }
-    }
-    else
-    {
-      RCLCPP_ERROR(this->get_logger(), "Room %d not found in representation", room_id);
-      // push an empty image
-      cv::Mat empty_image = cv::Mat::zeros(480, 640, CV_8UC3);
-      auto img_msg = cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", empty_image).toImageMsg();
-      navigation_query_msg.images.push_back(*img_msg); // 注意是解引用
-    }
-  }
-  room_navigation_query_pub_->publish(navigation_query_msg);
-}
-
-void SensorCoveragePlanner3D::to_json(json &j, const representation_ns::ObjectNodeRep &obj) const
-{
-  j = json{
-      {"object id", obj.object_id_[0]},
-      {"label", obj.label_},
-      {"confidence", obj.confidence_},
-      {"position", {obj.position_.x, obj.position_.y, obj.position_.z}},
-  };
-}
-void SensorCoveragePlanner3D::to_json(json &j, const representation_ns::ViewPointRep &viewpoint) const
-{
-  j = json{
-      {"viewpoint id", viewpoint.GetId()},
-      {"position", {viewpoint.GetPosition().x, viewpoint.GetPosition().y, viewpoint.GetPosition().z}},
-      {"room id", viewpoint.room_id_},
-  };
-}
-void SensorCoveragePlanner3D::to_json(json &j, const representation_ns::RoomNodeRep &room) const
-{
-  std::set<std::string> obj_labels;
-  std::set<int> obj_ids;
-  // for (const auto &viewpoint_rep_ind : room.viewpoint_indices_)
-  // {
-  //   const auto &viewpoint_rep = representation_->GetViewPointRepNode(viewpoint_rep_ind);
-  //   for (const auto &obj_ind : viewpoint_rep.GetObjectIndices())
-  //   {
-  //     const auto &object_node = representation_->GetObjectNodeRep(obj_ind);
-  //     obj_labels.insert(object_node.label_);
-  //     obj_ids.insert(object_node.object_id_[0]);
-  //   }
-  // }
-  for (const auto &obj_ind : room.GetObjectIndices())
-  {
-    if (!representation_->HasObjectNode(obj_ind))
-    {
-      RCLCPP_WARN(this->get_logger(), "Object with id %d does not exist in representation, skip", obj_ind);
-      continue;
-    }
-    const auto &object_node = representation_->GetObjectNodeRep(obj_ind);
-    obj_labels.insert(object_node.label_);
-    obj_ids.insert(object_node.object_id_[0]);
-  }
-  geometry_msgs::msg::Point goal_point = room.anchor_point_;
-  geometry_msgs::msg::Point start_point = robot_position_;
-  nav_msgs::msg::Path path;
-  double path_distance = keypose_graph_->GetShortestPath(start_point, goal_point, false, path, true);
-  std::string label = room.GetRoomLabel();
-  j = json{
-      {"room id", room.id_},
-      {"label", label},
-      {"objects", obj_labels},
-      {"distance", path_distance}};
-}
-
-void SensorCoveragePlanner3D::to_json(json &j, const representation_ns::Representation &rep) const
-{
-  j = json{
-      {"rooms", json::array()},
-  };
-  // for (const auto &room : rep.room_nodes_)
-  for (const auto &id_room_node_pair : rep.GetRoomNodesMap()) 
-  {
-    auto & room = id_room_node_pair.second;
-    json room_json;
-    // only if when the room is labeled or has objects
-    if ((room.IsLabeled()) && !room.IsCovered() && room.id_ != current_room_id_ && room.is_connected_) {
-      to_json(room_json, room);
-      j["rooms"].push_back(room_json);
-    }
-  }
-  // print the json as a string
-  std::string json_str = j.dump(4); // 4 is the indentation level
-  RCLCPP_INFO(this->get_logger(), "Representation JSON:\n%s", json_str.c_str());
-}
-
 bool SensorCoveragePlanner3D::TryFreezeWorldFromOdom()
 {
   if (!scene_graph_cfg_.enabled_world_transform)
@@ -5398,94 +4462,6 @@ void SensorCoveragePlanner3D::SceneGraphWatchdogCallback()
     return;
   }
   scene_graph_last_sim_time_ = current_sim_time;
-}
-
-void SensorCoveragePlanner3D::ChangeRoomQuery(const int &room_id_1, const int &room_id_2, bool enter_wrong_room)
-{
-  if (!initialized_) {
-    RCLCPP_ERROR(this->get_logger(), "Planner not initialized, cannot change room query");
-    return;
-  }
-
-  if (room_id_1 == room_id_2) {
-    RCLCPP_WARN(this->get_logger(), "Room IDs are the same, no need to change query");
-    return;
-  }
-  if (!representation_->HasRoomNode(room_id_1))
-  {
-    RCLCPP_WARN(this->get_logger(), "Room with id %d does not exist in representation", room_id_1);
-    return;
-  }
-  if (!representation_->HasRoomNode(room_id_2))
-  {
-    RCLCPP_WARN(this->get_logger(), "Room with id %d does not exist in representation", room_id_2);
-    return;
-  }
-  representation_ns::RoomNodeRep &check_room_node = representation_->GetRoomNode(room_id_1);
-  representation_ns::RoomNodeRep &current_room_node = representation_->GetRoomNode(room_id_2);
-  cv::Mat check_room_image = check_room_node.GetImage();
-  cv::Mat current_room_image = current_room_node.GetImage();
-  if (current_room_image.empty())
-  {
-    RCLCPP_ERROR(this->get_logger(), "Current room image is empty.");
-    return;
-  }
-  auto check_img_msg = cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", check_room_image).toImageMsg();
-  auto current_img_msg = cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", current_room_image).toImageMsg();
-  tare_planner::msg::RoomEarlyStop1 room_early_stop_1_msg;
-  room_early_stop_1_msg.room_id_1 = room_id_1;
-  room_early_stop_1_msg.room_id_2 = room_id_2;
-  room_early_stop_1_msg.anchor_point_1 = check_room_node.GetAnchorPoint();
-  room_early_stop_1_msg.anchor_point_2 = current_room_node.GetAnchorPoint();
-  room_early_stop_1_msg.image_1 = *check_img_msg;
-  room_early_stop_1_msg.image_2 = *current_img_msg;
-  std::string label1, label2;
-  label1 = check_room_node.GetRoomLabel();
-  label2 = current_room_node.GetRoomLabel();
-  room_early_stop_1_msg.room_type_1 = label1;
-  room_early_stop_1_msg.room_type_2 = label2;
-  room_early_stop_1_msg.enter_wrong_room = enter_wrong_room;
-
-  room_early_stop_1_pub_->publish(room_early_stop_1_msg);
-  representation_->GetRoomNode(room_id_1).SetIsAsked();
-  representation_->GetRoomNode(room_id_2).SetIsAsked();
-}
-
-void SensorCoveragePlanner3D::GetAnswer()
-{
-  if (!initialized_) {
-    RCLCPP_ERROR(this->get_logger(), "Planner not initialized, cannot get answer");
-    return;
-  }
-  // add the counter is for the pre-ask scheme, to make sure the room is really finished
-  if (has_candidate_room_position_)
-  {
-    room_finished_counter_++;
-    // wait for 1 cycle
-    if (room_finished_counter_ % 2 == 0)
-    {
-      room_finished_counter_ = 0;
-      ask_vlm_finish_room_ = false;
-      // create a new pointer (geomsg) point to the room_node.anchor_point
-      geometry_msgs::msg::PointStamped::SharedPtr geomsg(
-          new geometry_msgs::msg::PointStamped());
-      geomsg->header.frame_id = "map";
-      geomsg->header.stamp = this->now();
-      geomsg->point.x = candidate_room_position_.x;
-      geomsg->point.y = candidate_room_position_.y;
-      geomsg->point.z = candidate_room_position_.z;
-      GoalPointCallback(geomsg);
-    }
-  }
-  else
-  {
-    // RCLCPP_INFO(this->get_logger(), "Room %d finished, waiting for next action", current_room_id_);
-    if (!asked_in_advance_)
-    {
-      PublishRoomNavigationQuery();
-      asked_in_advance_ = true;
-    }
-  }
 }
 
 void SensorCoveragePlanner3D::PublishObjectNodeMarkers()

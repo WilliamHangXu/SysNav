@@ -355,24 +355,16 @@ private:
   rclcpp::Subscription<tare_planner::msg::RoomNodeList>::SharedPtr room_node_list_sub_;
   rclcpp::Subscription<tare_planner::msg::RoomType>::SharedPtr room_type_sub_;
   rclcpp::Subscription<tare_planner::msg::ObjectNodeList>::SharedPtr object_node_list_sub_;
-  rclcpp::Subscription<geometry_msgs::msg::PointStamped>::SharedPtr goal_point_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr keyboard_input_sub_;
-  rclcpp::Subscription<tare_planner::msg::VlmAnswer>::SharedPtr room_navigation_answer_sub_;
 
   // ========== ROS Publishers ==========
-  rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr chosen_room_boundary_pub_;
-  rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr door_normal_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr object_node_marker_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr object_visibility_marker_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr room_type_vis_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr viewpoint_room_id_marker_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr viewpoint_visibility_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr room_cloud_pub_;
-  rclcpp::Publisher<geometry_msgs::msg::PointStamped>::SharedPtr door_position_pub_;
-  rclcpp::Publisher<geometry_msgs::msg::PointStamped>::SharedPtr room_anchor_point_pub_;
   rclcpp::Publisher<tare_planner::msg::RoomType>::SharedPtr room_type_pub_;
-  rclcpp::Publisher<tare_planner::msg::NavigationQuery>::SharedPtr room_navigation_query_pub_;
-  rclcpp::Publisher<tare_planner::msg::RoomEarlyStop1>::SharedPtr room_early_stop_1_pub_;
   rclcpp::Publisher<tare_planner::msg::ViewpointRep>::SharedPtr viewpoint_rep_pub_;
 
   // ========== VLM-Related Functions ==========
@@ -383,11 +375,9 @@ private:
   void ObjectNodeListCallback(const tare_planner::msg::ObjectNodeList::ConstSharedPtr msg);
   void DoorCloudCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr door_cloud_msg);
   void RoomNodeListCallback(const tare_planner::msg::RoomNodeList::ConstSharedPtr room_node_list_msg);
-  void GoalPointCallback(const geometry_msgs::msg::PointStamped::ConstSharedPtr goal_point_msg);
   void RoomMaskCallback(const sensor_msgs::msg::Image::ConstSharedPtr room_mask_msg);
   void CameraImageCallback(const sensor_msgs::msg::Image::ConstSharedPtr msg);
   void RoomTypeCallback(const tare_planner::msg::RoomType::ConstSharedPtr msg);
-  void RoomNavigationAnswerCallback(const tare_planner::msg::VlmAnswer::ConstSharedPtr msg);
   void KeyboardInputCallback(const std_msgs::msg::String::ConstSharedPtr msg);
 
   // Utility functions
@@ -413,10 +403,7 @@ private:
   void PublishFreespaceCloud();
   
   // Room management functions
-  void SendInRoomWaypoint();
   void SetCurrentRoomId();
-  void SetRoomPosition(const int &start_room_id, const int &end_room_id);
-  void SetStartAndEndRoomId();
   void UpdateRoomLabel();
   // Evaluate the latest camera frame (motion-gated): attribute it to the room
   // whose floor the current LiDAR sweep observes most within the camera FOV,
@@ -440,33 +427,12 @@ private:
   void LogRoomTypeAnswer(const tare_planner::msg::RoomType &msg, int room_id,
                          const std::string &previous_label,
                          const std::string &current_label);
-  void ResetRoomInfo();
-  void GetToRoomState(bool &at_room, bool &near_room_1, bool &near_room_2);
-  void GetDoorNormal(const int &start_room_id, const int &end_room_id, 
-                     const Eigen::Vector3d &door_center, Eigen::Vector3d &room_normal);
-  void GetDoorCentroid(const pcl::PointCloud<pcl::PointXYZRGBL>::Ptr door_cloud_final, 
-                       Eigen::Vector3d& door_center);
-  void GetDoorCentroid(const int &start_room_id, const int &end_room_id, 
-                       Eigen::Vector3d &door_center);
-  void CheckDoorCloudInRange();
-  double GetRobotToRoomDistance();
-  
+
   // Object detection and tracking functions
   void UpdateObjectVisibility();
   void UpdateViewpointObjectVisibility();
   void ProcessObjectNodes();
   
-  // VLM query functions
-  void PublishRoomNavigationQuery();
-  void ChangeRoomQuery(const int &room_id_1, const int &room_id_2, bool enter_wrong_room = false);
-  void GetAnswer();
-  
-  // JSON serialization functions
-  void to_json(json &j, const representation_ns::ObjectNodeRep &obj) const;
-  void to_json(json &j, const representation_ns::ViewPointRep &viewpoint) const;
-  void to_json(json &j, const representation_ns::RoomNodeRep &room) const;
-  void to_json(json &j, const representation_ns::Representation &rep) const;
-
   // GADM-style scene-graph snapshot export
   void SaveSceneGraphSnapshot(const std::string &reason);
   void SceneGraphWatchdogCallback();
@@ -553,21 +519,10 @@ private:
   pcl::PointCloud<pcl::PointXYZRGBL>::Ptr door_cloud_final_;
   std::shared_ptr<pointcloud_utils_ns::PCLCloud<pcl::PointXYZRGBL>> door_cloud_vis_;
   std::shared_ptr<pointcloud_utils_ns::PCLCloud<pcl::PointXYZLNormal>> door_cloud_in_range_;
-  Eigen::Vector3d door_position_;
-  Eigen::Vector3d door_normal_;
-  
+
   // Room state flags
-  bool ask_vlm_near_room_;
-  bool ask_vlm_finish_room_;
-  bool ask_vlm_change_room_;
-  bool transit_across_room_;
-  bool at_room_;
-  bool near_room_1_;
-  bool near_room_2_;
   bool enter_wrong_room_;
-  bool asked_in_advance_;
-  bool has_candidate_room_position_;
-  
+
   // Room data structures
   Eigen::MatrixXi adjacency_matrix;
   Eigen::Vector3i room_voxel_dimension_;
@@ -579,19 +534,10 @@ private:
   
   // Room IDs and positions
   int current_room_id_;
-  int target_room_id_;
-  int start_room_id_;
-  int end_room_id_;
-  int prev_room_id_;
   geometry_msgs::msg::Point robot_position_old_;
-  geometry_msgs::msg::Point goal_position_;
-  geometry_msgs::msg::Point candidate_room_position_;
-  
+
   // Room counters and parameters
-  int room_guide_counter_;
   int room_id_change_counter_;
-  int room_navigation_query_counter_;
-  int stayed_in_room_counter_;
   int room_finished_counter_;
   float room_resolution_;
   float occupancy_grid_resolution_;
