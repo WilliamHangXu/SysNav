@@ -947,8 +947,6 @@ bool SensorCoveragePlanner3D::initialize() {
     "object_visibility_connections", 1);
   viewpoint_visibility_pub_ = this ->create_publisher<std_msgs::msg::String>(
       "viewpoint_object_visibility", 1);
-  room_cloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
-      "/room_cloud", 1);
   room_type_pub_ = this->create_publisher<tare_planner::msg::RoomType>(
       "/room_type_query", 10);
   room_type_vis_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>(
@@ -1571,11 +1569,6 @@ void SensorCoveragePlanner3D::SetCurrentRoomId()
   {
     // RCLCPP_INFO(this->get_logger(), "Robot is not in any room");
     return; // maybe just across a door, no need to update the room id
-  }
-
-  if (representation_->HasRoomNode(room_id_tmp_))
-  {
-    representation_->GetRoomNode(room_id_tmp_).SetIsVisited(true);
   }
 
   if ((room_id_tmp_ == current_room_id_) || current_room_id_ == -1)
@@ -3025,7 +3018,6 @@ void SensorCoveragePlanner3D::execute() {
     // prof_exec_last = prof_exec_t0;
     // misc_utils_ns::Timer prof_roomlabel("roomlabel");
     // prof_roomlabel.Start();
-    UpdateRoomLabel();
     SetCurrentRoomId();
     PublishRoomTypeQueries();
     // prof_roomlabel.Stop(false);
@@ -3674,7 +3666,6 @@ void SensorCoveragePlanner3D::PublishRoomTypeQueries()
     anchor.y = room_node.centroid_.y();
     anchor.z = room_node.centroid_.z();
     msg.anchor_point = anchor;
-    room_node.SetAnchorPoint(anchor);  // keep anchor consistent for answer re-resolve
     // Snapshot the canonical interior point for async re-ID: if this room's id has
     // churned by answer time, sampling the mask at this deep-interior point
     // reliably re-resolves it (unlike the drifting anchor).
@@ -3804,135 +3795,6 @@ void SensorCoveragePlanner3D::LogRoomTypeAnswer(
   }
 
   room_type_answer_log_seq_++;
-}
-
-void SensorCoveragePlanner3D::UpdateRoomLabel()
-{
-  pcl::PointCloud<pcl::PointXYZI>::Ptr covered_cloud = planning_env_->GetUpdatedCloudInRange();
-  // ctreat a std::array with the same size as the room_nodes_.size
-  // std::vector<int> room_counts(representation_->GetRoomNodeCount(), 0);
-  std::unordered_map<int, int> room_counts;
-  std::unordered_map<int, pcl::PointCloud<pcl::PointXYZI>> room_cloud_in_range;
-  std::unordered_map<int, Eigen::Vector3f> room_centers;
-  for (auto &id_to_room_node : representation_->GetRoomNodesMapMutable())
-  {
-    int room_id = id_to_room_node.first;
-    room_counts[room_id] = 0;
-    room_cloud_in_range[room_id] = pcl::PointCloud<pcl::PointXYZI>();
-    room_centers[room_id] = Eigen::Vector3f(0.0, 0.0, 0.0);
-  }
-  for (const auto &point : covered_cloud->points)
-  {
-    Eigen::Vector3f point_pos(point.x, point.y, point.z);
-    Eigen::Vector3i point_voxel_ind = misc_utils_ns::point_to_voxel(point_pos, shift_, 1.0 / room_resolution_);
-    // Bulletproofing: skip points whose voxel falls outside room_mask_ (also covers an
-    // empty mask before room_segmentation publishes). An unguarded cv::Mat::at() would
-    // throw and kill the node.
-    if (point_voxel_ind.x() < 0 || point_voxel_ind.x() >= room_mask_.rows ||
-        point_voxel_ind.y() < 0 || point_voxel_ind.y() >= room_mask_.cols)
-    {
-      continue;
-    }
-    int room_id = room_mask_.at<int>(point_voxel_ind.x(), point_voxel_ind.y());
-    if (representation_->HasRoomNode(room_id))
-    {
-      room_counts[room_id]++;
-      room_cloud_in_range[room_id].points.push_back(point);
-      room_centers[room_id] += Eigen::Vector3f(point.x, point.y, point.z);
-    }
-  }
-  std::vector<int> labled_rooms = {};
-  for (auto &id_to_room_node : representation_->GetRoomNodesMapMutable())
-  {
-    int room_id = id_to_room_node.first;
-    auto &room_node = id_to_room_node.second;
-    // First deal with the unlabeled rooms
-    if (room_counts[room_id] == 0)
-    {
-      continue;
-    }
-    else if (representation_->GetRoomNode(room_id).IsLabeled())
-    {
-      labled_rooms.push_back(room_id);
-      continue;
-    }
-    else
-    {
-      room_centers[room_id] /= room_counts[room_id];
-      representation_->GetRoomNode(room_id).SetVoxelNum(room_counts[room_id]);
-      representation_->GetRoomNode(room_id).SetIsLabeled(true);
-
-      pcl::PointCloud<pcl::PointXYZI>::Ptr room_cloud_tmp(new pcl::PointCloud<pcl::PointXYZI>());
-      pcl::PointXYZI room_center;
-      room_center.x = room_centers[room_id].x();
-      room_center.y = room_centers[room_id].y();
-      room_center.z = robot_position_.z; // use the robot z position as the room center z
-      room_center.intensity = 10.0;
-      pcl::copyPointCloud((room_cloud_in_range[room_id]), *room_cloud_tmp);
-      room_cloud_tmp->push_back(room_center);
-
-      // publish it with room_cloud_pub_
-      sensor_msgs::msg::PointCloud2 room_cloud_msg;
-      pcl::toROSMsg(*room_cloud_tmp, room_cloud_msg);
-      room_cloud_msg.header.frame_id = kWorldFrameID;
-      room_cloud_msg.header.stamp = this->now();
-      room_cloud_pub_->publish(room_cloud_msg);
-
-      geometry_msgs::msg::Point anchor_point;
-      anchor_point.x = room_center.x;
-      anchor_point.y = room_center.y;
-      anchor_point.z = robot_position_.z; // use the robot z position as the anchor point z
-      room_node.SetAnchorPoint(anchor_point);
-      room_node.SetLastArea(room_node.area_);
-
-    }
-  }
-  for(int room_id : labled_rooms)
-  {
-    if (!representation_->HasRoomNode(room_id)) {
-      RCLCPP_WARN(this->get_logger(), "Room with id %d does not exist in representation, skip", room_id);
-      continue;
-    }
-    auto &room_node = representation_->GetRoomNode(room_id);
-    if (room_counts[room_id] - representation_->GetRoomNode(room_id).GetVoxelNum() > 20 ||
-        room_node.area_ - room_node.last_area_ > 5.0)
-    // if (room_counts[room_id] - representation_->GetRoomNode(room_id).voxel_num_ > 40)
-    {
-      bool flag1 = (room_counts[room_id] - representation_->GetRoomNode(room_id).GetVoxelNum() > 20);
-      bool flag2 = (room_node.area_ - room_node.last_area_ > 5.0);
-
-      room_centers[room_id] /= room_counts[room_id];
-      representation_->GetRoomNode(room_id).SetVoxelNum(room_counts[room_id]);
-      representation_->GetRoomNode(room_id).SetIsLabeled(true);
-
-      pcl::PointCloud<pcl::PointXYZI>::Ptr room_cloud_tmp(new pcl::PointCloud<pcl::PointXYZI>());
-      pcl::PointXYZI room_center;
-      room_center.x = room_centers[room_id].x();
-      room_center.y = room_centers[room_id].y();
-      room_center.z = robot_position_.z; // use the robot z position as the room center z
-      room_center.intensity = 10.0;
-      pcl::copyPointCloud((room_cloud_in_range[room_id]), *room_cloud_tmp);
-      room_cloud_tmp->push_back(room_center);
-
-      // publish it with room_cloud_pub_
-      sensor_msgs::msg::PointCloud2 room_cloud_msg;
-      pcl::toROSMsg(*room_cloud_tmp, room_cloud_msg);
-      room_cloud_msg.header.frame_id = kWorldFrameID;
-      room_cloud_msg.header.stamp = this->now();
-      room_cloud_pub_->publish(room_cloud_msg);
-
-      if (flag1)
-      {
-        geometry_msgs::msg::Point anchor_point;
-        anchor_point.x = room_center.x;
-        anchor_point.y = room_center.y;
-        anchor_point.z = robot_position_.z; // use the robot z position as the anchor point z
-        room_node.SetAnchorPoint(anchor_point);
-      }
-      room_node.SetLastArea(room_node.area_);
-
-    }
-  }
 }
 
 void SensorCoveragePlanner3D::GetPoseAtTime(double imageTime, float &lidarX, float &lidarY, float &lidarZ, float &lidarRoll, float &lidarPitch, float &lidarYaw)

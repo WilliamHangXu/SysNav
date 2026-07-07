@@ -363,7 +363,6 @@ private:
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr room_type_vis_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr viewpoint_room_id_marker_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr viewpoint_visibility_pub_;
-  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr room_cloud_pub_;
   rclcpp::Publisher<tare_planner::msg::RoomType>::SharedPtr room_type_pub_;
   rclcpp::Publisher<tare_planner::msg::ViewpointRep>::SharedPtr viewpoint_rep_pub_;
 
@@ -404,7 +403,6 @@ private:
   
   // Room management functions
   void SetCurrentRoomId();
-  void UpdateRoomLabel();
   // Evaluate the latest camera frame (motion-gated): attribute it to the room
   // whose floor the current LiDAR sweep observes most within the camera FOV,
   // and admit it into that room's best-3 by pose diversity.
