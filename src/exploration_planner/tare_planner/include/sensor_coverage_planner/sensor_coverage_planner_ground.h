@@ -80,9 +80,6 @@
 #include "tare_planner/msg/room_early_stop1.hpp"
 #include "tare_planner/msg/vlm_answer.hpp"
 #include "tare_planner/msg/navigation_query.hpp"
-#include "tare_planner/msg/target_object_instruction.hpp"
-#include "tare_planner/msg/target_object.hpp"
-#include "tare_planner/msg/target_object_with_spatial.hpp"
 #include <filesystem>
 #include <unordered_map>
 #include <nlohmann/json.hpp>
@@ -358,9 +355,6 @@ private:
   rclcpp::Subscription<tare_planner::msg::RoomNodeList>::SharedPtr room_node_list_sub_;
   rclcpp::Subscription<tare_planner::msg::RoomType>::SharedPtr room_type_sub_;
   rclcpp::Subscription<tare_planner::msg::ObjectNodeList>::SharedPtr object_node_list_sub_;
-  rclcpp::Subscription<tare_planner::msg::TargetObject>::SharedPtr anchor_object_sub_;
-  rclcpp::Subscription<tare_planner::msg::TargetObject>::SharedPtr target_object_sub_;
-  rclcpp::Subscription<tare_planner::msg::TargetObjectInstruction>::SharedPtr target_object_instruction_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PointStamped>::SharedPtr goal_point_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr keyboard_input_sub_;
   rclcpp::Subscription<tare_planner::msg::VlmAnswer>::SharedPtr room_navigation_answer_sub_;
@@ -377,9 +371,6 @@ private:
   rclcpp::Publisher<geometry_msgs::msg::PointStamped>::SharedPtr door_position_pub_;
   rclcpp::Publisher<geometry_msgs::msg::PointStamped>::SharedPtr room_anchor_point_pub_;
   rclcpp::Publisher<tare_planner::msg::RoomType>::SharedPtr room_type_pub_;
-  rclcpp::Publisher<tare_planner::msg::TargetObject>::SharedPtr anchor_object_pub_;
-  rclcpp::Publisher<tare_planner::msg::TargetObject>::SharedPtr target_object_pub_;
-  rclcpp::Publisher<tare_planner::msg::TargetObjectWithSpatial>::SharedPtr target_object_spatial_pub_;
   rclcpp::Publisher<tare_planner::msg::NavigationQuery>::SharedPtr room_navigation_query_pub_;
   rclcpp::Publisher<tare_planner::msg::RoomEarlyStop1>::SharedPtr room_early_stop_1_pub_;
   rclcpp::Publisher<tare_planner::msg::ViewpointRep>::SharedPtr viewpoint_rep_pub_;
@@ -398,10 +389,7 @@ private:
   void RoomTypeCallback(const tare_planner::msg::RoomType::ConstSharedPtr msg);
   void RoomNavigationAnswerCallback(const tare_planner::msg::VlmAnswer::ConstSharedPtr msg);
   void KeyboardInputCallback(const std_msgs::msg::String::ConstSharedPtr msg);
-  void TargetObjectInstructionCallback(const tare_planner::msg::TargetObjectInstruction::ConstSharedPtr msg);
-  void TargetObjectCallback(const tare_planner::msg::TargetObject::ConstSharedPtr msg);
-  void AnchorObjectCallback(const tare_planner::msg::TargetObject::ConstSharedPtr msg);
-  
+
   // Utility functions
   bool CheckRayVisibilityInOccupancyGrid(const Eigen::Vector3i& start_pos, const Eigen::Vector3i& end_pos);
   bool InRange(const Eigen::Vector3i& voxel_index) const;
@@ -466,13 +454,7 @@ private:
   // Object detection and tracking functions
   void UpdateObjectVisibility();
   void UpdateViewpointObjectVisibility();
-  void CheckObjectFound();
-  void ResetFoundObjectInfo();
-  void ResetFoundAnchorObjectInfo();
-  void SetFoundTargetObject();
-  void SetFoundAnchorObject();
   void ProcessObjectNodes();
-  void CheckAnchorObjectFound();
   
   // VLM query functions
   void PublishRoomNavigationQuery();
@@ -616,38 +598,12 @@ private:
   double kRushRoomDist_1;
   double kRushRoomDist_2;
   
-  // Target object tracking
-  bool found_object_;
-  bool ask_found_object_;
-  int found_object_id_;
-  int found_object_room_id_;
-  double found_object_distance_;
-  geometry_msgs::msg::Point found_object_position_;
-  std::string target_object_;
-  
-  // Anchor object tracking
-  bool found_anchor_object_;
-  bool ask_found_anchor_object_;
-  int found_anchor_object_id_;
-  int found_anchor_object_room_id_;
-  double found_anchor_object_distance_;
-  geometry_msgs::msg::Point found_anchor_object_position_;
-  std::vector<geometry_msgs::msg::Point> found_anchor_object_viewpoint_positions_;
-  std::vector<geometry_msgs::msg::Point> found_anchor_object_viewpoint_positions_visited_;
-  std::string anchor_object_;
-  
   // Object detection parameters
   rclcpp::Time last_object_update_time_;
   double rep_sensor_range;
   std::vector<int> object_ids_to_remove_;
   double obj_score_;
-  std::set<int> considered_object_ids_;
-  
-  // Search and navigation conditions
-  std::string room_condition_;
-  std::string spatial_condition_;
-  std::string attribute_condition_;
-  
+
   // Camera and sensor data
   cv::Mat camera_image_;
   std::shared_ptr<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>> freespace_cloud_;
@@ -670,11 +626,7 @@ private:
   float odomZ;
   double PI;
   
-  // Timing
-  rclcpp::Time last_target_object_instruction_time_;
-  
   // Miscellaneous flags
-  bool dynamic_environment_;
   bool tmp_flag_;
 };
 

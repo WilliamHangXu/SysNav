@@ -673,36 +673,10 @@ void SensorCoveragePlanner3D::InitializeData() {
   kRushRoomDist_1 = this->get_parameter("kRushRoomDist_1").as_double();
   kRushRoomDist_2 = this->get_parameter("kRushRoomDist_2").as_double();
 
-  // Target object tracking initialization
-  found_object_ = false;
-  ask_found_object_ = false;
-  found_object_id_ = -1;
-  found_object_room_id_ = -1;
-  found_object_distance_ = 10000.0;
-  found_object_position_ = geometry_msgs::msg::Point();
-  target_object_ = "";
-
-  // Anchor object tracking initialization
-  found_anchor_object_ = false;
-  ask_found_anchor_object_ = false;
-  found_anchor_object_id_ = -1;
-  found_anchor_object_room_id_ = -1;
-  found_anchor_object_distance_ = 10000.0;
-  found_anchor_object_position_ = geometry_msgs::msg::Point();
-  found_anchor_object_viewpoint_positions_.clear();
-  found_anchor_object_viewpoint_positions_visited_.clear();
-  anchor_object_ = "";
-
   // Object detection parameters initialization
   last_object_update_time_ = this->now();
   object_ids_to_remove_ = std::vector<int>();
   obj_score_ = 0.0;
-  considered_object_ids_ = std::set<int>();
-
-  // Search and navigation conditions initialization
-  room_condition_ = "";
-  spatial_condition_ = "";
-  attribute_condition_ = "";
 
   // Camera and sensor data initialization
   camera_image_ = cv::Mat::zeros(640, 1920, CV_8UC3);
@@ -719,11 +693,7 @@ void SensorCoveragePlanner3D::InitializeData() {
   odomZ = 0.0;
   PI = 3.14159265358979323846;
 
-  // Timing initialization
-  last_target_object_instruction_time_ = this->now();
-
   // Miscellaneous flags initialization
-  dynamic_environment_ = false;
   tmp_flag_ = false;
 }
 
@@ -973,18 +943,6 @@ bool SensorCoveragePlanner3D::initialize() {
       "/keyboard_input", 5,
       std::bind(&SensorCoveragePlanner3D::KeyboardInputCallback, this,
                 std::placeholders::_1));
-  target_object_instruction_sub_ = this->create_subscription<tare_planner::msg::TargetObjectInstruction>(
-      "/target_object_instruction", 5,
-      std::bind(&SensorCoveragePlanner3D::TargetObjectInstructionCallback, this,
-                std::placeholders::_1));
-  target_object_sub_ = this->create_subscription<tare_planner::msg::TargetObject>(
-      "/target_object_answer", 5,
-      std::bind(&SensorCoveragePlanner3D::TargetObjectCallback, this,
-                std::placeholders::_1));
-  anchor_object_sub_ = this->create_subscription<tare_planner::msg::TargetObject>(
-      "/anchor_object_answer", 5,
-      std::bind(&SensorCoveragePlanner3D::AnchorObjectCallback, this,
-                std::placeholders::_1));
 
   global_path_full_publisher_ =
       this->create_publisher<nav_msgs::msg::Path>("global_path_full", 1);
@@ -1040,12 +998,6 @@ bool SensorCoveragePlanner3D::initialize() {
       "/object_node_markers", 1);
   chosen_room_boundary_pub_ = this->create_publisher<visualization_msgs::msg::Marker>(
       "/chosen_room_boundary", 1);
-  target_object_pub_ = this->create_publisher<tare_planner::msg::TargetObject>(
-      "/target_object_query", 5);
-  anchor_object_pub_ = this->create_publisher<tare_planner::msg::TargetObject>(
-      "/anchor_object_query", 5);
-  target_object_spatial_pub_ = this->create_publisher<tare_planner::msg::TargetObjectWithSpatial>(
-      "/target_object_spatial_query", 5);
   room_anchor_point_pub_ = this->create_publisher<geometry_msgs::msg::PointStamped>(
       "/room_anchor_point", 5);
 
@@ -1347,10 +1299,6 @@ void SensorCoveragePlanner3D::ObjectNodeListCallback(
     // false for deleted objects, true for updated/new objects
     if (node.status == false) {
       for (auto obj_id : node.object_id) {
-        // TODO: temporarily don't delete the found object
-        if (obj_id == found_object_id_) {
-          continue;
-        }
         object_ids_to_remove_.push_back(obj_id);
         deleted_count++;
       }
@@ -1680,17 +1628,6 @@ void SensorCoveragePlanner3D::RoomTypeCallback(
   labels[room_type] = 1;
   representation_->GetRoomNode(room_id).SetIsLabeled(true); // mark the room as labeled
   std::string current_room_type_new_ = representation_->GetRoomNode(room_id).GetRoomLabel();
-  // mark all objects in this room as not considered
-  // if the room_type != current_room_type_, then mark all objects in this room as not considered
-  if (current_room_type_new_ != current_room_type_)
-  {
-    for (auto object_id : representation_->GetRoomNode(room_id).GetObjectIndices())
-    {
-      if (representation_->HasObjectNode(object_id)) {
-        representation_->GetObjectNodeRep(object_id).SetIsConsidered(false);
-      }
-    }
-  }
   LogRoomTypeAnswer(*room_type_msg, room_id, current_room_type_,
                     current_room_type_new_);
 }
@@ -1698,7 +1635,7 @@ void SensorCoveragePlanner3D::RoomTypeCallback(
 void SensorCoveragePlanner3D::RoomNavigationAnswerCallback(
     const tare_planner::msg::VlmAnswer::ConstSharedPtr msg)
 {
-  if (!initialized_ || transit_across_room_ || found_object_)
+  if (!initialized_ || transit_across_room_)
   {
     return;
   }
@@ -1748,28 +1685,6 @@ void SensorCoveragePlanner3D::RoomNavigationAnswerCallback(
 
 void SensorCoveragePlanner3D::KeyboardInputCallback(const std_msgs::msg::String::ConstSharedPtr keyboard_input_msg)
 {
-  if (keyboard_input_msg->data == "next")
-  {
-    if (found_object_)
-    {
-      ResetFoundObjectInfo();
-      ResetFoundAnchorObjectInfo();
-
-      if (!representation_->HasObjectNode(found_object_id_)) {
-        RCLCPP_WARN(this->get_logger(), "Found object with id %d does not exist in representation, skip marking as considered", found_object_id_);
-        return;
-      }
-      auto &object_node = representation_->GetObjectNodeRep(found_object_id_);
-      object_node.SetIsConsidered(true);
-      object_node.SetIsConsideredStrong(true);
-      considered_object_ids_.insert(found_object_id_);
-    }
-  }
-  if (keyboard_input_msg->data == "dynamic")
-  {
-    dynamic_environment_ = true;
-    // RCLCPP_INFO(this->get_logger(), "✅✅✅✅✅✅Dynamic environment mode on");
-  }
   if (keyboard_input_msg->data == "reset")
   {
     tmp_flag_ = true;
@@ -1778,180 +1693,6 @@ void SensorCoveragePlanner3D::KeyboardInputCallback(const std_msgs::msg::String:
   {
     SaveSceneGraphSnapshot("manual");
   }
-}
-
-void SensorCoveragePlanner3D::TargetObjectInstructionCallback(
-    const tare_planner::msg::TargetObjectInstruction::ConstSharedPtr target_object_instruction_msg)
-{
-  if (!initialized_)
-  {
-    return;
-  }
-  target_object_ = target_object_instruction_msg->target_object;
-  room_condition_ = target_object_instruction_msg->room_condition;
-  spatial_condition_ = target_object_instruction_msg->spatial_condition;
-  anchor_object_ = target_object_instruction_msg->anchor_object;
-  attribute_condition_ = target_object_instruction_msg->attribute_condition;
-  last_target_object_instruction_time_ = this->now();
-
-  // reset considered object ids
-  for (auto &object_id_pair : representation_->GetObjectNodeRepMapMutable())
-  {
-    object_id_pair.second.SetIsConsidered(false);
-    object_id_pair.second.SetIsConsideredStrong(false);
-  }
-  ResetFoundObjectInfo();
-  ResetFoundAnchorObjectInfo();
-  // reset the times of asked for all rooms
-  for (auto &id_room_pair : representation_->GetRoomNodesMapMutable())
-  {
-    id_room_pair.second.SetIsAskedValue(2);
-  }
-}
-
-void SensorCoveragePlanner3D::TargetObjectCallback(
-    const tare_planner::msg::TargetObject::ConstSharedPtr target_object_msg)
-{
-  if (!initialized_)
-  {
-    return;
-  }
-  int candidate_found_object_id = target_object_msg->object_id;
-  if (!representation_->HasObjectNode(candidate_found_object_id))
-  {
-    RCLCPP_ERROR(this->get_logger(), "Target object id %d is out of bounds",
-                 candidate_found_object_id);
-    return;
-  }
-  representation_ns::ObjectNodeRep &candidate_found_object = representation_->GetObjectNodeRep(candidate_found_object_id);
-  geometry_msgs::msg::Point candidate_found_object_position_ = candidate_found_object.GetPosition();
-  int candidate_found_object_room_id_ = candidate_found_object.room_id_;
-
-  // if (candidate_found_object.IsConsidered() || candidate_found_object.IsConsideredStrong())
-  if (candidate_found_object.IsConsideredStrong())
-  {
-    // already considered this object, skip
-    return;
-  }
-  if (rclcpp::Time(target_object_msg->header.stamp) < last_target_object_instruction_time_)
-  {
-    // the target object message is from previous instruction, skip
-    return;
-  }
-
-  nav_msgs::msg::Path path;
-  double candidate_found_object_distance = keypose_graph_->GetShortestPath(robot_position_, candidate_found_object_position_, false, path, true);
-
-  if (target_object_msg->is_target)
-  {
-    if (!found_object_)
-    {
-      found_object_ = true;
-      found_object_id_ = candidate_found_object_id;
-      found_object_position_ = candidate_found_object_position_;
-      found_object_room_id_ = candidate_found_object_room_id_;
-      found_object_distance_ = candidate_found_object_distance;
-      ask_found_object_ = false;
-
-      // Override the transit across room state
-      ResetRoomInfo();
-
-      // RCLCPP_INFO(this->get_logger(), "✅✅✅ Found target object id: %d", found_object_id_);
-    }
-    else
-    {
-      if (candidate_found_object_distance < found_object_distance_)
-      {
-        found_object_id_ = candidate_found_object_id;
-        found_object_position_ = candidate_found_object_position_;
-        found_object_room_id_ = candidate_found_object_room_id_;
-        found_object_distance_ = candidate_found_object_distance;
-        ask_found_object_ = false;
-
-        // RCLCPP_INFO(this->get_logger(), "✅✅✅ Update to a closer target object id: %d", found_object_id_);
-      }
-    }
-  }
-}
-
-void SensorCoveragePlanner3D::AnchorObjectCallback(
-    const tare_planner::msg::TargetObject::ConstSharedPtr anchor_object_msg)
-{
-  if (!initialized_)
-  {
-    return;
-  }
-  int anchor_object_id = anchor_object_msg->object_id;
-  if (!representation_->HasObjectNode(anchor_object_id))
-  {
-    RCLCPP_ERROR(this->get_logger(), "Anchor object id %d is out of bounds",
-                 anchor_object_id);
-    return;
-  }
-  representation_ns::ObjectNodeRep &anchor_object = representation_->GetObjectNodeRep(anchor_object_id);
-  geometry_msgs::msg::Point anchor_object_position_ = anchor_object.GetPosition();
-  int anchor_object_room_id_ = anchor_object.room_id_;
-
-  nav_msgs::msg::Path path;
-  double anchor_object_distance = keypose_graph_->GetShortestPath(robot_position_, anchor_object_position_, false, path, true);
-
-  if (anchor_object_msg->is_target)
-  {
-    found_anchor_object_ = true;
-    found_anchor_object_id_ = anchor_object_id;
-    found_anchor_object_position_ = anchor_object_position_;
-    found_anchor_object_room_id_ = anchor_object_room_id_;
-    found_anchor_object_distance_ = anchor_object_distance;
-
-    // RCLCPP_INFO(this->get_logger(), "🔖🔖🔖 Found anchor object id: %d", found_anchor_object_id_);
-  }
-}
-
-// ================== Set and Reset Found Object Info ==================
-void SensorCoveragePlanner3D::SetFoundTargetObject()
-{
-  grid_world_->SetObjectFound(true);
-  grid_world_->SetFoundObjectPosition(found_object_position_);
-  local_coverage_planner_->SetObjectFound(true);
-}
-
-void SensorCoveragePlanner3D::ResetFoundObjectInfo()
-{
-  found_object_ = false;
-  ask_found_object_ = false;
-  found_object_id_ = -1;
-  found_object_room_id_ = -1;
-  found_object_distance_ = -1.0;
-  found_object_position_.x = 0.0;
-  found_object_position_.y = 0.0;
-  found_object_position_.z = 0.0;
-
-  grid_world_->SetObjectFound(false);
-  local_coverage_planner_->SetObjectFound(false);
-}
-
-void SensorCoveragePlanner3D::SetFoundAnchorObject()
-{
-  grid_world_->SetAnchorObjectFound(true);
-  grid_world_->SetFoundAnchorObjectPosition(found_anchor_object_viewpoint_positions_);
-  local_coverage_planner_->SetAnchorObjectFound(true);
-}
-
-void SensorCoveragePlanner3D::ResetFoundAnchorObjectInfo()
-{
-  found_anchor_object_ = false;
-  found_anchor_object_id_ = -1;
-  found_anchor_object_room_id_ = -1;
-  found_anchor_object_distance_ = -1.0;
-  found_anchor_object_position_.x = 0.0;
-  found_anchor_object_position_.y = 0.0;
-  found_anchor_object_position_.z = 0.0;
-
-  found_anchor_object_viewpoint_positions_.clear();
-  found_anchor_object_viewpoint_positions_visited_.clear();
-
-  grid_world_->SetAnchorObjectFound(false);
-  local_coverage_planner_->SetAnchorObjectFound(false);
 }
 
 // ================== Set and Reset Room Info ==================
@@ -2092,7 +1833,7 @@ void SensorCoveragePlanner3D::SetCurrentRoomId()
     representation_->GetRoomNode(room_id_tmp_).SetIsVisited(true);
   }
 
-  if (transit_across_room_ || found_object_)
+  if (transit_across_room_)
   {
     // If the robot is transiting across rooms, we can update the room id immediately
     current_room_id_ = room_id_tmp_;
@@ -2688,8 +2429,6 @@ void SensorCoveragePlanner3D::UpdateObjectVisibility()
         viewpoint.AddDirectObjectIndex(object_id);
         object.AddVisibleViewpoint(viewpoint.GetId());
         visible_object_ids.push_back(object_id);
-
-        object.SetIsConsidered(false);
         // RCLCPP_INFO(this->get_logger(),
         //             "Object ID %d (%s) is detected at viewpoint %d (new object)",
         //             object.GetObjectId(),
@@ -2728,8 +2467,6 @@ void SensorCoveragePlanner3D::UpdateObjectVisibility()
           viewpoint.AddObjectIndex(object_id);
           object.AddVisibleViewpoint(viewpoint.GetId());
           visible_object_ids.push_back(object_id);
-
-          object.SetIsConsidered(false);
           // RCLCPP_INFO(this->get_logger(),
           //             "Object ID %d (%s) is visible from viewpoint %d",
           //             object.GetObjectId(),
@@ -2894,8 +2631,6 @@ void SensorCoveragePlanner3D::UpdateViewpointObjectVisibility()
     {
       current_viewpoint.AddObjectIndex(object.GetObjectId());
       object.AddVisibleViewpoint(current_viewpoint.GetId());
-
-      object.SetIsConsidered(false);
       // RCLCPP_INFO(this->get_logger(),
       //             "Object ID %d (%s) is visible from viewpoint %d",
       //             object.GetObjectId(),
@@ -3787,7 +3522,7 @@ void SensorCoveragePlanner3D::PublishWaypoint() {
     SendInRoomWaypoint();
     return;
   }
-  else if ((ask_vlm_finish_room_ || ask_vlm_change_room_ || ask_found_object_) && !transit_across_room_)
+  else if ((ask_vlm_finish_room_ || ask_vlm_change_room_) && !transit_across_room_)
   {
     if (ask_vlm_finish_room_)
     {
@@ -3796,10 +3531,6 @@ void SensorCoveragePlanner3D::PublishWaypoint() {
     if (ask_vlm_change_room_)
     {
       // RCLCPP_INFO(this->get_logger(), "Accidentally enter a new room");
-    }
-    if (ask_found_object_)
-    {
-      // RCLCPP_INFO(this->get_logger(), "Found the target object, waiting for next action");
     }
     // If the room is finished, we just send the robot position as the waypoint(not moving)
     waypoint.point.x = robot_position_.x;
@@ -3987,11 +3718,6 @@ void SensorCoveragePlanner3D::execute() {
   }
 
   ProcessObjectNodes();
-  CheckObjectFound();
-  if (dynamic_environment_)
-  {
-    CheckAnchorObjectFound();
-  }
 
   if (tmp_flag_)
   {
@@ -5674,332 +5400,6 @@ void SensorCoveragePlanner3D::SceneGraphWatchdogCallback()
   scene_graph_last_sim_time_ = current_sim_time;
 }
 
-void SensorCoveragePlanner3D::CheckObjectFound()
-{
-  if (!initialized_) {
-    RCLCPP_ERROR(this->get_logger(), "Planner not initialized, cannot check object found");
-    return;
-  }
-
-  if (found_object_)
-  {
-    if (!representation_->HasObjectNode(found_object_id_))
-    {
-      RCLCPP_WARN(this->get_logger(), "The previously found object with id %d is no longer in the representation, reset found_object_ to false", found_object_id_);
-      ResetFoundObjectInfo();
-      return;
-    }
-    // get the room of the found object
-    found_object_room_id_ = representation_->GetObjectNodeRep(found_object_id_).room_id_;
-    found_object_position_ = representation_->GetObjectNodeRep(found_object_id_).position_;
-    if (found_object_room_id_ != -1 && (representation_->HasRoomNode(found_object_room_id_)))
-    {
-      auto &found_object_room = representation_->GetRoomNode(found_object_room_id_);
-      // if the anchor point of the room is not the initial value
-      if (found_object_room.anchor_point_.x == 0.0 &&
-          found_object_room.anchor_point_.y == 0.0 &&
-          found_object_room.anchor_point_.z == 0.0)
-      {
-        RCLCPP_ERROR(this->get_logger(), "Anchor point of the room %d is not set", found_object_room_id_);
-        return;
-      }
-      geometry_msgs::msg::PointStamped::SharedPtr geomsg(
-          new geometry_msgs::msg::PointStamped());
-      geomsg->header.frame_id = "map";
-      geomsg->header.stamp = this->now();
-      geomsg->point.x = found_object_room.anchor_point_.x;
-      geomsg->point.y = found_object_room.anchor_point_.y;
-      geomsg->point.z = found_object_room.anchor_point_.z;
-      GoalPointCallback(geomsg);
-    }
-
-    // RCLCPP_INFO(this->get_logger(), "✅✅✅Target object %s with id %d found", target_object_.c_str(), found_object_id_);
-    nav_msgs::msg::Path path;
-    found_object_distance_ = keypose_graph_->GetShortestPath(robot_position_, found_object_position_, false, path, true);
-    double euclidean_distance_to_object_ = std::sqrt(std::pow(robot_position_.x - found_object_position_.x, 2) +
-                                                     std::pow(robot_position_.y - found_object_position_.y, 2) +
-                                                     std::pow(robot_position_.z - found_object_position_.z, 2));
-    // RCLCPP_INFO(this->get_logger(), "Distance to the found object: %.2f meters", found_object_distance_);
-    if (found_object_distance_ < 1.0 && euclidean_distance_to_object_ < 2.0)
-    {
-      ask_found_object_ = true;
-    }
-    else
-    {
-      ask_found_object_ = false;
-    }
-
-    if (current_room_id_ == found_object_room_id_)
-    {
-      SetFoundTargetObject();
-    }
-  }
-
-  std::vector<int> error_object_ids = {};
-  // Check if there are any target objects in the current viewpoint representation
-  for (auto &id_object_node_pair : representation_->GetObjectNodeRepMapMutable())
-  {
-    auto &id = id_object_node_pair.first;
-    auto &object_node = id_object_node_pair.second;
-    if (object_node.label_ == target_object_)
-    {
-      // if (considered_object_ids_.find(id) != considered_object_ids_.end())
-      if (object_node.IsConsidered() || object_node.IsConsideredStrong())
-      {
-        // RCLCPP_INFO(this->get_logger(), "❌❌❌Object %s with id %d already considered, skip", object_node.label_.c_str(), id);
-        continue;
-      }
-      if (not object_node.is_asked_vlm_)
-      {
-        // RCLCPP_INFO(this->get_logger(), "❌❌❌Object %s with id %d label haven't been checked by VLM, skip", object_node.label_.c_str(), object_node.object_id_[0]);
-        continue;
-      }
-      int room_id = object_node.room_id_;
-      if (!representation_->HasRoomNode(room_id))
-      {
-        // RCLCPP_WARN(this->get_logger(), "❌❌❌Object %s with id %d found in unknown room with id %d",
-        //             object_node.label_.c_str(), object_node.object_id_[0], room_id);
-        continue;
-      }
-      std::string img_path = object_node.img_path_;
-      // if this path does not exist, warn and remove the object and continue
-      if (!std::filesystem::exists(img_path))
-      {
-        // RCLCPP_ERROR(this->get_logger(), "❌❌❌Image path %s does not exist, remove the object %s with id %d from consideration",
-        //             img_path.c_str(), object_node.label_.c_str(), object_node.object_id_[0]);
-        error_object_ids.push_back(id);
-        continue;
-      }
-      auto &room_node = representation_->GetRoomNode(room_id);
-      std::string label = room_node.GetRoomLabel();
-      
-      // RCLCPP_ERROR(this->get_logger(), "❌❌❌Object %s with id %d in room %s with is_considered_ %d, is_asked_vlm_ %d, visible_viewpoint_indices_ size %d",
-      //         object_node.label_.c_str(), object_node.object_id_[0], label.c_str(), object_node.IsConsidered(), object_node.is_asked_vlm_, (int)object_node.visible_viewpoint_indices_.size());
-
-      if (spatial_condition_=="")
-      {
-        // publish a targrt object query
-        tare_planner::msg::TargetObject target_object_msg;
-        target_object_msg.header.stamp = this->now();
-        target_object_msg.object_id = object_node.object_id_[0];
-        target_object_msg.object_label = object_node.label_;
-        target_object_msg.img_path = object_node.img_path_;
-        target_object_msg.room_label = label;
-        target_object_msg.is_target = false;
-        target_object_pub_->publish(target_object_msg);
-
-        object_node.SetIsConsidered(true);
-        considered_object_ids_.insert(id);
-
-        // // TODO: Unit Test
-        // auto found_object_msg = std::make_shared<tare_planner::msg::TargetObject>();
-        // found_object_msg->header.stamp = this->now();
-        // found_object_msg->object_id = object_node.object_id_[0];
-        // found_object_msg->object_label = object_node.label_;
-        // found_object_msg->img_path = object_node.img_path_;
-        // found_object_msg->room_label = label;
-        // found_object_msg->is_target = true;
-        // TargetObjectCallback(found_object_msg);
-      }
-      else
-      {
-        // get the viewpoint ids which can see this object
-        std::vector<int> viewpoint_ids;
-        for (const auto &viewpoint_id : object_node.visible_viewpoint_indices_)
-        {
-          viewpoint_ids.push_back(viewpoint_id);
-        }
-        // publish a targrt object query
-        tare_planner::msg::TargetObjectWithSpatial target_object_msg;
-        target_object_msg.header.stamp = this->now();
-        target_object_msg.object_id = object_node.object_id_[0];
-        target_object_msg.object_label = object_node.label_;
-        target_object_msg.img_path = object_node.img_path_;
-        target_object_msg.viewpoint_ids = viewpoint_ids;
-        target_object_msg.bbox3d = object_node.bbox3d_;
-        target_object_msg.room_label = label;
-        target_object_msg.is_target = false;
-        target_object_spatial_pub_->publish(target_object_msg);
-
-        object_node.SetIsConsidered(true);
-        considered_object_ids_.insert(id);
-
-        // // TODO: Unit Test
-        // auto found_object_msg = std::make_shared<tare_planner::msg::TargetObject>();
-        // found_object_msg->header.stamp = this->now();
-        // found_object_msg->object_id = object_node.object_id_[0];
-        // found_object_msg->object_label = object_node.label_;
-        // found_object_msg->img_path = object_node.img_path_;
-        // found_object_msg->room_label = label;
-        // found_object_msg->is_target = true;
-        // TargetObjectCallback(found_object_msg);
-      }
-    }
-  }
-
-  // // remove the error object ids from the representation
-  // for (const auto &error_id : error_object_ids)
-  // {
-  //   representation_->GetObjectNodeRepMapMutable().erase(error_id);
-  //   representation_->latest_object_node_rep_map_.erase(error_id);
-  //   object_ids_to_remove_.push_back(error_id);
-  // }
-  
-  return;
-}
-
-void SensorCoveragePlanner3D::CheckAnchorObjectFound()
-{
-  if (!initialized_)
-  {
-    RCLCPP_ERROR(this->get_logger(), "Planner not initialized, cannot check object found");
-    return;
-  }
-
-  std::vector<int> error_object_ids = {};
-  // Check if there are any target objects in the current viewpoint representation
-  for (auto &id_object_node_pair : representation_->GetObjectNodeRepMapMutable())
-  {
-    auto &id = id_object_node_pair.first;
-    auto &object_node = id_object_node_pair.second;
-    if (object_node.label_ == anchor_object_)
-    {
-      if (object_node.IsConsidered() || object_node.IsConsideredStrong())
-      {
-        RCLCPP_INFO(this->get_logger(), "❌❌❌Object %s with id %d already considered, skip", object_node.label_.c_str(), id);
-        continue;
-      }
-      int room_id = object_node.room_id_;
-      if (!representation_->HasRoomNode(room_id))
-      {
-        RCLCPP_WARN(this->get_logger(), "❌❌❌Object %s with id %d found in unknown room with id %d",
-                    object_node.label_.c_str(), object_node.object_id_[0], room_id);
-        continue;
-      }
-      if (not object_node.is_asked_vlm_)
-      {
-        RCLCPP_INFO(this->get_logger(), "❌❌❌Object %s with id %d label haven't been checked by VLM, skip", object_node.label_.c_str(), object_node.object_id_[0]);
-        continue;
-      }
-      representation_ns::RoomNodeRep &room_node = representation_->GetRoomNode(room_id);
-      std::string room_condition_tmp = "in the " + room_node.GetRoomLabel();
-      if (room_condition_tmp != room_condition_)
-      {
-        RCLCPP_INFO(this->get_logger(), "❌❌❌Object %s with id %d in room %s does not satisfy the room condition %s, skip",
-                    object_node.label_.c_str(), object_node.object_id_[0], room_node.GetRoomLabel().c_str(), room_condition_.c_str());
-        continue;
-      }
-      std::string img_path = object_node.img_path_;
-      // if this path does not exist, warn and remove the object and continue
-      if (!std::filesystem::exists(img_path))
-      {
-        RCLCPP_ERROR(this->get_logger(), "❌❌❌Image path %s does not exist, remove the object %s with id %d from consideration",
-                     img_path.c_str(), object_node.label_.c_str(), object_node.object_id_[0]);
-        error_object_ids.push_back(id);
-        continue;
-      }
-      std::string label = room_node.GetRoomLabel();
-
-      RCLCPP_ERROR(this->get_logger(), "❌❌❌Object %s with id %d in room %s with is_considered_ %d, is_asked_vlm_ %d, visible_viewpoint_indices_ size %d",
-                   object_node.label_.c_str(), object_node.object_id_[0], label.c_str(), object_node.IsConsidered(), object_node.is_asked_vlm_, (int)object_node.visible_viewpoint_indices_.size());
-
-      // publish a targrt object query
-      tare_planner::msg::TargetObject anchor_object_msg;
-      anchor_object_msg.header.stamp = this->now();
-      anchor_object_msg.object_id = object_node.object_id_[0];
-      anchor_object_msg.object_label = object_node.label_;
-      anchor_object_msg.img_path = object_node.img_path_;
-      anchor_object_msg.room_label = label;
-      anchor_object_msg.is_target = false;
-      anchor_object_pub_->publish(anchor_object_msg);
-
-      object_node.SetIsConsidered(true);
-      considered_object_ids_.insert(id);
-    }
-  }
-
-  if (found_anchor_object_ && !found_object_)
-  {
-    if (!representation_->HasObjectNode(found_anchor_object_id_))
-    {
-      RCLCPP_WARN(this->get_logger(), "The previously found anchor object with id %d is no longer in the representation, reset found_anchor_object_ to false", found_anchor_object_id_);
-      ResetFoundAnchorObjectInfo();
-      return;
-    }
-    // get the room of the found object
-    auto &object_node = representation_->GetObjectNodeRep(found_anchor_object_id_);
-    found_anchor_object_room_id_ = object_node.room_id_;
-    found_anchor_object_position_ = object_node.position_;
-
-    found_anchor_object_viewpoint_positions_.clear();
-    for (const auto &viewpoint_id : object_node.visible_viewpoint_indices_)
-    {
-      // check if the viewpoint is very close to the robot position, if yes, consider it as visited
-      auto &viewpoint = representation_->GetViewPointRepNode(viewpoint_id);
-      auto &vp_pos = viewpoint.GetPosition();
-      double distance_to_robot = std::sqrt(std::pow(robot_position_.x - vp_pos.x, 2) +
-                                           std::pow(robot_position_.y - vp_pos.y, 2));
-      if (distance_to_robot < 1.0)
-      {
-        found_anchor_object_viewpoint_positions_visited_.push_back(viewpoint.GetPosition());
-        // RCLCPP_INFO(this->get_logger(), "Viewpoint %d is very close to the robot position, consider it as visited", viewpoint.GetId());
-        continue;
-      }
-      // only add the viewpoint position if it is in the same room as the anchor object,
-      // and it has not been considered before
-      // and it is not already in the list
-      bool already_considered = std::find(found_anchor_object_viewpoint_positions_visited_.begin(), found_anchor_object_viewpoint_positions_visited_.end(), viewpoint.GetPosition()) != found_anchor_object_viewpoint_positions_visited_.end();
-      if (viewpoint.room_id_ == found_anchor_object_room_id_ && !already_considered)
-      {
-        found_anchor_object_viewpoint_positions_.push_back(viewpoint.GetPosition());
-      }
-    }
-
-    if (found_anchor_object_room_id_ != -1 && (representation_->HasRoomNode(found_anchor_object_room_id_)))
-    {
-      auto &found_anchor_object_room = representation_->GetRoomNode(found_anchor_object_room_id_);
-      // if the anchor point of the room is not the initial value
-      if (found_anchor_object_room.anchor_point_.x == 0.0 &&
-          found_anchor_object_room.anchor_point_.y == 0.0 &&
-          found_anchor_object_room.anchor_point_.z == 0.0)
-      {
-        RCLCPP_ERROR(this->get_logger(), "Anchor point of the room %d is not set", found_anchor_object_room_id_);
-        return;
-      }
-      geometry_msgs::msg::PointStamped::SharedPtr geomsg(
-          new geometry_msgs::msg::PointStamped());
-      geomsg->header.frame_id = "map";
-      geomsg->header.stamp = this->now();
-      geomsg->point.x = found_anchor_object_room.anchor_point_.x;
-      geomsg->point.y = found_anchor_object_room.anchor_point_.y;
-      geomsg->point.z = found_anchor_object_room.anchor_point_.z;
-      GoalPointCallback(geomsg);
-    }
-
-    // RCLCPP_INFO(this->get_logger(), "✅✅✅Anchor object %s with id %d found", anchor_object_.c_str(), found_anchor_object_id_);
-    nav_msgs::msg::Path path;
-    found_anchor_object_distance_ = keypose_graph_->GetShortestPath(robot_position_, found_anchor_object_position_, false, path, true);
-    double euclidean_distance_to_object_ = std::sqrt(std::pow(robot_position_.x - found_anchor_object_position_.x, 2) +
-                                                     std::pow(robot_position_.y - found_anchor_object_position_.y, 2) +
-                                                     std::pow(robot_position_.z - found_anchor_object_position_.z, 2));
-    // RCLCPP_INFO(this->get_logger(), "Distance to the found object: %.2f meters", found_anchor_object_distance_);
-    // if (found_object_distance_ < 1.0 && euclidean_distance_to_object_ < 2.0)
-    // {
-    //   ask_found_object_ = true;
-    // }
-    // else
-    // {
-    //   ask_found_object_ = false;
-    // }
-
-    if (current_room_id_ == found_anchor_object_room_id_)
-    {
-      SetFoundAnchorObject();
-    }
-  }
-  return;
-}
-
 void SensorCoveragePlanner3D::ChangeRoomQuery(const int &room_id_1, const int &room_id_2, bool enter_wrong_room)
 {
   if (!initialized_) {
@@ -6138,17 +5538,6 @@ void SensorCoveragePlanner3D::ProcessObjectNodes()
     {
       id_room_pair.second.DeleteObjectIndex(obj_id);
     }
-  }
-  // if the found_object_id_ or the found_anchor_object_id_ is in the removed list, reset the found info or the anchor found info
-  if (found_object_ && (std::find(object_ids_to_remove_.begin(), object_ids_to_remove_.end(), found_object_id_) != object_ids_to_remove_.end()))
-  {
-    RCLCPP_WARN(this->get_logger(), "The previously found object with id %d has been removed from the representation, reset found_object_ to false", found_object_id_);
-    ResetFoundObjectInfo();
-  }
-  if (found_anchor_object_ && (std::find(object_ids_to_remove_.begin(), object_ids_to_remove_.end(), found_anchor_object_id_) != object_ids_to_remove_.end()))
-  {
-    RCLCPP_WARN(this->get_logger(), "The previously found anchor object with id %d has been removed from the representation, reset found_anchor_object_ to false", found_anchor_object_id_);
-    ResetFoundAnchorObjectInfo();
   }
   object_ids_to_remove_.clear();
 }
