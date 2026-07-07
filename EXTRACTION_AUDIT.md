@@ -19,9 +19,9 @@
 | Component | Verdict | Why |
 |---|---|---|
 | `representation`, `navgraph`, `quadrant_manager`, `scene_graph_exporter`, `keypose_graph`, `room_segmentation` | **KEEP** | The scene graph itself |
-| `planning_env` (+ `rolling_occupancy_grid`, `rolling_grid`, `grid`, `pointcloud_manager`) | **TRIM** | The occupancy spine — the scene graph needs a ~12-method slice of it (see R3). Don't rewrite; strip. |
-| `viewpoint_manager` (+ `viewpoint`) | **KILL + 2 replacements** | Zero scene-graph API — but `/freespace_cloud` (→ room_segmentation) and `KeyposeGraph::CheckLocalCollision` currently route through it (R1, R2) |
-| `grid_world`, `local_coverage_planner`, `exploration_path`, `tsp_solver`, `tare_visualizer`, **or-tools (137 MB)** | **KILL** | Zero scene-graph contribution (verified call-by-call) |
+| `planning_env` (+ `rolling_occupancy_grid`, `rolling_grid`, `grid`, `pointcloud_manager`) | **KEEP (untrimmed for now)** | The occupancy spine. The R3 trim is deferred with R1/R2 (see decision note below). |
+| `viewpoint_manager` (+ `viewpoint`, `exploration_path`, `lidar_model`) | **KEEP (for now — decision 2026-07-06)** | Zero scene-graph API of its own, but `/freespace_cloud` (→ room_segmentation) and `KeyposeGraph::CheckLocalCollision` route through it. Replacing those (R1, R2) is *rewiring*, deferred until wanted; until then viewpoint_manager + its feeding path (`UpdateViewPoints` collision/LOS/connectivity, `planning_env` collision cloud) stay. `exploration_path`/`lidar_model` stay as its build deps. |
+| `grid_world`, `local_coverage_planner`, `tsp_solver`, `tare_visualizer`, `graph`, **or-tools (137 MB)** | **KILL (Phase 2)** | Pure *consumers* of viewpoint_manager/keypose_graph — zero scene-graph contribution, and deleting them needs no rewiring, only call-site pruning in the monolith. Prereq: drop viewpoint_manager's unused `UpdateViewPointVisited(grid_world)` overload + its `grid_world.h` include (only caller is deleted motion code). |
 | Terrain (`/terrain_map*` subs, 3 clouds, 2 callbacks) | **KILL** | Only feeds viewpoint collision/height (motion). Already inert: `scene_graph.launch` starts no terrain node |
 | Room-typing pipeline (views → VLM → label) | **KEEP, planner-free** | Verified: zero dependency on planning_env / viewpoint_manager / grid_world / ray-casts |
 | `UpdateRoomLabel` | **KILL** | Pure navigation bookkeeping + the `SetIsLabeled` corruption bug; room typing does not need it |
@@ -69,16 +69,17 @@ vlm:          /room_type_answer ─► planner node              (KEEP)
 | `keypose_graph` | KEEP | Feeders after extraction: `AddKeyposeNode` (needs point `InCollision` — one call site, `keypose_graph.cpp:617`), `CheckLocalCollision` (R2), `CheckConnectivity`. `AddPath` callers die with grid_world ⇒ trajectory-only graph (no connector nodes) — accepted |
 | `navgraph`, `quadrant_manager`, `scene_graph_exporter` | KEEP | Unchanged; navgraph reads keypose_graph in-process |
 | `room_segmentation` | KEEP | Standalone executable; inputs: registered scan, odom, `/occupied_cloud`, `/freespace_cloud` (R1) |
-| `planning_env` | TRIM (R3) | Keep ingest + occupancy accessors; delete frontier/coverage/collision-cloud/boundary machinery |
+| `planning_env` | KEEP (R3 trim deferred) | The occupancy spine; also feeds viewpoint_manager's collision cloud while that stays |
 | `rolling_occupancy_grid`, `rolling_grid`, `grid` | KEEP | The actual occupancy engine (`CheckLineOfSight`, FREE/OCCUPIED cells, updated clouds) |
 | `pointcloud_manager` | KEEP | Occupancy persistence beyond the rolling window (`planning_env.h:99–119` stores rolled-out cells and re-feeds rolled-in) — needed so revisited areas keep occupancy |
-| `viewpoint_manager`, `viewpoint` | KILL | After R1 + R2 |
-| `grid_world` | KILL | Also removes all `AddPath` connector injection |
-| `local_coverage_planner`, `exploration_path`, `tsp_solver` | KILL | Local/global TSP |
-| `tare_visualizer` | KILL | Exploration viz |
-| `or-tools/` (137 MB vendored) | KILL | Only tsp_solver uses it |
-| `lidar_model` | KILL-with-trim | Included by `planning_env.h` (coverage methods being deleted) and `viewpoint.h` (killed). Verify at build |
-| `graph` | KILL (verify) | Included only by the monolith; likely dead after trim. Verify at build |
+| `viewpoint_manager`, `viewpoint` | KEEP (for now) | Decision 2026-07-06: removal requires R1/R2 rewiring — deferred. Prune only its unused `UpdateViewPointVisited(grid_world)` overload so grid_world can go |
+| `grid_world` | KILL (Phase 2) | Also removes all `AddPath` connector injection |
+| `local_coverage_planner`, `tsp_solver` | KILL (Phase 2) | Local/global TSP |
+| `exploration_path` | KEEP | Build dep of viewpoint_manager (and the monolith's `exploration_path_` member while motion members are pruned) |
+| `tare_visualizer` | KILL (Phase 2) | Exploration viz |
+| `or-tools/` (137 MB vendored) | KILL (Phase 2) | Only tsp_solver uses it |
+| `lidar_model` | KEEP | Included by `planning_env.h` and `viewpoint.h` — both stay |
+| `graph` | KILL (verify) | Included only by the monolith; likely dead. Verify at build |
 | `utils` (misc_utils, pointcloud_utils) | KEEP | Used everywhere |
 | `navigation_boundary_publisher` | KILL | Steering-support executable |
 | msgs | TRIM | Keep: ObjectNode(List), RoomNode(List), RoomType, ViewpointRep, DetectionResult, ObjectType, WallAxis. Kill: NavigationQuery, VlmAnswer, RoomEarlyStop1, TargetObject\*, TargetObjectInstruction (unless semantic_mapping's use of the instruction is kept — see vlm_node section) |
@@ -133,6 +134,11 @@ void execute() {                    // still on keypose_cloud_update_
 
 ## Replacement tasks (the actual engineering)
 
+> **DEFERRED (decision 2026-07-06).** The user chose to keep `viewpoint_manager`
+> (and an untrimmed `planning_env`) for now: current scope is **only deletions
+> that are completely unnecessary and safe — no rewiring**. R1/R2/R3/R4 below
+> stay documented for when the viewpoint_manager removal is picked up again.
+
 ### R1 — `/freespace_cloud` for room_segmentation  ⚠ highest behavior risk
 Today: `PublishFreespaceCloud()` (`:3377`) emits `viewpoint_manager_->GetFreespaceCloud()` = candidate-viewpoint positions that are `!InCollision && InLineOfSight && Connected` — i.e., a robot-height layer of validated free space (gated to >20 s after start). room_segmentation uses it to **decrement wall_hist** (`updateFreespace`, "the halving") — free-space evidence eroding wall votes.
 Replacement: publish FREE-state cell centers from `rolling_occupancy_grid` restricted to a **z-band around robot height** (match the viewpoint layer). Differences to watch: grid FREE comes from ray-tracing (includes cells a viewpoint check would reject near obstacles); no connectivity gating; density differs (viewpoint resolution vs grid resolution). **Tune against the golden master** — wall erosion rate directly shapes rooms.
@@ -176,7 +182,7 @@ Kill: `/room_navigation_query`→`/room_navigation_answer`, `/room_early_stop_1`
 
 0. Golden harness: run current stack on 1–2 reference bags, keep `snapshot_final.json` + a structural comparator.
 1. **DONE (2026-07-06, commits 37f1f59..2b5b3d5)** — R5 write deletions + nav callback/publisher kills; −2014 lines from the monolith pair. Verified on the go2w_008 bag `20260628_232101` (`decompress_camera:=true` needed when launching outside the docker supervisor): room views → VLM query → `office-room_1`, 16+1 waypoints, 23 edges, compass, watchdog final snapshot. Stale doc references to `UpdateRoomLabel` remain in `ROOM_LABELING.md` (docs pass pending).
-2. R1 freespace source swap (tune), then R2 keypose healing swap (compare NavGraph).
-3. Kill viewpoint_manager/grid_world/local_coverage_planner/terrain/TSP/or-tools + R3 planning_env trim + `execute()` reduction; CMake cleanup.
+2. **REVISED (2026-07-06): consumer deletions only, no rewiring.** Kill the motion-planning *consumers*: grid_world, local_coverage_planner, tsp_solver + or-tools (137 MB), tare_visualizer, `graph`, navigation_boundary_publisher; the monolith's motion tail (Global/LocalPlanning, lookahead/waypoint publishing, coverage updates, exploration termination, runtime reporting); terrain + boundary dead inputs. Keep viewpoint_manager + `UpdateViewPoints` (collision/LOS/connectivity — feeds `CheckLocalCollision` and `/freespace_cloud`) and planning_env untrimmed. Prereq: drop viewpoint_manager's `UpdateViewPointVisited(grid_world)` overload. Package level: delete `base_autonomy/` + `route_planner/` (unreferenced by the ROS2 pipeline and by both tmux flows); keep `slam` (live tmux launches arise_slam); `utilities` needs a live/docker audit first.
+3. **DEFERRED — viewpoint_manager removal:** R1 (freespace from rolling grid, tune) → R2 (keypose healing vs grid) → R3 planning_env trim → delete viewpoint_manager/viewpoint; then `execute()` final reduction.
 4. Trim vlm_node; drop dead msgs; thin launch/tmux.
 5. Split to the new repo (clone with history), rename `SensorCoveragePlanner3D` → `SceneGraphNode`, pair with the config-portability cleanup.
