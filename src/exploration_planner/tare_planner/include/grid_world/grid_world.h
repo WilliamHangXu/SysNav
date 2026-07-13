@@ -24,9 +24,7 @@
 #include <pcl/point_types.h>
 
 #include <grid/grid.h>
-#include <tsp_solver/tsp_solver.h>
 #include <keypose_graph/keypose_graph.h>
-#include <exploration_path/exploration_path.h>
 #include <opencv2/opencv.hpp>
 
 namespace viewpoint_manager_ns
@@ -316,10 +314,6 @@ public:
   void Reset();
   int GetCellStatusCount(grid_world_ns::CellStatus status);
   void UpdateCellStatus(const std::shared_ptr<viewpoint_manager_ns::ViewPointManager>& viewpoint_manager);
-  exploration_path_ns::ExplorationPath
-  SolveGlobalTSP(const std::shared_ptr<viewpoint_manager_ns::ViewPointManager>& viewpoint_manager,
-                 std::vector<int>& ordered_cell_indices,
-                 const std::shared_ptr<keypose_graph_ns::KeyposeGraph>& keypose_graph = nullptr);
 
   inline void SetCurKeyposeGraphNodeInd(int node_ind)
   {

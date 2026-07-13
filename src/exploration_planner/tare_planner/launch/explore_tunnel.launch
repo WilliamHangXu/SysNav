@@ -32,23 +32,9 @@ def generate_launch_description():
             'rviz': LaunchConfiguration('rviz')
         }.items())
 
-    navigation_boundary_node = Node(
-        package='tare_planner',
-        executable='navigationBoundary',
-        name='navigationBoundary',
-        output='screen',
-        parameters=[
-            {'boundary_file_dir': get_package_share_directory(
-                'tare_planner') + '/boundary.ply'},
-            {'sendBoundary': True},
-            {'sendBoundaryInterval': 2}
-        ],
-        condition=IfCondition(LaunchConfiguration('use_boundary')))
-
     return LaunchDescription([
         use_sim_time_arg,
         rviz_arg,
         use_boundary_arg,
         explore_launch,
-        navigation_boundary_node,
     ])
