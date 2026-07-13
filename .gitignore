@@ -56,8 +56,4 @@ recorded_videos/
 runlogs/
 
 # Project-specific
-src/base_autonomy/vehicle_simulator/mesh/*
-!src/base_autonomy/vehicle_simulator/mesh/unity
-src/base_autonomy/vehicle_simulator/mesh/unity/*
-src/base_autonomy/vehicle_simulator/log/
 src/exploration_planner/tare_planner/rviz/

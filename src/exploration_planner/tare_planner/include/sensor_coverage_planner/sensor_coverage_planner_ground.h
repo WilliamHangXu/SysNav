@@ -96,19 +96,9 @@ private:
   std::string sub_state_estimation_topic_;
   std::string sub_registered_scan_topic_;
   std::string sub_camera_image_topic_;
-  std::string sub_terrain_map_topic_;
-  std::string sub_terrain_map_ext_topic_;
-  std::string sub_coverage_boundary_topic_;
-  std::string sub_viewpoint_boundary_topic_;
-  std::string sub_nogo_boundary_topic_;
-
-  // Bool
-  bool kUseTerrainHeight;
-  bool kCheckTerrainCollision;
 
   // Double
   double kKeyposeCloudDwzFilterLeafSize;
-  double kTerrainCollisionThreshold;
 
   // Int
   int previous_room_id_;
@@ -119,12 +109,6 @@ private:
       registered_scan_stack_;
   std::shared_ptr<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>>
       registered_cloud_;
-  std::shared_ptr<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>>
-      large_terrain_cloud_;
-  std::shared_ptr<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>>
-      terrain_collision_cloud_;
-  std::shared_ptr<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>>
-      terrain_ext_collision_cloud_;
   std::shared_ptr<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>>
       collision_cloud_;
   std::shared_ptr<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>>
@@ -150,7 +134,6 @@ private:
 
   std::shared_ptr<misc_utils_ns::Marker> keypose_graph_node_marker_;
   std::shared_ptr<misc_utils_ns::Marker> keypose_graph_edge_marker_;
-  std::shared_ptr<misc_utils_ns::Marker> nogo_boundary_marker_;
   std::shared_ptr<misc_utils_ns::Marker> grid_world_marker_;
 
   bool keypose_cloud_update_;
@@ -172,18 +155,8 @@ private:
   // ROS subscribers
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr
       registered_scan_sub_;
-  rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr
-      terrain_map_sub_;
-  rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr
-      terrain_map_ext_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr
       state_estimation_sub_;
-  rclcpp::Subscription<geometry_msgs::msg::PolygonStamped>::SharedPtr
-      coverage_boundary_sub_;
-  rclcpp::Subscription<geometry_msgs::msg::PolygonStamped>::SharedPtr
-      viewpoint_boundary_sub_;
-  rclcpp::Subscription<geometry_msgs::msg::PolygonStamped>::SharedPtr
-      nogo_boundary_sub_;
 
   // ROS publishers
   // Debug
@@ -198,16 +171,6 @@ private:
       const nav_msgs::msg::Odometry::ConstSharedPtr state_estimation_msg);
   void RegisteredScanCallback(
       const sensor_msgs::msg::PointCloud2::ConstSharedPtr registered_cloud_msg);
-  void TerrainMapCallback(
-      const sensor_msgs::msg::PointCloud2::ConstSharedPtr terrain_map_msg);
-  void TerrainMapExtCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr
-                                 terrain_cloud_large_msg);
-  void CoverageBoundaryCallback(
-      const geometry_msgs::msg::PolygonStamped::ConstSharedPtr polygon_msg);
-  void ViewPointBoundaryCallback(
-      const geometry_msgs::msg::PolygonStamped::ConstSharedPtr polygon_msg);
-  void NogoBoundaryCallback(
-      const geometry_msgs::msg::PolygonStamped::ConstSharedPtr polygon_msg);
 
   void UpdateKeyposeGraph();
   int UpdateViewPoints();

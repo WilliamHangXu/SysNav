@@ -73,23 +73,8 @@ void SensorCoveragePlanner3D::ReadParameters() {
                                        "/registered_scan");
   this->declare_parameter<std::string>("sub_camera_image_topic_",
                                        "/camera/image");
-  this->declare_parameter<std::string>("sub_terrain_map_topic_",
-                                       "/terrain_map");
-  this->declare_parameter<std::string>("sub_terrain_map_ext_topic_",
-                                       "/terrain_map_ext");
-  this->declare_parameter<std::string>("sub_coverage_boundary_topic_",
-                                       "/coverage_boundary");
-  this->declare_parameter<std::string>("sub_viewpoint_boundary_topic_",
-                                       "/navigation_boundary");
-  this->declare_parameter<std::string>("sub_nogo_boundary_topic_",
-                                       "/nogo_boundary");
-  // Bool
-  this->declare_parameter<bool>("kUseTerrainHeight", true);
-  this->declare_parameter<bool>("kCheckTerrainCollision", true);
-
   // Double
   this->declare_parameter<double>("kKeyposeCloudDwzFilterLeafSize", 0.2);
-  this->declare_parameter<double>("kTerrainCollisionThreshold", 0.5);
 
   // grid_world
   this->declare_parameter<int>("kGridWorldXNum", 121);
@@ -261,20 +246,8 @@ void SensorCoveragePlanner3D::ReadParameters() {
                   base_frame_.c_str());
     }
   }
-  this->get_parameter("sub_terrain_map_topic_", sub_terrain_map_topic_);
-  this->get_parameter("sub_terrain_map_ext_topic_", sub_terrain_map_ext_topic_);
-  this->get_parameter("sub_coverage_boundary_topic_",
-                      sub_coverage_boundary_topic_);
-  this->get_parameter("sub_viewpoint_boundary_topic_",
-                      sub_viewpoint_boundary_topic_);
-  this->get_parameter("sub_nogo_boundary_topic_", sub_nogo_boundary_topic_);
-
-  this->get_parameter("kUseTerrainHeight", kUseTerrainHeight);
-  this->get_parameter("kCheckTerrainCollision", kCheckTerrainCollision);
-
   this->get_parameter("kKeyposeCloudDwzFilterLeafSize",
                       kKeyposeCloudDwzFilterLeafSize);
-  this->get_parameter("kTerrainCollisionThreshold", kTerrainCollisionThreshold);
 
   this->declare_parameter<double>("rep_threshold_", 0.1);
   this->get_parameter("rep_threshold_", rep_threshold_);
@@ -383,15 +356,6 @@ void SensorCoveragePlanner3D::InitializeData() {
   registered_cloud_ =
       std::make_shared<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>>(
           shared_from_this(), "registered_cloud", kWorldFrameID);
-  large_terrain_cloud_ =
-      std::make_shared<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>>(
-          shared_from_this(), "terrain_cloud_large", kWorldFrameID);
-  terrain_collision_cloud_ =
-      std::make_shared<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>>(
-          shared_from_this(), "terrain_collision_cloud", kWorldFrameID);
-  terrain_ext_collision_cloud_ =
-      std::make_shared<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>>(
-          shared_from_this(), "terrain_ext_collision_cloud", kWorldFrameID);
   collision_cloud_ =
       std::make_shared<pointcloud_utils_ns::PCLCloud<pcl::PointXYZI>>(
           shared_from_this(), "collision_cloud", kWorldFrameID);
@@ -436,12 +400,6 @@ void SensorCoveragePlanner3D::InitializeData() {
       visualization_msgs::msg::Marker::LINE_LIST);
   keypose_graph_edge_marker_->SetScale(0.05, 0.0, 0.0);
   keypose_graph_edge_marker_->SetColorRGBA(1.0, 1.0, 0.0, 0.9);
-
-  nogo_boundary_marker_ = std::make_shared<misc_utils_ns::Marker>(
-      shared_from_this(), "nogo_boundary_marker", kWorldFrameID);
-  nogo_boundary_marker_->SetType(visualization_msgs::msg::Marker::LINE_LIST);
-  nogo_boundary_marker_->SetScale(0.05, 0.0, 0.0);
-  nogo_boundary_marker_->SetColorRGBA(1.0, 0.0, 0.0, 0.8);
 
   grid_world_marker_ = std::make_shared<misc_utils_ns::Marker>(
       shared_from_this(), "grid_world_marker", kWorldFrameID);
@@ -689,34 +647,10 @@ bool SensorCoveragePlanner3D::initialize() {
           sub_registered_scan_topic_, 5,
           std::bind(&SensorCoveragePlanner3D::RegisteredScanCallback, this,
                     std::placeholders::_1));
-  terrain_map_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-      sub_terrain_map_topic_, 5,
-      std::bind(&SensorCoveragePlanner3D::TerrainMapCallback, this,
-                std::placeholders::_1));
-  terrain_map_ext_sub_ =
-      this->create_subscription<sensor_msgs::msg::PointCloud2>(
-          sub_terrain_map_ext_topic_, 5,
-          std::bind(&SensorCoveragePlanner3D::TerrainMapExtCallback, this,
-                    std::placeholders::_1));
   state_estimation_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
       sub_state_estimation_topic_, 5,
       std::bind(&SensorCoveragePlanner3D::StateEstimationCallback, this,
                 std::placeholders::_1));
-  coverage_boundary_sub_ =
-      this->create_subscription<geometry_msgs::msg::PolygonStamped>(
-          sub_coverage_boundary_topic_, 5,
-          std::bind(&SensorCoveragePlanner3D::CoverageBoundaryCallback, this,
-                    std::placeholders::_1));
-  viewpoint_boundary_sub_ =
-      this->create_subscription<geometry_msgs::msg::PolygonStamped>(
-          sub_viewpoint_boundary_topic_, 5,
-          std::bind(&SensorCoveragePlanner3D::ViewPointBoundaryCallback, this,
-                    std::placeholders::_1));
-  nogo_boundary_sub_ =
-      this->create_subscription<geometry_msgs::msg::PolygonStamped>(
-          sub_nogo_boundary_topic_, 5,
-          std::bind(&SensorCoveragePlanner3D::NogoBoundaryCallback, this,
-                    std::placeholders::_1));
   object_node_list_sub_ = this->create_subscription<tare_planner::msg::ObjectNodeList>(
       "/object_nodes_list", 20,
       std::bind(&SensorCoveragePlanner3D::ObjectNodeListCallback, this,
@@ -898,95 +832,6 @@ void SensorCoveragePlanner3D::RegisteredScanCallback(
   //             "[PROF] RegScanCb gap=%.0fms total=%.1fms in_pts=%zu%s",
   //             prof_cb_gap_ms, prof_cb_ms, prof_in_pts,
   //             registered_cloud_count_ == 0 ? " [keypose]" : "");
-}
-
-void SensorCoveragePlanner3D::TerrainMapCallback(
-    const sensor_msgs::msg::PointCloud2::ConstSharedPtr terrain_map_msg) {
-  if (kCheckTerrainCollision) {
-    pcl::PointCloud<pcl::PointXYZI>::Ptr terrain_map_tmp(
-        new pcl::PointCloud<pcl::PointXYZI>());
-    pcl::fromROSMsg<pcl::PointXYZI>(*terrain_map_msg, *terrain_map_tmp);
-    terrain_collision_cloud_->cloud_->clear();
-    for (auto &point : terrain_map_tmp->points) {
-      if (point.intensity > kTerrainCollisionThreshold) {
-        terrain_collision_cloud_->cloud_->points.push_back(point);
-      }
-    }
-  }
-}
-
-void SensorCoveragePlanner3D::TerrainMapExtCallback(
-    const sensor_msgs::msg::PointCloud2::ConstSharedPtr terrain_map_ext_msg) {
-  if (kUseTerrainHeight) {
-    pcl::fromROSMsg<pcl::PointXYZI>(*terrain_map_ext_msg,
-                                    *(large_terrain_cloud_->cloud_));
-  }
-  if (kCheckTerrainCollision) {
-    pcl::fromROSMsg<pcl::PointXYZI>(*terrain_map_ext_msg,
-                                    *(large_terrain_cloud_->cloud_));
-    terrain_ext_collision_cloud_->cloud_->clear();
-    for (auto &point : large_terrain_cloud_->cloud_->points) {
-      if (point.intensity > kTerrainCollisionThreshold) {
-        terrain_ext_collision_cloud_->cloud_->points.push_back(point);
-      }
-    }
-  }
-}
-
-void SensorCoveragePlanner3D::CoverageBoundaryCallback(
-    const geometry_msgs::msg::PolygonStamped::ConstSharedPtr polygon_msg) {
-  planning_env_->UpdateCoverageBoundary((*polygon_msg).polygon);
-}
-
-void SensorCoveragePlanner3D::ViewPointBoundaryCallback(
-    const geometry_msgs::msg::PolygonStamped::ConstSharedPtr polygon_msg) {
-  viewpoint_manager_->UpdateViewPointBoundary((*polygon_msg).polygon);
-}
-
-void SensorCoveragePlanner3D::NogoBoundaryCallback(
-    const geometry_msgs::msg::PolygonStamped::ConstSharedPtr polygon_msg) {
-  if (polygon_msg->polygon.points.empty()) {
-    return;
-  }
-  double polygon_id = polygon_msg->polygon.points[0].z;
-  int polygon_point_size = polygon_msg->polygon.points.size();
-  std::vector<geometry_msgs::msg::Polygon> nogo_boundary;
-  geometry_msgs::msg::Polygon polygon;
-  for (int i = 0; i < polygon_point_size; i++) {
-    if (polygon_msg->polygon.points[i].z == polygon_id) {
-      polygon.points.push_back(polygon_msg->polygon.points[i]);
-    } else {
-      nogo_boundary.push_back(polygon);
-      polygon.points.clear();
-      polygon_id = polygon_msg->polygon.points[i].z;
-      polygon.points.push_back(polygon_msg->polygon.points[i]);
-    }
-  }
-  nogo_boundary.push_back(polygon);
-  viewpoint_manager_->UpdateNogoBoundary(nogo_boundary);
-
-  geometry_msgs::msg::Point point;
-  for (int i = 0; i < nogo_boundary.size(); i++) {
-    for (int j = 0; j < nogo_boundary[i].points.size() - 1; j++) {
-      point.x = nogo_boundary[i].points[j].x;
-      point.y = nogo_boundary[i].points[j].y;
-      point.z = nogo_boundary[i].points[j].z;
-      nogo_boundary_marker_->marker_.points.push_back(point);
-      point.x = nogo_boundary[i].points[j + 1].x;
-      point.y = nogo_boundary[i].points[j + 1].y;
-      point.z = nogo_boundary[i].points[j + 1].z;
-      nogo_boundary_marker_->marker_.points.push_back(point);
-    }
-    point.x = nogo_boundary[i].points.back().x;
-    point.y = nogo_boundary[i].points.back().y;
-    point.z = nogo_boundary[i].points.back().z;
-    nogo_boundary_marker_->marker_.points.push_back(point);
-    point.x = nogo_boundary[i].points.front().x;
-    point.y = nogo_boundary[i].points.front().y;
-    point.z = nogo_boundary[i].points.front().z;
-    nogo_boundary_marker_->marker_.points.push_back(point);
-  }
-  nogo_boundary_marker_->Publish();
 }
 
 void SensorCoveragePlanner3D::ObjectNodeListCallback(
@@ -1431,14 +1276,6 @@ int SensorCoveragePlanner3D::UpdateViewPoints() {
   misc_utils_ns::Timer viewpoint_manager_update_timer(
       "update viewpoint manager");
   viewpoint_manager_update_timer.Start();
-  if (kUseTerrainHeight) {
-    viewpoint_manager_->SetViewPointHeightWithTerrain(
-        large_terrain_cloud_->cloud_);
-  }
-  if (kCheckTerrainCollision) {
-    *(collision_cloud_->cloud_) += *(terrain_collision_cloud_->cloud_);
-    *(collision_cloud_->cloud_) += *(terrain_ext_collision_cloud_->cloud_);
-  }
   viewpoint_manager_->CheckViewPointCollision(collision_cloud_->cloud_);
   viewpoint_manager_->CheckViewPointRoomBoundaryCollision();
   viewpoint_manager_->CheckViewPointLineOfSight();
