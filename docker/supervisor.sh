@@ -48,6 +48,8 @@
 # the dev inner loop (edit src -> colcon build -> ros2 launch by hand).
 # `supervisor.sh build` / `supervisor.sh rebuild` compile the workspace and exit (no
 # pipeline): build = incremental, rebuild = wipe build/install/log then build fresh.
+# `supervisor.sh baginfo [rosbag-info args]` prints `rosbag info` for the ROS 1 bag
+# run.sh mounted at /app/bag (dir of .bag files or a single .bag) and exits.
 set -uo pipefail
 
 MODE="${MODE:-live}"
@@ -86,6 +88,18 @@ case "${1:-}" in
     echo "[supervisor] $1: colcon build --symlink-install (into the named volume) ..."
     colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release
     exit $?
+    ;;
+  baginfo)
+    # `run.sh baginfo <bag>` mounted the bag (a dir of .bag files or a single .bag)
+    # at /app/bag; rosbag is a ROS 1 tool, so source Noetic (only). Extra args pass
+    # through to `rosbag info` (e.g. --freq, -y). No workspace/GPU/MODE needed.
+    shift
+    set +u; source "$NOETIC_SETUP"; set -u
+    if [ -d "$APP/bag" ]; then
+      exec rosbag info "$@" "$APP"/bag/*.bag
+    else
+      exec rosbag info "$@" "$APP/bag"
+    fi
     ;;
 esac
 
