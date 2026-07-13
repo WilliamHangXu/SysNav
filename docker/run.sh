@@ -11,6 +11,8 @@
 #   docker/run.sh shell          # debug shell in the container (workspace sourced)
 #   docker/run.sh build          # just colcon build (incremental), no pipeline run
 #   docker/run.sh rebuild        # wipe build/install/log, then build from scratch
+#   docker/run.sh baginfo <bag>  # `rosbag info` on a ROS 1 bag (dir of .bag files or
+#                                # a single .bag) via the container -- no host ROS
 #   BUILD=1 ... docker/run.sh     # force a colcon rebuild (e.g. after C++ changes)
 #   INS=1 ... docker/run.sh       # also auto-open a 2nd terminal inside the container
 #
@@ -64,18 +66,37 @@ run=( docker run --rm -it
   -v "$REPO/output:/app/output"
   -v "$REPO/runlogs:/app/runlogs" )
 
-# Build-only subcommands: compile the workspace into the named volume and exit -- no
-# robot, no bag, no pipeline. Handled HERE, before the MODE plumbing below, because a
-# build needs neither MODE nor ROBOT_IP/BAG (and no GPU/X). The base `run=(...)` above
-# already has the volume + src mounts, which is all colcon needs; the supervisor does
-# the actual work and exits.
+# Pipeline-less subcommands, handled HERE before the MODE plumbing below because
+# they need neither MODE nor ROBOT_IP/BAG (and no X). The base `run=(...)` above
+# already has the volume + src mounts; the supervisor does the actual work and exits.
 #   docker/run.sh build     incremental colcon build (same compile BUILD=1 does)
 #   docker/run.sh rebuild   wipe /app/{build,install,log} first, then build from scratch
+#   docker/run.sh baginfo <bag> [rosbag-info args]
+#                           `rosbag info` on a ROS 1 bag (a directory of .bag files or
+#                           a single .bag), run inside the container (Noetic lives
+#                           there, not on the host). Extra args reach `rosbag info`,
+#                           e.g.: docker/run.sh baginfo ~/bags/run1 --freq
 case "${1:-}" in
   build|rebuild)
     run+=( "$IMAGE" "$1" )
     echo "+ ${run[*]}"
     exec "${run[@]}"
+    ;;
+  baginfo)
+    shift
+    bag="${1:?usage: docker/run.sh baginfo <bag-dir-or-.bag-file> [rosbag info args]}"
+    shift
+    [ -e "$bag" ] || { echo "baginfo: '$bag' does not exist" >&2; exit 1; }
+    bag="$(cd "$(dirname "$bag")" && pwd)/$(basename "$bag")"   # -v needs an absolute path
+    # Deliberately NOT the base `run` array: inspection needs no GPU/X/volume, and no
+    # `--name` (so it works while a pipeline container is already running). It does
+    # need docker/ mounted -- the supervisor entrypoint is mounted, not baked.
+    cmd=( docker run --rm
+          -v "$REPO/docker:/app/docker:ro"
+          -v "$bag:/app/bag:ro"
+          "$IMAGE" baginfo "$@" )
+    echo "+ ${cmd[*]}"
+    exec "${cmd[@]}"
     ;;
 esac
 

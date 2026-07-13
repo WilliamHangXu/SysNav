@@ -75,6 +75,12 @@ docker/run.sh build
 
 # just build, no pipeline -- full clean rebuild: wipe build/install/log, build from scratch
 docker/run.sh rebuild
+
+# inspect a ROS 1 bag WITHOUT running anything -- `rosbag info` via the container's
+# Noetic (the host needs no ROS). Takes a directory of .bag files or a single .bag;
+# extra args pass through to `rosbag info` (e.g. --freq for per-topic rates).
+docker/run.sh baginfo ~/AlphaZ/bags/<bag_dir>
+docker/run.sh baginfo ~/AlphaZ/bags/<bag_dir>/<one>.bag --freq
 ```
 
 ### Knobs

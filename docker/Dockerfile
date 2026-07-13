@@ -160,13 +160,26 @@ RUN pip install --no-cache-dir 'git+https://github.com/facebookresearch/detectro
 #        pairable type incl. demo msgs); mandatory even though we never bridge them.
 #      - python3-defusedxml/rospkg/netifaces: Noetic python runtime for roscore +
 #        `rosparam load` of the bridge allowlist (roscore dies without defusedxml).
+#      - python3-pycryptodome/gnupg: rosbag CLI hard-imports Cryptodome + gnupg at
+#        module load; without them `rosbag play/info` dies on import (bag mode).
+#      - libgpgme11t64: rosbag's default encryption plugin dlopens libgpgme.so.11;
+#        `rosbag play` FATALs at startup without it.
 # ----------------------------------------------------------------------------
 COPY --from=bridge /opt/ros/noetic /opt/ros/noetic
 COPY --from=bridge /ros-jazzy-ros1-bridge /ros-jazzy-ros1-bridge
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ros-jazzy-example-interfaces ros-jazzy-map-msgs ros-jazzy-turtlesim \
-        python3-defusedxml python3-rospkg python3-netifaces && \
+        python3-defusedxml python3-rospkg python3-netifaces \
+        python3-pycryptodome python3-gnupg libgpgme11t64 && \
     rm -rf /var/lib/apt/lists/*
+# rosbag's C++ play/record binaries link liblog4cxx.so.15 (+ its apr/aprutil
+# deps), which the graft only bundles inside the bridge install dir (on
+# LD_LIBRARY_PATH only when the bridge env is sourced). Link them onto Noetic's
+# lib path so plain `source noetic` works; ldd of rosbag/play then fully resolves.
+RUN for lib in liblog4cxx.so.15 libapr-1.so.0 libaprutil-1.so.0; do \
+        ln -s /ros-jazzy-ros1-bridge/install/ros1_bridge/lib/$lib \
+              /opt/ros/noetic/lib/$lib; \
+    done
 
 # ----------------------------------------------------------------------------
 # 6) Bake the sam2 editable install. sam2 is vendored/stable (you develop the
