@@ -2937,60 +2937,34 @@ void SensorCoveragePlanner3D::PublishRoomTypeVisualization()
   for (const auto &id_room_node_pair : representation_->GetRoomNodesMap())
   {
     const representation_ns::RoomNodeRep &room_node = id_room_node_pair.second;
+    visualization_msgs::msg::Marker marker;
+    marker.header.frame_id = kWorldFrameID;
+    marker.header.stamp = this->now();
+    marker.ns = "room_type";
+    marker.id = room_node.show_id_;
+    marker.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
+    marker.action = visualization_msgs::msg::Marker::ADD;
+    // Label sits on the canonical interior point (stable, guaranteed inside),
+    // not the drifting anchor_point_ (nav's in-range mean) or the centroid
+    // (which can land in a wall for a non-convex room).
+    marker.pose.position.x = room_node.interior_point_.x;
+    marker.pose.position.y = room_node.interior_point_.y;
+    marker.pose.position.z = room_node.interior_point_.z;
+    marker.pose.orientation.w = 0.65;
+    marker.scale.z = 1.0;
+    marker.color.a = 1.0;
+    Eigen::Vector3d color = misc_utils_ns::idToColor(room_node.GetId());
+    marker.color.b = color[0] / 255.0;
+    marker.color.g = color[1] / 255.0;
+    marker.color.r = color[2] / 255.0;
+    // Room id shows as soon as the room exists; the VLM label is appended once
+    // it arrives (is_labeled_ is set only by RoomTypeCallback).
+    marker.text = std::to_string(room_node.GetId());
     if (room_node.IsLabeled())
     {
-      // RCLCPP_INFO(this->get_logger(), "Room %d is labeled with type %s", room_node.show_id_, room_node.label_.c_str());
-      visualization_msgs::msg::Marker marker;
-      marker.header.frame_id = kWorldFrameID;
-      marker.header.stamp = this->now();
-      marker.ns = "room_type";
-      marker.id = room_node.show_id_;
-      marker.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
-      marker.action = visualization_msgs::msg::Marker::ADD;
-      // Label sits on the canonical interior point (stable, guaranteed inside),
-      // not the drifting anchor_point_ (nav's in-range mean) or the centroid
-      // (which can land in a wall for a non-convex room).
-      marker.pose.position.x = room_node.interior_point_.x;
-      marker.pose.position.y = room_node.interior_point_.y;
-      marker.pose.position.z = room_node.interior_point_.z;
-      marker.pose.orientation.w = 0.65;
-      marker.scale.z = 1.0;
-      marker.color.a = 1.0;
-      Eigen::Vector3d color = misc_utils_ns::idToColor(room_node.GetId());
-      marker.color.b = color[0] / 255.0;
-      marker.color.g = color[1] / 255.0;
-      marker.color.r = color[2] / 255.0;
-      // text is room_id + " " + room_node.label_
-      // marker.text = std::to_string(room_node.show_id_) + "(" + std::to_string(room_node.GetId()) + ")" + room_node.label_;
-      std::string label = room_node.GetRoomLabel();
-      marker.text = std::to_string(room_node.GetId()) + " " + label;
-      marker_array.markers.push_back(marker);
+      marker.text += " " + room_node.GetRoomLabel();
     }
-    // else
-    // {
-    //   visualization_msgs::msg::Marker marker;
-    //   marker.header.frame_id = kWorldFrameID;
-    //   marker.header.stamp = this->now();
-    //   marker.ns = "room_type";
-    //   marker.id = room_node.show_id_;
-    //   marker.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
-    //   marker.action = visualization_msgs::msg::Marker::ADD;
-    //   marker.pose.position.x = room_node.centroid_.x();
-    //   marker.pose.position.y = room_node.centroid_.y();
-    //   marker.pose.position.z = room_node.centroid_.z();
-    //   // marker.pose.position.x = room_node.anchor_point_.x;
-    //   // marker.pose.position.y = room_node.anchor_point_.y;
-    //   // marker.pose.position.z = room_node.anchor_point_.z;
-    //   marker.pose.orientation.w = 0.65;
-    //   marker.scale.z = 1.0;
-    //   marker.color.a = 1.0;
-    //   Eigen::Vector3d color = misc_utils_ns::idToColor(room_node.GetId());
-    //   marker.color.b = color[0] / 255.0;
-    //   marker.color.g = color[1] / 255.0;
-    //   marker.color.r = color[2] / 255.0;
-    //   marker.text = std::to_string(room_node.GetId());
-    //   marker_array.markers.push_back(marker);
-    // }
+    marker_array.markers.push_back(marker);
   }
   room_type_vis_pub_->publish(marker_array);
 }
