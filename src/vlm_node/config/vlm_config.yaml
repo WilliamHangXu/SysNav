@@ -1,4 +1,3 @@
 vlm_node:
   ros__parameters:
-    platform: mecanum
     log_dir: logs/episode_0

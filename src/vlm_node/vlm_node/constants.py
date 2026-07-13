@@ -26,10 +26,3 @@ else:
     VLM_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
     MODEL_NAME = "gemini-2.5-flash"
     MODEL_NAME_LITE = "gemini-2.5-flash-lite"
-
-# Target object to search for in the scene
-target_object = ""
-room_condition     = ""
-spatial_condition  = ""
-anchor_object      = ""
-attribute_condition = ""

@@ -66,13 +66,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/RoomType.msg"
   "msg/ViewpointRep.msg"
   "msg/DetectionResult.msg"
-  "msg/RoomEarlyStop1.msg"
-  "msg/VlmAnswer.msg"
   "msg/ObjectType.msg"
-  "msg/NavigationQuery.msg"
   "msg/TargetObjectInstruction.msg"
-  "msg/TargetObject.msg"
-  "msg/TargetObjectWithSpatial.msg"
   "msg/WallAxis.msg"
  DEPENDENCIES std_msgs geometry_msgs sensor_msgs
 )
