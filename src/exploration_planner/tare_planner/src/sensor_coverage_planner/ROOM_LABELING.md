@@ -155,7 +155,7 @@ Three distinct per-room points exist; keep them straight (all on `RoomNodeRep`):
 |---|---|---|---|
 | `centroid_` | segmentation, area-mean of mask cells | geometric center of footprint; can fall **outside** a non-convex room | reserved for geometry (future room-area subdivision); still shipped as `RoomNode.centroid` |
 | `interior_point_` | segmentation, **pole of inaccessibility** | a guaranteed-**inside**, deepest-clearance cell — the stable "where is this room" handle | RViz label **marker**, exporter **`wp_0`**, async **re-ID** snapshot (`RoomType.interior_point`) |
-| `anchor_point_` | planner, **nav-only** | drifting in-range mean of observed cells (seeded `= centroid` at query time, overwritten by `UpdateRoomLabel` `:4912/:4962`) | navigation goal only (`candidate_room_position_`, `goal_point`) |
+| `anchor_point_` | **legacy, no writer remains** | was the drifting nav anchor written by the (deleted) `UpdateRoomLabel` | none — answers re-resolve rooms via `interior_point_` |
 
 **Interior point (pole of inaccessibility).** Computed in `room_segmentation`'s
 per-room centroid loop: bbox-crop the room's binary mask (+2 px margin so the
@@ -199,40 +199,32 @@ break it — including code *outside* the labeling pipeline:
   duplicate-jpg symptoms. It is gone; **label lifecycle now follows room
   lifecycle** (genuine split/merge/death is still handled by the `DEATH`/re-home
   path below). No per-cycle label stripping remains.
-- **E. `is_labeled_` conflation (Fix #2 not applied).** `is_labeled_` is
-  overloaded. Navigation bookkeeping in `UpdateRoomLabel` sets `SetIsLabeled(true)`
-  at `:4912` (first time a room accrues points) and `:4962` (room grew), **before
-  any VLM answer**. Consequences:
-  - a room can be `is_labeled_ == true` with **empty `labels_`** → exports as
-    `unknown` yet counts as labeled;
-  - that same flag gates navigation: `CheckDoorCloudInRange:2464` skips
-    `IsLabeled()` rooms, so the planner stops routing the robot to a room's door —
-    potentially *before* it was imaged enough to label, starving it of views.
+- **E. ~~`is_labeled_` conflation~~ — FIXED (Fix #2 done).** `UpdateRoomLabel`
+  (and all navigation bookkeeping) was deleted in the scene-graph reduction;
+  **`RoomTypeCallback` is now the only writer of `is_labeled_`** — the flag means
+  exactly "a real VLM answer landed." The RViz room marker no longer waits for
+  it either: the room id shows as soon as the room exists, and the label text is
+  appended when the answer arrives.
 - **F. Room lifecycle.** Rooms are erased on re-segmentation (`DEATH` in
   `RoomNodeListCallback`); their `best_views_` go to an orphan pool and are
   re-homed by anchor→mask, but background-mapped ones are dropped. A label dies
   with its node unless re-derived.
 
-> **Two meanings of "labeled."** `is_labeled_` (a bool, co-written by nav + VLM) vs
-> a populated `labels_` (the actual type string from the VLM). The exporter gates
-> on `is_labeled_` and reads `GetRoomLabel()` — which is exactly why an
-> `is_labeled_`-true / `labels_`-empty room shows up as `unknown`. The scope
-> intent (see memory `scene-graph-only-scope`) is that **only `RoomTypeCallback`
-> should ever write label state**; navigation should get its own separate flag.
+> **One meaning of "labeled" (since the reduction).** `is_labeled_` is written
+> only by `RoomTypeCallback` when a VLM answer lands, so it always coincides with
+> a populated `labels_`. The historical `unknown`-export failure mode (nav code
+> setting the flag before any answer) is gone with the nav code.
 
 ---
 
 ## Pending work (the next session's worklist)
 
-1. **Re-enable objects in the VLM** — uncomment `vlm_reasoning_node.py:446-447`.
-   The planner already sends a deduped, confidence-filtered inventory. Lowest-risk,
-   highest-impact; restores the intended objects-first signal.
-2. **Fix #2 — decouple `is_labeled_`.** Give navigation its own flag (e.g.
-   `is_anchored_`/`is_asked_`); stop `UpdateRoomLabel` (`:4912`, `:4962`) from
-   writing `SetIsLabeled`. Label state owned solely by `RoomTypeCallback`. Update
-   the exporter and `CheckDoorCloudInRange:2464` to read the right flag. This is the
-   last `scene-graph-only-scope` violation (nav mutating label state).
-3. **VLM 429 / no retry** (`vlm_reasoning_node.py:508`). Any exception drops the
+1. ~~**Re-enable objects in the VLM**~~ — **done**: the VLM prompt consumes the
+   deduped, confidence-filtered object inventory (the objects-first signal).
+2. ~~**Fix #2 — decouple `is_labeled_`.**~~ — **done** via the scene-graph
+   reduction: `UpdateRoomLabel` and all nav writers were deleted; label state is
+   owned solely by `RoomTypeCallback`.
+3. **VLM 429 / no retry** (`vlm_reasoning_node.py`, `process_room_type_query`). Any exception drops the
    query — no retry, backoff, or re-queue. Gemini free-tier (20 req/day/model)
    exhaustion (HTTP 429) silently left many rooms unlabeled in
    `runlogs/20260626_193759` (12×429, 2 success). Add 429-aware retry/backoff or

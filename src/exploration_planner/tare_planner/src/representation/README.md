@@ -75,10 +75,10 @@ Fields split by who writes them:
 | `objects_at_last_query_` | `int` | Object count at the last query (new-object re-query trigger). |
 | `is_labeled_` | `bool` | True once a room has been queried/answered. **Navigation** flag, not "we have a type". |
 | `is_visited_` | `bool` | Set by `UpdateGlobalRepresentation` / `SetIsVisited` when the robot has entered. |
-| `is_covered_` | `bool` | True when coverage planner has explored most of the room. |
-| `is_asked_` | `int` | Counts how many more times the room can be queried (default 2, decremented). Used by "early stop" logic. |
-| `voxel_num_` | `int` | Number of covered voxels assigned to this room (refreshed every `UpdateRoomLabel`; navigation bookkeeping). |
-| `anchor_point_` | `Point` | Room centroid sent in the query, used to re-resolve the room when the answer returns — also the navigation goal for "enter this room". |
+| `is_covered_` | `bool` | **Legacy** (navigation bookkeeping) — no writer remains since the steering code was deleted. |
+| `is_asked_` | `int` | **Legacy** early-stop counter — no writer remains. |
+| `voxel_num_` | `int` | **Legacy** covered-voxel count — no writer remains (`UpdateRoomLabel` was deleted). |
+| `anchor_point_` | `Point` | **Legacy** navigation anchor — no writer remains; answers re-resolve rooms via `interior_point_` instead. |
 | `image_` | `cv::Mat` | Legacy single-frame crop slot; no longer used by the best-3 pipeline. |
 | `last_area_` | `float` | Area at the moment the room was last (re-)queried (navigation bookkeeping). |
 
@@ -220,18 +220,13 @@ After visibility runs, any object id that was paired with at least one viewpoint
 
 ## The per-cycle update sequence
 
-The orchestration lives in the main planning loop, starting at `execute()` (line 3510). When `keypose_cloud_update_` fires:
+The orchestration lives in the main planning loop, `execute()`. When `keypose_cloud_update_` fires:
 
 ```
-UpdateRoomLabel()                  // walks covered cloud, assigns to rooms via room_mask_;
-                                   // navigation bookkeeping + early-stop only (no query emission).
-
 SetCurrentRoomId()                 // updates current_room_id_ from room_mask_ at the robot pose.
 
 PublishRoomTypeQueries()           // per room: if best-3 views or object set changed (rate-limited),
                                    // emits /room_type_query (image paths + object inventory + current label).
-
-(room transit / arrival bookkeeping)
 
 UpdateObjectVisibility()           // object↔viewpoint ray-casts + obj_room_relation;
                                    // builds obj_score_ for the next step.
@@ -247,7 +242,7 @@ if (add_viewpoint_rep_)
 
 CreateVisibilityMarkers()          // line markers viewpoint → object for each direct/indirect link.
 
-UpdateViewPoints()                 // viewpoint manager + local coverage planner uses
+UpdateViewPoints()                 // viewpoint manager uses
                                    // representation_->GetViewPointReps() implicitly.
 ```
 
@@ -255,10 +250,7 @@ Other callbacks plug in asynchronously:
 - `ObjectNodeListCallback` writes to `object_node_rep_map_` / queues deletes.
 - `RoomNodeListCallback` writes/sweeps `room_nodes_map_`.
 - `RoomMaskCallback` re-binds viewpoints to rooms.
-- `RoomTypeCallback`: **latest answer wins** — `room_node.labels_.clear(); labels_[room_type] = 1`, and if the label changed, marks all objects in that room as `is_considered_=false` so they'll be re-evaluated.
-- `RoomNavigationAnswerCallback` (line 1261): reads `room_node.anchor_point_` to set a goal, or reads a candidate room's anchor as the next exploration destination.
-- `TargetObjectInstructionCallback` (line 1342): when the operator names a new target, clears `is_considered*` on every object and resets `is_asked_=2` on every room.
-- `TargetObjectCallback` (line 1371) / `AnchorObjectCallback`: reads `representation_->GetObjectNodeRep(id).GetPosition()` / `.room_id_` to set `found_object_*` state.
+- `RoomTypeCallback`: **latest answer wins** — `room_node.labels_.clear(); labels_[room_type] = 1`, and it is the **only** writer of `is_labeled_` (set when a real VLM answer lands).
 
 ---
 
@@ -268,12 +260,10 @@ A non-exhaustive map of who reads what:
 
 | Consumer | Reads | For |
 |---|---|---|
-| `viewpoint_manager_`, `local_coverage_planner_` | `viewpoint_reps_` (positions, clouds, covered clouds) | Candidate viewpoint sampling and coverage scoring. |
-| `grid_world_` / global coverage | `room_nodes_map_` | Room-level coverage state, used to gate exploration termination. |
-| `UpdateRoomLabel` | `room_nodes_map_`, `room_mask_` | Decides which rooms still need to be VLM-typed; publishes `/room_type_query`. |
+| `viewpoint_manager_` | `viewpoint_reps_` (positions, clouds, covered clouds) | Candidate viewpoint sampling and coverage scoring. |
+| `PublishRoomTypeQueries` | `room_nodes_map_` (best-3 views, `object_indices_`) | Decides which rooms need (re-)typing; publishes `/room_type_query`. |
 | `UpdateObjectVisibility` | `object_node_rep_map_`, `viewpoint_reps_`, `room_mask_` | Maintains all three relation types each cycle. |
-| `RoomNavigationAnswerCallback`, `ChangeRoomQuery` | `room_node.anchor_point_`, `room_node.GetObjectIndices()`, `IsCovered/IsVisited/IsLabeled` | Picks the next room to enter / when to ask the VLM about the next room. |
-| `TargetObjectCallback`, `AnchorObjectCallback` | `object_node_rep_map_[id].position_`, `.room_id_` | Sets the active target / anchor to navigate to. |
+| `scene_graph_exporter` | everything | Snapshots the whole `Representation` (+ NavGraph) to JSON. |
 | `KeyboardInputCallback "next"` | `object_node_rep_map_[found_object_id_]` | Marks the current found object as fully considered, freeing the planner to look for the next instance. |
 | `CreateVisibilityMarkers`, `PublishViewpointRoomIdMarkers` | `viewpoint_reps_` (`object_indices_`, `room_id_`) | RViz visualization of the live scene graph. |
 | `viewpoint_rep_vis_cloud_`, `covered_points_all_` | (managed by `Representation` itself) | Coverage visualisation. |
@@ -356,6 +346,5 @@ std::string ToJSON() const;   // **STUB** — declared but not implemented (repr
 - **Objects without a room (`room_id_ == -1`)** → centroid landed outside `room_mask_` or on a 0-pixel even after dilation. Often because the room mask hasn't been published yet for the area where the object lives — wait a cycle. If persistent, the object centroid is in unmapped territory (free-space gap or off-grid).
 - **Viewpoint with stale `room_id_`** → check that `/room_mask` is being delivered; `UpdateViewpointRoomIdsFromMask` is the only place that re-binds them after creation.
 - **Same physical object appears twice** → not a representation bug. `Representation` keys strictly by `object_id_[0]`; duplicates mean semantic mapping's merging didn't fire (see semantic_mapping README §B).
-- **A room never gets typed** → the room hasn't accumulated enough covered voxels for `UpdateRoomLabel` to send a `/room_type_query`, or `is_asked_` already counted down to 0. `room_counts[room_id] > 100` is the gate in `UpdateRoomLabel`.
-- **Target object gets erased** → check that the delete-protection at `ObjectNodeListCallback:980` (`if (obj_id == found_object_id_) continue;`) is firing. If `found_object_id_` was reset between detection and deletion, the protection misses.
+- **A room never gets typed** → the query gate never fired: the room has no admitted best-3 view **and** no objects (evidence requirement), or queries are being rate-limited (`room_type_query.min_interval_s`), or the VLM answers are failing (check the vlm node log; there is no retry on API errors).
 - **Visibility markers show wrong objects per viewpoint** → that's the live state of `viewpoint.object_indices_`. To debug a specific viewpoint, log its `GetObjectIndices()` and compare against the result of `CheckLineOfSightInOccupancyGrid` for each object — most issues are stale ray-casts after the occupancy grid shifted, not bugs in `Representation` itself.

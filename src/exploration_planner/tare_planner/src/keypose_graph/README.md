@@ -274,15 +274,14 @@ keypose/graph node each waypoint maps to.
 
 **Who consumes it (grid_world.cpp & planner):**
 
-- `UpdateCellKeyposeGraphNodes` (grid_world.cpp:267) bins connected graph nodes
+- `UpdateCellKeyposeGraphNodes` (grid_world.cpp) bins connected graph nodes
   into EXPLORING cells, giving each cell its graph "ports."
-- `AddPathsInBetweenCells` / `SolveGlobalTSP` call `GetShortestPath` /
-  `GetShortestPathWithMaxLength` repeatedly to get **traversable** inter-cell
-  distances and to materialize the global path the robot follows.
-- Reachability gating, return-home (`GetFirstKeyposePosition` + A\*), and
-  **walking distance to a found object/anchor**
-  (sensor_coverage_planner_ground.cpp:1550, 1603, 4776, 5039) all go through the
-  graph — the lone touchpoint between this roadmap and the scene-graph search.
+- `AddPathsInBetweenCells` calls `GetShortestPath` /
+  `GetShortestPathWithMaxLength` to get **traversable** inter-cell distances and
+  injects the resulting connector (non-keypose) nodes back into the graph.
+- The **NavGraph** (`src/navgraph/`) contracts the connected component into the
+  exported waypoints + edges — since the steering code was removed, this is the
+  graph's sole downstream consumer.
 
 ---
 

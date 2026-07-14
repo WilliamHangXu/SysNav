@@ -18,9 +18,10 @@ and feed one shared, growing in-memory structure called the **`Representation`**
 (the scene graph):
 
 1. **Objects** are detected in images, lifted to 3D, and tracked over time.
-2. **Free space is explored** by a classical exploration planner (TARE), which
-   also drops **viewpoints** (observation keyframes) and maintains a **keypose
-   graph** (a traversability roadmap).
+2. **Free space is mapped as the robot moves** (the robot is driven externally —
+   its own onboard planner, teleop, or a bag replay; this stack does **not**
+   steer). The pipeline drops **viewpoints** (observation keyframes) and
+   maintains a **keypose graph** (a traversability roadmap).
 3. **Free space is segmented into rooms**, rooms are typed by a **VLM**, and
    **doors** between rooms are detected.
 
@@ -35,7 +36,7 @@ downstream LLM a coarse navigation graph with real walking distances.
 
 ```
  sensors ─► detection ─► 3D semantic objects ─┐
- sensors ─► TARE explore ─► viewpoints + keypose graph ─┼─► Representation ──┐
+ sensors ─► viewpoints + keypose graph ─────────┼─► Representation ──┐
  sensors ─► room segmentation + VLM typing + doors ─────┘  (the scene graph) ├─► exporter ─► scene_graph.json
                           keypose graph ─► NavGraph (sparse waypoints+edges) ─┘
 ```
@@ -48,17 +49,18 @@ ROS 2 workspace; packages under `src/`:
 
 | Package | Role |
 |---|---|
-| `exploration_planner/tare_planner` | **The heart of this pipeline.** TARE exploration planner + keypose graph + NavGraph + grid world + room segmentation + the `Representation` (scene graph) + the scene-graph exporter. Most of this guide lives here. |
+| `exploration_planner/tare_planner` | **The heart of this pipeline.** The scene-graph builder (grown out of the TARE planner, steering removed) + keypose graph + NavGraph + grid world + room segmentation + the `Representation` (scene graph) + the scene-graph exporter. Most of this guide lives here. |
 | `semantic_mapping` | 3D semantic **object** mapping: YOLO-World/NanoOWL detection + SAM2 + LiDAR-image fusion → persistent per-instance object clouds → object nodes. See its [README](src/semantic_mapping/README.md). |
-| `vlm_node` | Vision-Language reasoning: **room typing** (labels rooms), target-object / spatial-condition reasoning for navigation queries. |
-| `slam` | `arise_slam` LiDAR-inertial odometry. Often **bypassed** when a bag already carries its own odometry/TF (see *Coordinate frames*). See its [README](src/slam/arise_slam_mid360/README.md). |
-| `route_planner` | Far/near route planning between waypoints (navigation execution, not graph building). |
-| `base_autonomy` | Low-level autonomy: local planner, terrain analysis, motion. The bottom of the three-level stack. |
-| `utilities` | Support: `domain_bridge`, Livox driver, ROS-TCP endpoint, RViz overlay plugins. |
+| `vlm_node` | Vision-Language reasoning: **room typing** (labels rooms) and object-label verification for `semantic_mapping`. |
+| `utilities` | Support: ROS-TCP endpoint, RViz overlay plugins, and other tooling (pending its own audit). |
 
-> **Scope note.** Navigation *execution* (route_planner, base_autonomy) is mostly
-> orthogonal to building/exporting the scene graph. This guide focuses on the
-> graph-building packages.
+> **Scope note.** This branch is the **scene-graph-construction-only** reduction
+> of SysNav: navigation execution (the TARE steering outputs, `route_planner`,
+> `base_autonomy`) and the in-repo SLAM (`arise_slam`) have been **removed**. The
+> robot is driven by its own onboard planner (or teleop / bag replay), and every
+> node consumes the robot/bag's own registered cloud + odometry
+> (`/<ns>/cloud_registered` + `/<ns>/lio/odometry`). The reduction worklist and
+> its verification history live in [`EXTRACTION_AUDIT.md`](EXTRACTION_AUDIT.md).
 
 ---
 
@@ -86,9 +88,9 @@ caveats:
 > `world` frame at all — there the export falls back to `odom`, and
 > `layout.metadata.frame` is set to `odom` to match.
 
-In the bag-direct setup the bag's own LIO feeds `/state_estimation` +
-`/registered_scan` directly, and a static identity `<ns>/odom → map` pins the
-stack's `map` frame to the bag odom. The scene graph is therefore in odom; the
+In the bag-direct setup the bag's own LIO feeds `/<ns>/lio/odometry` +
+`/<ns>/cloud_registered` directly, and a static identity `<ns>/odom → map` pins
+the stack's `map` frame to the bag odom. The scene graph is therefore in odom; the
 exporter sets `layout.metadata.frame` automatically to `odom` (or `world`, when
 the optional `world_transform` is enabled and its `world ← odom` lookup
 succeeds).
@@ -146,8 +148,8 @@ Objects are persistent instances (deduplicated, grown with new views). Their nod
 messages carry the object id, label, 3D position, and the viewpoint id they were
 seen from. See [`semantic_mapping/README.md`](src/semantic_mapping/README.md).
 
-**2. Viewpoints — the planner**
-The planner samples candidate viewpoints during exploration and, in
+**2. Viewpoints — the planner node**
+The planner node samples candidate viewpoints as the robot moves and, in
 `UpdateViewpointRep`, commits a **scene-graph viewpoint at the robot's real pose**
 when coverage changes substantially or object interest is high (deduped at ~2 m).
 On commit it publishes `/viewpoint_rep_header`, which tells `semantic_mapping_node`
@@ -168,12 +170,12 @@ for the (purely geometric) mask, and
 [`sensor_coverage_planner/ROOM_LABELING.md`](src/exploration_planner/tare_planner/src/sensor_coverage_planner/ROOM_LABELING.md)
 for how rooms get *typed* (view-image admission → VLM query → answer applied).
 
-**4. The keypose graph — the planner (parallel, mostly independent)**
+**4. The keypose graph — the planner node (parallel, mostly independent)**
 A global topological **roadmap** of the walkable world, built from the robot's
-trajectory plus connector waypoints. It answers "traversable distance / path
-between A and B" for the planner. It is **not** part of the scene graph (only
-loosely coupled — the planner uses it for walking-distance queries to objects),
-but it is the **source the NavGraph contracts** (item 5).
+trajectory plus connector waypoints (injected by `grid_world` from candidate
+viewpoints). It is **not** part of the scene graph, but it is the **source the
+NavGraph contracts** (item 5) — which is why the connector-node machinery
+survives in the reduced pipeline.
 Full details: [`keypose_graph/README.md`](src/exploration_planner/tare_planner/src/keypose_graph/README.md).
 
 **5. The NavGraph — the planner (derived from the keypose graph)**
@@ -198,9 +200,9 @@ obstacle." Two node kinds: **keypose nodes** (dropped along the trajectory) and
 **non-keypose / connector nodes** (vertices of inter-cell roadmap paths). A
 connectivity flood-fill from the first keypose marks each node *connected* or not;
 in the `/keypose_graph_cloud` RViz cloud the **connected** component is one color
-and the stale/orphaned (often edgeless) majority is the other. The planner only
-routes over the **connected** component — which is also exactly what the
-**NavGraph** contracts into the scene graph's navigation layer. Read
+and the stale/orphaned (often edgeless) majority is the other. The **connected**
+component is exactly what the **NavGraph** contracts into the scene graph's
+navigation layer. Read
 [`keypose_graph/README.md`](src/exploration_planner/tare_planner/src/keypose_graph/README.md)
 before touching it.
 

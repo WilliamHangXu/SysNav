@@ -152,6 +152,18 @@ Detailed hardware photos and assembly info: [Real-robot Setup &rarr; Hardware](#
 - Desktop workstation / Laptop with NVIDIA RTX 4090 for the semantic mapping and VLM reasoning
 - Wired / WiFi network shared between robot, NUC, and desktop
 
+## This Branch: Scene-Graph Pipeline Only
+
+> This branch (`deepclean`) is the **scene-graph-construction-only** reduction of
+> SysNav. Navigation execution (the TARE steering outputs, `base_autonomy`,
+> `route_planner`) and the in-repo SLAM (`arise_slam`) have been removed — the
+> robot is driven by its own onboard planner (or teleop / bag replay), and the
+> pipeline passively consumes the robot/bag's registered cloud + odometry
+> (`/<ns>/cloud_registered` + `/<ns>/lio/odometry`) plus the camera to build and
+> export a GADM-style scene-graph JSON. Start with
+> [`ARCHITECTURE.md`](ARCHITECTURE.md) for the developer guide; the full
+> object-navigation system described by the paper lives on the original branches.
+
 ## Contents
 
 - [Demo](#demo)
@@ -159,18 +171,12 @@ Detailed hardware photos and assembly info: [Real-robot Setup &rarr; Hardware](#
 - [Installation](#installation)
   - [Dependencies](#1-dependencies)
   - [Submodules and Python Packages](#2-submodules-and-python-packages)
-  - [SLAM Dependencies](#3-slam-dependencies)
-  - [Mid-360 Lidar Driver](#4-mid-360-lidar-driver)
-  - [Compile](#5-compile)
-- [Simulation Setup](#simulation-setup)
-  - [Base Autonomy](#base-autonomy)
-  - [Exploration Planner](#exploration-planner)
-- [Real-robot Setup](#real-robot-setup)
-  - [Hardware](#hardware)
-  - [System Setup](#system-setup)
-  - [360 Camera Driver](#360-camera-driver)
-  - [System Usage](#system-usage)
-- [Bagfile Setup](#bagfile-setup)
+  - [Compile](#3-compile)
+  - [VLM API Key](#vlm-api-key)
+- [Running the Scene-Graph Pipeline](#running-the-scene-graph-pipeline)
+  - [Bag Replay (tmux)](#bag-replay-tmux)
+  - [Docker (bag-direct / live / demo)](#docker-bag-direct--live--demo)
+  - [Output](#output)
 - [Credits](#credits)
 - [Citation](#citation)
 - [License](#license)
@@ -224,57 +230,16 @@ python set_yolo_e.py
 python set_yolo_world.py
 ```
 
-### 3) SLAM Dependencies
+### 3) Compile
 
-Install **Sophus** (from `src/slam/dependency/Sophus`):
-```bash
-mkdir build && cd build
-cmake .. -DBUILD_TESTS=OFF
-make && sudo make install
-```
-
-Install **Ceres Solver** (from `src/slam/dependency/ceres-solver`):
-```bash
-mkdir build && cd build
-cmake ..
-make -j6 && sudo make install
-```
-
-Install **GTSAM** (from `src/slam/dependency/gtsam`):
-```bash
-mkdir build && cd build
-cmake .. -DGTSAM_USE_SYSTEM_EIGEN=ON -DGTSAM_BUILD_WITH_MARCH_NATIVE=OFF
-make -j6 && sudo make install
-sudo /sbin/ldconfig -v
-```
-
-### 4) Mid-360 Lidar Driver
-
-Install **Livox-SDK2** (from `src/utilities/livox_ros_driver2/Livox-SDK2`):
-```bash
-mkdir build && cd build
-cmake ..
-make && sudo make install
-```
-
-Configure the lidar IP in `src/utilities/livox_ros_driver2/config/MID360_config.json` — set the IP to `192.168.1.1xx` where `xx` are the last two digits of the lidar serial number.
-
-Compile the driver:
-```bash
-colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release --packages-select livox_ros_driver2
-```
-
-### 5) Compile
-
-**For simulation** (skips SLAM and lidar driver):
-```bash
-colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release --packages-skip arise_slam_mid360 arise_slam_mid360_msgs livox_ros_driver2
-```
-
-**For real robot** (full build, requires steps 3-4):
 ```bash
 colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release
 ```
+
+> Both flags matter: the workspace convention is `Release` (the planner is
+> unusably slow at `-O0`, which is what an empty build type gives you), and
+> `--symlink-install` is required — `tare_planner` installs only its executables
+> and resolves its shared libraries through the build tree.
 
 ### VLM API Key
 
@@ -292,175 +257,57 @@ export DASHSCOPE_API_KEY="your-api-key-here"
 
 If both keys are set, Gemini is used by default; override with `export VLM_PROVIDER=qwen`. Optionally override Qwen model names with `QWEN_MODEL` / `QWEN_MODEL_LITE`. Add the line(s) to `~/.bashrc` so they persist across terminal sessions.
 
-## Simulation Setup
+## Running the Scene-Graph Pipeline
 
-### Base Autonomy
+Everything is brought up by **one launch file** — `tare_planner scene_graph.launch`
+— which starts the `<ns>/odom → map` static tf, detection + semantic mapping
+(`objects:=true`), room segmentation, the VLM node, the planner node (scene-graph
+builder + exporter), and RViz. The **single per-robot knob** is
+`robot_namespace` in
+[`src/exploration_planner/tare_planner/config/robot.yaml`](src/exploration_planner/tare_planner/config/robot.yaml):
+every node composes its inputs as `/<robot_namespace>/cloud_registered`,
+`/<robot_namespace>/lio/odometry`, `/<robot_namespace>/camera/...`; camera
+intrinsics come from `camera_info` and extrinsics from tf. Set it to match the
+robot (or the bag's recording robot) and nothing else needs editing.
 
-The system is integrated with [Unity](https://unity.com) environment models for simulation. Download a [Unity environment model](https://drive.google.com/drive/folders/1GNz386h6wiiFuQQdaY2_HbNRyd7nKA1N?usp=sharing) (recommend home_building_1.zip) and unzip the files to the `src/base_autonomy/vehicle_simulator/mesh/unity` folder. For computers without a powerful GPU, please try the `without_360_camera` version for a higher rendering rate.
-
-The environment model files should look like:
-```
-mesh/
-  unity/
-    environment/
-      Model_Data/
-      Model.x86_64
-      UnityPlayer.so
-      Dimensions.csv
-      Categories.csv
-    map.ply
-    object_list.txt
-    traversable_area.ply
-    map.jpg
-    render.jpg
-```
-
-Launch the system:
-```bash
-./system_simulation.sh
-```
-
-After seeing data showing up in RVIZ, users can use the 'Waypoint' button to set waypoints and navigate the vehicle around. The system supports three operating modes:
-
-<p align="center">
-  <img src="img/rviz_full.jpg" alt="RVIZ" width="80%"/><br>
-  <em>Base autonomy (smart joystick, waypoint, and manual modes)</em>
-</p>
-
-- **Smart joystick mode** (default): The vehicle follows joystick commands while avoiding collisions. Use the control panel in RVIZ or the right joystick on the controller.
-
-- **Waypoint mode**: The vehicle follows waypoints while avoiding collisions. Use the 'Waypoint' button in RVIZ, or click 'Resume Navigation to Goal' to switch to this mode.
-
-- **Manual mode**: The vehicle follows joystick commands without collision avoidance. Press the 'manual-mode' button on the controller.
-
-<p align="center">
-  <img src="img/rviz_control_panel.jpg" alt="RVIZ Control Panel" width="30%"/>
-  &nbsp;&nbsp;&nbsp;&nbsp;
-  <img src="img/ps3_controller.jpg" alt="PS3 Controller" width="45%"/>
-</p>
-
-Alternatively, users can run a ROS node to send a series of waypoints:
-```bash
-source install/setup.sh
-ros2 launch waypoint_example waypoint_example.launch
-```
-Click the 'Resume Navigation to Goal' button in RVIZ, and the vehicle will navigate inside the boundary following the waypoints. More information about the base autonomy system is available on the [Autonomous Exploration Development Environment](https://www.cmu-exploration.com) website.
-
-### Exploration Planner
-
-Launch the system with the exploration planner:
-```bash
-./system_simulation_with_exploration_planner.sh
-```
-Click the 'Resume Navigation to Goal' button in RVIZ to start the exploration. Users can adjust the navigation boundary by updating the boundary polygon in `src/exploration_planner/tare_planner/data/boundary.ply`.
-
-> **Note:** On ARM computers, download the corresponding [OR-Tools binary release](https://github.com/google/or-tools/releases) and replace the `include` and `lib` folders under `src/exploration_planner/tare_planner/or-tools`.
-
-<p align="center">
-  <img src="img/rviz_full_with_exploration_planner.jpg" alt="RVIZ with Exploration Planner" width="80%"/><br>
-  <em>Base autonomy with exploration planner</em>
-</p>
-
-## Real-robot Setup
-
-### Hardware
-
-The vehicle hardware is designed to support advanced AI. Space is left for users to install a Jetson AGX Orin computer or a gaming laptop. The vehicle is equipped with a 19V and a 110V inverter (both 400W) to power sensors and computers. A wireless HDMI module transmits signals to a control station.
-
-We supply two types of wheels: Mecanum wheels for indoor carpet, and standard wheels for hard floor and outdoors.
-
-<p align="center">
-  <img src="img/all_items.jpg" alt="All Items" width="48%"/>
-  &nbsp;&nbsp;&nbsp;&nbsp;
-  <img src="img/computer_space.jpg" alt="Computer Space" width="34%"/>
-</p>
-
-<p align="center">
-  <img src="img/control_station.jpg" alt="Control Station" width="70%"/>
-</p>
-
-<p align="center">
-  <img src="img/wheel_types.jpg" alt="Wheel Types" width="85%"/>
-</p>
-
-### System Setup
-
-Install [Ubuntu 24.04](https://releases.ubuntu.com/noble) and [ROS2 Jazzy](https://docs.ros.org/en/jazzy/Installation.html) on the processing computer. Add user to the dialout group:
+### Bag Replay (tmux)
 
 ```bash
-echo "source /opt/ros/jazzy/setup.bash" >> ~/.bashrc
-source ~/.bashrc
-sudo adduser 'username' dialout
-sudo reboot now
+tmuxp load vlm_ros_alphaz_bag_direct.tmuxp.yaml
 ```
 
-Follow the [Installation](#installation) section to install all dependencies and compile the full repository. For the motor controller, connect it via USB and update the serial device path in `src/base_autonomy/local_planner/launch/local_planner.launch` and `src/utilities/teleop_joy_controller/launch/teleop_joy_controller.launch` if needed (default: `/dev/ttyACM0`).
+Edit the bag path / start offset inside that yaml (per-run knobs live there, and
+only there). When launching by hand instead, note two gotchas: play the bag
+**paused with `--clock` before starting the stack** (the planner exits if its
+first tick sees sim time 0), and pass `decompress_camera:=true` for bags that
+carry only the compressed camera topic.
 
-Test the teleoperation:
+### Docker (bag-direct / live / demo)
+
+The containerized flow (build-in-volume, source bind-mounted) is documented in
+[`docker/README.md`](docker/README.md):
+
 ```bash
-source install/setup.sh
-ros2 launch teleop_joy_controller teleop_joy_controller.launch
+docker/run.sh build                                   # one-time compile
+MODE=bag-direct BAG=/path/to/recording docker/run.sh  # replay a bag
+MODE=live  ROBOT_IP=... LAPTOP_IP=... docker/run.sh   # live robot via ros1_bridge
+MODE=demo  ROBOT_IP=... LAPTOP_IP=... docker/run.sh   # robot-gated demo runs
 ```
 
-### 360 Camera Driver
+### Output
 
-The system uses a Ricoh Theta Z1 360-degree camera. The camera driver and lidar-to-camera calibration tools are maintained in a separate repository — clone it alongside this repo and follow its README to build and configure:
-
-[https://github.com/jizhang-cmu/360_camera/tree/jazzy](https://github.com/jizhang-cmu/360_camera/tree/jazzy)
-
-### System Usage
-
-Launch the full system:
-```bash
-./system_real_robot.sh
-```
-
-Launch with the exploration planner:
-```bash
-./system_real_robot_with_exploration_planner.sh
-```
-
-<p align="center">
-  <img src="img/exploration.jpg" alt="Exploration" width="80%"/><br>
-  <em>Exploration</em>
-</p>
-
-## Bagfile Setup
-
-To run the system with a recorded bagfile, open **three terminals**:
-
-**Terminal 1** - Launch the system:
-```bash
-./system_bagfile.sh
-# or with exploration planner:
-./system_bagfile_with_exploration_planner.sh
-```
-
-**Terminal 2** - Republish camera images:
-```bash
-ros2 run image_transport republish \
-  --ros-args \
-  -p in_transport:=compressed \
-  -p out_transport:=raw \
-  --remap in/compressed:=/camera/image/compressed \
-  --remap out:=/camera/image
-```
-
-**Terminal 3** - Play the bagfile:
-```bash
-source install/setup.bash
-ros2 bag play bagfolder_path/bagfile_name.mcap
-```
-
-Example bagfiles are available [here](https://drive.google.com/drive/folders/1hXBf_A4AS-P2nHnOAXfbH9ezKXbsD6qk?usp=drive_link).
-
-> **Note:** Before processing bagfiles, ensure the repository has been fully compiled following the [Installation](#installation) section.
+Scene-graph snapshots are written under `output/scene_graph/run_<timestamp>/` as
+`snapshot_<n>_<t>.json` (periodic / manual via publishing `ssg` on
+`/keyboard_input`) and `snapshot_final.json` (end-of-bag watchdog). The JSON
+schema and export configuration are documented in
+[`scene_graph_exporter/README.md`](src/exploration_planner/tare_planner/src/scene_graph_exporter/README.md)
+and [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ## Credits
 
 The project is led by [Ji Zhang's](https://frc.ri.cmu.edu/~zhangji) group at Carnegie Mellon University.
 
-The base autonomy system is based on [Autonomous Exploration Development Environment](https://www.cmu-exploration.com). The SLAM module is an upgraded implementation of [LOAM](https://github.com/cuitaixiang/LOAM_NOTED).
+The scene-graph builder grew out of the [TARE planner](https://github.com/caochao39/tare_planner) and the [Autonomous Exploration Development Environment](https://www.cmu-exploration.com).
 
 ## Citation
 

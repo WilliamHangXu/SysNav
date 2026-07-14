@@ -409,7 +409,7 @@ Each room maintains a rolling **best-3 set of camera views** (chosen for how muc
 4. **Pose-diversity admission** into that room's `best_views_`: if pose-close (`room_view.pose_dist_m` 1.5 m / `pose_yaw_deg` 40°) to an existing view, keep the higher-coverage one; otherwise fill an empty slot or evict the weakest if beaten. Accepted frames are written to `room_views/room_<id>_slot_<k>.jpg`; the view's `anchor_xy` is the mean of its covered cells. On any change, `views_dirty_ = true`.
 
 ### Stage 2 — query emission
-`PublishRoomTypeQueries()` runs once per planning cycle (after `SetCurrentRoomId`). For each live room it fires a query when **`views_dirty_` OR the object count changed**, rate-limited by `room_type_query.min_interval_s` (3 s), provided there is ≥ 1 image or object as evidence. This **replaces** the old coverage-growth trigger and is decoupled from `UpdateRoomLabel`, which now keeps only the navigation early-stop logic (`Early Stop 1` / `ChangeRoomQuery`).
+`PublishRoomTypeQueries()` runs once per planning cycle (after `SetCurrentRoomId`). For each live room it fires a query when **`views_dirty_` OR the object count changed**, rate-limited by `room_type_query.min_interval_s` (3 s), provided there is ≥ 1 image or object as evidence. This **replaces** the old coverage-growth trigger (the former `UpdateRoomLabel`, deleted along with the navigation code).
 
 The **object inventory** is built from the room's `object_indices_`: each object's `GetLabel()`, confidence-filtered (`room_view.object_conf_min` 0.3), deduped with counts → `"desk x2, monitor x1"`.
 

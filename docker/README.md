@@ -8,7 +8,7 @@ knobs.
 
 | | |
 |---|---|
-| **Baked into the image** | Ubuntu + CUDA, ROS 2 Jazzy (desktop-full), ROS 1 Noetic + the compiled `ros1_bridge` (grafted from the upstream builder), native SLAM deps (Sophus/Ceres/GTSAM/Livox), the Python/ML stack, and the `sam2` editable install. |
+| **Baked into the image** | Ubuntu + CUDA, ROS 2 Jazzy (desktop-full), ROS 1 Noetic + the compiled `ros1_bridge` (grafted from the upstream builder), the Python/ML stack, and the `sam2` editable install. (The image still bakes Livox-SDK2 for the orphaned `livox_ros_driver2` — slated for removal in the utilities audit.) |
 | **NOT baked** | The application source, the colcon build, the model weights. `src/` is bind-mounted at runtime and `colcon build --symlink-install` runs **in-container into a named volume**, so day-to-day pipeline edits need no image rebuild. |
 
 The pipeline is under constant development, so its source is mounted, not baked.
@@ -33,7 +33,7 @@ cd /home/all/AlphaZ/SysNav
 docker build -f docker/Dockerfile -t sysnav:latest .
 ```
 
-The first build is long (CUDA base + desktop-full + the ML stack + GTSAM/Ceres +
+The first build is long (CUDA base + desktop-full + the ML stack +
 detectron2/pytorch3d CUDA kernels). Layers are ordered for cache reuse; the
 bridge graft is last, so it only re-runs if the builder image changes.
 
@@ -279,8 +279,8 @@ first:
 | You changed… | Do this | Cost |
 |---|---|---|
 | Python ROS nodes (`.py` logic), `docker/` scripts (`run.sh`/`supervisor.sh`/…), config yamls, model weights | **nothing** — just re-run `docker/run.sh` | instant (mounted live) |
-| Pipeline **C++** (tare_planner, bag_slam_bridge, …), or *added* Python nodes / entry points | `BUILD=1 … docker/run.sh` — recompiles into the build volume | incremental colcon (fast) |
-| `requirement.txt`, `docker/Dockerfile`, an apt package, or a **vendored native dep** (`src/slam/dependency/{Sophus,ceres-solver,gtsam}`, `Livox-SDK2`) | **rebuild the image** (below) | minutes (layer cache helps) |
+| Pipeline **C++** (tare_planner, …), or *added* Python nodes / entry points | `BUILD=1 … docker/run.sh` — recompiles into the build volume | incremental colcon (fast) |
+| `requirement.txt`, `docker/Dockerfile`, an apt package, or the vendored `Livox-SDK2` | **rebuild the image** (below) | minutes (layer cache helps) |
 
 ```bash
 docker build -f docker/Dockerfile -t sysnav:latest .     # rebuild the image
@@ -291,16 +291,16 @@ changes to the files that are *baked* into the image:
 
 ```bash
 git diff --stat ORIG_HEAD HEAD -- docker/Dockerfile requirement.txt \
-  src/slam/dependency src/utilities/livox_ros_driver2/Livox-SDK2
+  src/utilities/livox_ros_driver2/Livox-SDK2
 ```
 
 Any output → **rebuild the image**. Otherwise: if C++ under `src/` changed →
 `BUILD=1`; if only Python/config/scripts changed → just run.
 
-> ⚠️ **The vendored native deps live under `src/` but are compiled at
-> image-build time, not by the in-container colcon build** — so changing
-> `src/slam/dependency/*` or `Livox-SDK2` needs an **image** rebuild, not just
-> `BUILD=1`. Everything else under `src/` is the normal mounted workspace.
+> ⚠️ **`Livox-SDK2` lives under `src/` but is compiled at image-build time, not
+> by the in-container colcon build** — changing it needs an **image** rebuild,
+> not just `BUILD=1`. Everything else under `src/` is the normal mounted
+> workspace.
 
 ### Build without running the pipeline (`build` / `rebuild`)
 
@@ -371,11 +371,12 @@ The one file to edit when moving to a different robot or bag is
 `src/exploration_planner/tare_planner/config/robot.yaml`:
 
 - `robot_namespace` — the topic/tf prefix (`go2w_026` live, `go2w_016` for the
-  multifloor bag). Wrong value → the pipeline waits forever on calibration.
-- `registered_scan_source` — `bag` (read the robot/bag's own registered cloud +
-  `/lio/odometry`) or `slam_bridge` (register the raw lidar in-container). The
-  bridge allowlist (`docker/ros1_bridge/bridge_topics.yaml`) carries whichever
-  cloud topic that source needs.
+  multifloor bag). Wrong value → the pipeline waits forever on calibration (and
+  the scene graph stays empty: no NavGraph, no room ids).
+
+Every node reads the robot/bag's own registered cloud + odometry
+(`/<ns>/cloud_registered` + `/<ns>/lio/odometry`); the bridge allowlist
+(`docker/ros1_bridge/bridge_topics.yaml`) carries exactly those topics.
 
 ## Files
 
