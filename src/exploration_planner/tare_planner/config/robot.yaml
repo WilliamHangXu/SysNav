@@ -13,21 +13,5 @@
   ros__parameters:
     robot_namespace: go2w_026
 
-    # --- registered cloud + odometry source --------------------------------
-    # Every scene-graph node consumes a registered (odom-frame) point cloud and
-    # the matching odometry. The two are ALWAYS switched together as one
-    # trajectory, so the cloud and the poses can never drift apart:
-    #   bag         the bag / robot already runs SLAM -- read it directly:
-    #                 cloud = /<ns>/cloud_registered   odom = /<ns>/lio/odometry
-    #   slam_bridge no on-board registered cloud -- bag_slam_bridge registers the
-    #               raw lidar instead and publishes the matching odometry:
-    #                 cloud = /<ns>/cloud_registered   odom = /<ns>/state_estimation
-    #               (scene_graph.launch then starts the bridge; the ros1_bridge
-    #                carries /<ns>/livox/lidar instead of /<ns>/cloud_registered.)
-    registered_scan_source: bag
-
-    # Raw lidar feeding bag_slam_bridge -- only used when source == slam_bridge.
-    # Defaults suit the go2w Livox (CustomMsg). Use 'pointcloud2' + a PointCloud2
-    # topic suffix for a non-Livox lidar.
-    slam_bridge.lidar_msg_type: livox
-    slam_bridge.lidar_topic_suffix: livox/lidar
+    # Every scene-graph node consumes the robot/bag's own registered (odom-frame)
+    # cloud + matching odometry: /<ns>/cloud_registered + /<ns>/lio/odometry.

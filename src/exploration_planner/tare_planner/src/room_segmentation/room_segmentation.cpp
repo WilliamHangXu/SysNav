@@ -133,30 +133,19 @@ RoomSegmentationNode::RoomSegmentationNode()
     this->declare_parameter<std::string>("robot_namespace", "");
     this->declare_parameter<std::string>("topic_suffix.registered_scan", "cloud_registered");
     this->declare_parameter<std::string>("topic_suffix.odometry", "lio/odometry");
-    // 'slam_bridge' source: cloud + matching odometry come from bag_slam_bridge,
-    // with the odometry on this suffix (see registered_scan_source).
-    this->declare_parameter<std::string>("topic_suffix.slam_odometry", "state_estimation");
-    // 'bag' (read /<ns>/cloud_registered + /<ns>/lio/odometry directly) or
-    // 'slam_bridge' (bag_slam_bridge registers the raw lidar and publishes the
-    // matching odometry). Cloud + odometry are always switched as one pair.
-    this->declare_parameter<std::string>("registered_scan_source", "bag");
     std::string registered_scan_topic = "/registered_scan";
     std::string state_estimation_topic = "/state_estimation";
     {
         const std::string robot_ns = this->get_parameter("robot_namespace").as_string();
         if (!robot_ns.empty()) {
-            const std::string scan_source =
-                this->get_parameter("registered_scan_source").as_string();
             const std::string odom_suffix =
-                scan_source == "slam_bridge"
-                    ? this->get_parameter("topic_suffix.slam_odometry").as_string()
-                    : this->get_parameter("topic_suffix.odometry").as_string();
+                this->get_parameter("topic_suffix.odometry").as_string();
             registered_scan_topic = "/" + robot_ns + "/" +
                 this->get_parameter("topic_suffix.registered_scan").as_string();
             state_estimation_topic = "/" + robot_ns + "/" + odom_suffix;
             RCLCPP_INFO(this->get_logger(),
-                "[robot_namespace=%s source=%s] registered_scan=%s state_estimation=%s",
-                robot_ns.c_str(), scan_source.c_str(), registered_scan_topic.c_str(),
+                "[robot_namespace=%s] registered_scan=%s state_estimation=%s",
+                robot_ns.c_str(), registered_scan_topic.c_str(),
                 state_estimation_topic.c_str());
         }
     }
