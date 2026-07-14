@@ -120,10 +120,6 @@ add_library(planning_env src/planning_env/planning_env.cpp)
 ament_target_dependencies(planning_env rclcpp std_msgs nav_msgs geometry_msgs sensor_msgs tf2_ros tf2_geometry_msgs tf2)
 target_link_libraries(planning_env ${catkin_LIBRARIES} ${PCL_LIBRARIES} rolling_occupancy_grid pointcloud_manager lidar_model viewpoint_manager grid_world)
 
-add_library(exploration_path src/exploration_path/exploration_path.cpp)
-ament_target_dependencies(exploration_path rclcpp std_msgs nav_msgs geometry_msgs sensor_msgs tf2_ros tf2_geometry_msgs tf2 pcl_ros pcl_conversions visualization_msgs)
-target_link_libraries(exploration_path ${catkin_LIBRARIES} ${PCL_LIBRARIES})
-
 add_library(representation src/representation/representation.cpp)
 ament_target_dependencies(representation rclcpp std_msgs nav_msgs geometry_msgs sensor_msgs tf2_ros tf2_geometry_msgs tf2 pcl_conversions visualization_msgs OpenCV cv_bridge)
 target_link_libraries(representation ${catkin_LIBRARIES} ${OpenCV_LIBRARIES} misc_utils pointcloud_utils)

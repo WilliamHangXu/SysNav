@@ -32,7 +32,6 @@
 #include <viewpoint/viewpoint.h>
 #include <utils/misc_utils.h>
 #include <grid_world/grid_world.h>
-#include <exploration_path/exploration_path.h>
 #include <opencv2/opencv.hpp>
 
 namespace viewpoint_manager_ns
