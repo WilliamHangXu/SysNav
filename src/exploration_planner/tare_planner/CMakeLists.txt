@@ -37,6 +37,12 @@ find_package(message_filters REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(backward_ros REQUIRED)
 find_package(nlohmann_json REQUIRED)
+find_package(yaml-cpp REQUIRED)  # offline_room_segmentation (blueprint/config parsing)
+if(TARGET yaml-cpp::yaml-cpp)
+  set(OFFLINE_YAML_CPP_TARGET yaml-cpp::yaml-cpp)
+else()
+  set(OFFLINE_YAML_CPP_TARGET yaml-cpp)
+endif()
 
 
 include_directories(
@@ -182,6 +188,17 @@ rosidl_target_interfaces(room_segmentation
   ${PROJECT_NAME}
   "rosidl_typesupport_cpp")
 
+# Offline batch room segmentation (non-ROS: plain main, files in/out).
+# No CMAKE_BUILD_TYPE is set anywhere in this tree, so force optimization
+# per-target: normal estimation / region growing are unusable at -O0.
+add_executable(offline_room_segmentation src/offline/offline_room_segmentation.cpp)
+target_compile_options(offline_room_segmentation PRIVATE -O2)
+target_link_libraries(offline_room_segmentation
+  ${PCL_LIBRARIES}
+  ${OpenCV_LIBRARIES}
+  nlohmann_json::nlohmann_json
+  ${OFFLINE_YAML_CPP_TARGET})
+
 #############
 ## Install ##
 #############
@@ -189,6 +206,7 @@ rosidl_target_interfaces(room_segmentation
 install(TARGETS
   room_segmentation
   tare_planner_node
+  offline_room_segmentation
   DESTINATION lib/${PROJECT_NAME})
 
 install(DIRECTORY launch/
