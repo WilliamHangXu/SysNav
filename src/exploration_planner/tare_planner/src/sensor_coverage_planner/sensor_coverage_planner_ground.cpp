@@ -293,6 +293,7 @@ void SensorCoveragePlanner3D::ReadParameters() {
   this->declare_parameter<bool>("scene_graph_export.end_of_bag_save", scene_graph_cfg_.end_of_bag_save);
   this->declare_parameter<double>("scene_graph_export.bag_end_timeout_s", scene_graph_cfg_.bag_end_timeout_s);
   this->declare_parameter<std::string>("scene_graph_export.manual_save_keyword", scene_graph_cfg_.manual_save_keyword);
+  this->declare_parameter<std::string>("scene_graph_export.keypose_dump_keyword", scene_graph_cfg_.keypose_dump_keyword);
   this->declare_parameter<std::string>("scene_graph_export.zone", scene_graph_cfg_.zone);
   this->declare_parameter<std::string>("scene_graph_export.map_id", scene_graph_cfg_.map_id);
   this->declare_parameter<std::string>("scene_graph_export.warehouse_id", scene_graph_cfg_.warehouse_id);
@@ -315,6 +316,7 @@ void SensorCoveragePlanner3D::ReadParameters() {
   this->get_parameter("scene_graph_export.end_of_bag_save", scene_graph_cfg_.end_of_bag_save);
   this->get_parameter("scene_graph_export.bag_end_timeout_s", scene_graph_cfg_.bag_end_timeout_s);
   this->get_parameter("scene_graph_export.manual_save_keyword", scene_graph_cfg_.manual_save_keyword);
+  this->get_parameter("scene_graph_export.keypose_dump_keyword", scene_graph_cfg_.keypose_dump_keyword);
   this->get_parameter("scene_graph_export.zone", scene_graph_cfg_.zone);
   this->get_parameter("scene_graph_export.map_id", scene_graph_cfg_.map_id);
   this->get_parameter("scene_graph_export.warehouse_id", scene_graph_cfg_.warehouse_id);
@@ -1135,6 +1137,10 @@ void SensorCoveragePlanner3D::KeyboardInputCallback(const std_msgs::msg::String:
   if (keyboard_input_msg->data == scene_graph_cfg_.manual_save_keyword)
   {
     SaveSceneGraphSnapshot("manual");
+  }
+  if (keyboard_input_msg->data == scene_graph_cfg_.keypose_dump_keyword)
+  {
+    SaveKeyposeGraphJson();
   }
 }
 
@@ -3124,6 +3130,124 @@ void SensorCoveragePlanner3D::SaveSceneGraphSnapshot(const std::string &reason)
   ++scene_graph_snapshot_count_;
   RCLCPP_INFO(this->get_logger(), "[scene_graph] saved %s snapshot -> %s",
               reason.c_str(), out_path.c_str());
+}
+
+void SensorCoveragePlanner3D::SaveKeyposeGraphJson()
+{
+  if (!keypose_graph_ || !initialized_)
+  {
+    return;
+  }
+  if (scene_graph_run_dir_.empty())
+  {
+    RCLCPP_WARN(this->get_logger(),
+                "[keypose_dump] scene_graph_export disabled -> no run dir to write to");
+    return;
+  }
+
+  // Same frame policy as SaveSceneGraphSnapshot: the dump must land in the SAME
+  // frame as the scene-graph snapshots and room masks it will be assembled with.
+  if (scene_graph_cfg_.enabled_world_transform && !scene_graph_world_from_map_valid_)
+  {
+    if (!TryFreezeWorldFromOdom())
+    {
+      RCLCPP_WARN(this->get_logger(),
+                  "[keypose_dump] world<-odom not available yet; writing dump in odom frame");
+    }
+  }
+  const bool world_applied =
+      scene_graph_cfg_.enabled_world_transform && scene_graph_world_from_map_valid_;
+
+  // Nodes: index in the array == keypose node_ind (nodes_ is dense 0..N-1).
+  const int node_num = keypose_graph_->GetNodeNum();
+  json nodes = json::array();
+  for (int i = 0; i < node_num; i++)
+  {
+    const geometry_msgs::msg::Point pt = keypose_graph_->GetNodePosition(i);
+    Eigen::Vector3d p(pt.x, pt.y, pt.z);
+    if (world_applied)
+    {
+      p = scene_graph_world_from_map_ * p;
+    }
+    nodes.push_back({ p.x(), p.y(), p.z() });
+  }
+
+  // Edges: each undirected edge once as [u, v, d] with u < v (AddEdge inserts
+  // both directions). d is the traversable length from dist_, invariant under
+  // the rigid world transform.
+  json edges = json::array();
+  for (int i = 0; i < node_num; i++)
+  {
+    const std::vector<int>& neighbors = keypose_graph_->GetNodeNeighbors(i);
+    const std::vector<double>& neighbor_dists = keypose_graph_->GetNeighborDistances(i);
+    const size_t n = std::min(neighbors.size(), neighbor_dists.size());
+    for (size_t k = 0; k < n; k++)
+    {
+      if (neighbors[k] > i)
+      {
+        edges.push_back({ i, neighbors[k], neighbor_dists[k] });
+      }
+    }
+  }
+
+  // Dumped verbatim, not recomputed offline: CheckConnectivity applies collision
+  // pruning, so raw adjacency overstates traversability. The offline navgraph
+  // must replay the same connected set the live NavGraph saw.
+  const std::vector<int> connected_inds = keypose_graph_->GetConnectedGraphNodeIndices();
+
+  const size_t edge_count = edges.size();
+  json dump;
+  dump["metadata"] = { { "frame", world_applied ? scene_graph_cfg_.world_frame : scene_graph_cfg_.frame },
+                       { "stamp_sec", this->now().seconds() },
+                       { "node_count", node_num },
+                       { "edge_count", static_cast<int>(edge_count) },
+                       { "connected_node_count", static_cast<int>(connected_inds.size()) } };
+  dump["nodes"] = std::move(nodes);
+  dump["edges"] = std::move(edges);
+  dump["connected"] = connected_inds;
+
+  // Stable name, overwritten on each press: the graph only grows, so the last
+  // press is the most complete one and the offline builder gets one canonical
+  // filename. Atomic temp+rename like the snapshots.
+  std::filesystem::path run_dir(scene_graph_run_dir_);
+  std::filesystem::path out_path = run_dir / "keypose_graph.json";
+  std::filesystem::path tmp_path = run_dir / ".keypose_graph.json.tmp";
+  {
+    std::ofstream out(tmp_path);
+    if (!out)
+    {
+      RCLCPP_ERROR(this->get_logger(), "[keypose_dump] cannot write %s", tmp_path.c_str());
+      return;
+    }
+    // dump(2) would put every coordinate on its own line and dump() is one
+    // giant line; hand-format instead with one node/edge row per line.
+    const auto write_rows = [&out](const char* key, const json& rows) {
+      out << "  \"" << key << "\": [";
+      for (size_t r = 0; r < rows.size(); r++)
+      {
+        out << (r == 0 ? "\n    " : ",\n    ") << rows[r].dump();
+      }
+      out << (rows.empty() ? "]" : "\n  ]");
+    };
+    out << "{\n  \"metadata\": " << dump["metadata"].dump() << ",\n";
+    write_rows("nodes", dump["nodes"]);
+    out << ",\n";
+    write_rows("edges", dump["edges"]);
+    out << ",\n  \"connected\": " << dump["connected"].dump() << "\n}\n";
+  }
+  std::error_code ec;
+  std::filesystem::rename(tmp_path, out_path, ec);
+  if (ec)
+  {
+    RCLCPP_ERROR(this->get_logger(), "[keypose_dump] cannot finalize %s: %s",
+                 out_path.c_str(), ec.message().c_str());
+    std::filesystem::remove(tmp_path, ec);
+    return;
+  }
+
+  RCLCPP_INFO(this->get_logger(),
+              "[keypose_dump] saved %d nodes / %zu edges / %zu connected -> %s",
+              node_num, edge_count, connected_inds.size(), out_path.c_str());
 }
 
 void SensorCoveragePlanner3D::SceneGraphWatchdogCallback()

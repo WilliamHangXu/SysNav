@@ -43,6 +43,9 @@ struct SceneGraphExportConfig
   bool end_of_bag_save = true;     // final snapshot when sim time stalls
   double bag_end_timeout_s = 5.0;  // wall-clock stall before declaring "bag over"
   std::string manual_save_keyword = "save";
+  // /keyboard_input trigger for the keypose-graph JSON dump (offline navgraph
+  // input; debug/offline only, never fires in production on its own).
+  std::string keypose_dump_keyword = "skg";
 
   // --- world-frame transform (composed by the planner, applied in Build) ---
   // The scene graph is built in the bag's odom frame (numerically kWorldFrameID

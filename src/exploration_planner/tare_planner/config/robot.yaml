@@ -11,7 +11,7 @@
 # semantic_mapping / detection launches.
 /**:
   ros__parameters:
-    robot_namespace: go2w_011
+    robot_namespace: go2w_016
 
     # Every scene-graph node consumes the robot/bag's own registered (odom-frame)
     # cloud + matching odometry: /<ns>/cloud_registered + /<ns>/lio/odometry.

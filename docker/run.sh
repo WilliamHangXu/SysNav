@@ -221,6 +221,7 @@ cat <<"BANNER"
 #   ros2 topic echo /$ns/camera_rect/camera_info --once   # camera intrinsics
 #   ros2 node list                                        # running nodes
 #   ros2 run tf2_tools view_frames                        # dump the TF tree -> frames.pdf
+#   ros2 topic pub -1 /keyboard_input std_msgs/msg/String "{data: skg}"    # send a keyboard command
 #
 # Raw ROS 1 robot topics (live/demo only) need the Noetic overlay:
 #   source /opt/ros/noetic/setup.bash && rostopic hz /$ns/...

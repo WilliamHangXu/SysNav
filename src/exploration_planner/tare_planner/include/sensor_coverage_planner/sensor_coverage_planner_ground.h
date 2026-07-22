@@ -269,6 +269,8 @@ private:
   
   // GADM-style scene-graph snapshot export
   void SaveSceneGraphSnapshot(const std::string &reason);
+  // Keypose-graph JSON dump for the offline navgraph builder (keyboard-only).
+  void SaveKeyposeGraphJson();
   void SceneGraphWatchdogCallback();
   bool TryFreezeWorldFromOdom();  // look up & latch world_T_odom once
 

@@ -16,6 +16,11 @@ tare_planner_node:
     scene_graph_export.end_of_bag_save: true             # final snapshot when /clock stalls (sim time)
     scene_graph_export.bag_end_timeout_s: 15.0            # wall-clock stall before "bag over"
     scene_graph_export.manual_save_keyword: "ssg"       # /keyboard_input trigger for on-demand dump
+    # /keyboard_input trigger that dumps the full keypose graph (nodes/edges/
+    # connected set) to <run_dir>/keypose_graph.json -- the offline navgraph
+    # builder's input. Manual-only: nothing is written unless the keyword is
+    # published, so production runs are unaffected.
+    scene_graph_export.keypose_dump_keyword: "skg"
 
     # --- world-frame transform ---
     # The scene graph is built in odom. Set enabled: true to also express it in a

@@ -233,6 +233,16 @@ The watchdog's two-phase arming deliberately ignores the pre-playback window: a
 clock that is `0` or held constant before the bag starts must **not** be mistaken
 for "bag finished."
 
+A fourth, snapshot-adjacent trigger shares the channel: publishing
+`keypose_dump_keyword` (default `"skg"`) on `/keyboard_input` calls
+`SaveKeyposeGraphJson()`, which writes the raw **keypose graph** (not the scene
+graph) to `<run_dir>/keypose_graph.json` — nodes as `[x,y,z]` indexed by
+keypose `node_ind`, undirected edges as `[u,v,dist]` (`u < v`), and the
+collision-pruned `connected` node set verbatim. It is the offline navgraph
+builder's input, uses the same frame policy as snapshots, overwrites the same
+stable filename on each press (the graph only grows), and never fires on its
+own — production runs are unaffected.
+
 ### World transform (`odom` → `world`)
 
 The scene graph is built entirely in the bag's **odom** frame (numerically
@@ -271,6 +281,7 @@ parameters). Field meanings (`SceneGraphExportConfig`, `scene_graph_exporter.h:3
 | | `end_of_bag_save` | Enable the final-snapshot watchdog (sim time only) |
 | | `bag_end_timeout_s` | Wall-clock stall before declaring "bag over" |
 | | `manual_save_keyword` | `/keyboard_input` string that triggers an on-demand dump |
+| | `keypose_dump_keyword` | `/keyboard_input` string that dumps the keypose graph to `keypose_graph.json` (offline navgraph input) |
 | World transform | `world_transform.enabled` | Re-express coordinates in `world`; else stay in `odom` |
 | | `world_transform.world_frame` | Target (building-fixed) tf frame, no leading `/` |
 | | `world_transform.source_frame` | Frame the scene-graph coords are in (default `map` = kWorldFrameID), no leading `/` |
@@ -330,6 +341,7 @@ void SceneGraphWatchdogCallback();                        // end-of-bag final sn
 | Change *when* snapshots are written | timers + `SaveSceneGraphSnapshot` (`sensor_coverage_planner_ground.cpp:611`, `:4645`) |
 | Change the output frame | `world_transform.*` in `scene_graph_export.yaml` + `TryFreezeWorldFromOdom` |
 | Trigger a dump by hand | publish `manual_save_keyword` (default `"ssg"`) on `/keyboard_input` |
+| Dump the keypose graph for the offline navgraph | publish `keypose_dump_keyword` (default `"skg"`) on `/keyboard_input` → `keypose_graph.json` |
 | Find where rooms/objects come from | `Representation` (`src/representation/`), fed by room segmentation + semantic mapping |
 | Find where waypoints/edges come from | [`NavGraph`](../navgraph/README.md) (`src/navgraph/`), contracted from the keypose graph |
 ```
