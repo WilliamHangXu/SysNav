@@ -1,0 +1,41 @@
+# Offline scene-graph pipeline config (offline_scene_graph_node / offline_cli).
+#
+# FLAT yaml on purpose: the offline pipeline is not a ROS parameter consumer, so
+# there is no ros__parameters scaffolding. Key NAMES are kept identical to the
+# online scenario yamls (go2w_bag_direct.yaml etc.) so tuning transfers between
+# the two pipelines; VALUES below were copied from go2w_bag_direct.yaml where it
+# overrides a default. See src/offline/README.md for the meaning of every knob.
+
+# --- stage 1: room segmentation (shared with the online node) ---
+exploredAreaVoxelSize: 0.1
+room_resolution: 0.1
+ceilingHeight_: 2.3
+wall_thres_height_: 0.1
+dilation_iteration: 3
+outward_distance_0: 0.5
+outward_distance_1: 0.3
+distance_threshold: 2.0
+distance_angel_threshold: 0.3
+angle_threshold_deg: 6.0
+min_room_size: 40
+normal_search_num: 50
+
+# --- stage 1: formerly hard-coded online, exposed offline ---
+rg_min_cluster_size: 300
+rg_neighbors: 50
+rg_smoothness_deg: 3.0
+rg_curvature: 1.0
+plane_min_height: 1.5
+min_hole_area: 400.0
+min_component_area: 100
+hist_threshold_factor: 0.5
+
+# --- stage 1: offline-only ---
+slab_below: 1.0
+grid_margin_px: 20
+door_merge_gap_m: 0.4
+wall_stage_leaf_size: 0.0
+frame: map
+
+# --- stage 2: navgraph (same key as the live planner parameter) ---
+navigation_graph/kNavNodeMinDist: 2.5

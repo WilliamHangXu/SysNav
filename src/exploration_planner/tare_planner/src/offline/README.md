@@ -1,20 +1,45 @@
-# offline_room_segmentation
+# Offline scene-graph pipeline
 
-Batch, **non-ROS** CLI that runs the room segmentation pipeline on a complete map:
-a full-building `.pcd` (e.g. a FAST-LIO map) plus a per-floor z index go in; per-floor
-`room_mask.png` / `rooms.json` / `doors.json` and a full set of debug images come out.
+Builds a complete per-floor **scene graph** from one training-session folder — no
+live robot, no streaming: `scans.pcd` (full-building FAST-LIO map) + `blueprint.yaml`
+(per-floor robot z) + per-floor `keypose_graph.json` dumps go in; per-floor
+`scene_graph.json` (plus every layer artifact and debug image) comes out. Room
+*labels* are the one missing piece (`unknown-room_<id>` until the offline labeling
+stage exists); objects are a future layer.
 
-This is stage 1 of the **offline scene-graph pipeline** (offline room segmentation →
-offline navgraph → offline room labeling → assembler/export), the batch counterpart of
-the online [`room_segmentation`](../room_segmentation/README.md) node. The segmentation
-core — two-source wall extraction (region-grown vertical planes ∪ wall-band column
-histogram) → dilate → `cv::watershed` → door detection → per-room polygon / centroid /
-interior point — is **lifted** from the online node (copy-first, the online node is
-untouched).
+The DAG: **room segmentation** (rooms layer) → **navgraph** (downsampled keypose
+graph, per floor) → **assembly** (scene_graph.json, per floor); labeling will slot in
+before assembly. The segmentation core — two-source wall extraction (region-grown
+vertical planes ∪ wall-band column histogram) → dilate → `cv::watershed` → door
+detection → per-room polygon / centroid / interior point — is **lifted** from the
+online [`room_segmentation`](../room_segmentation/README.md) node (copy-first, the
+online node is untouched); most of this README is the deep dive into that stage.
 
-| Executable | Files |
+**Naming contract (keep strict):** a *navgraph* is ONLY the downsampled keypose graph
+(nodes + reachability edges). The *scene graph* is the assembled whole — rooms +
+navgraph + future objects. Every cross-layer relationship (waypoint∈room tagging,
+`wp_<n>` naming, 3×3 areas, compass) lives in the **assembler**; the layer producers
+stay relationship-free.
+
+All stages live in one ROS-free static library (`offline_scene_graph_core`), one
+module per layer:
+
+| Module (`include/offline/` + `src/offline/`) | Owns |
 | --- | --- |
-| `offline_room_segmentation` | `src/offline/offline_room_segmentation.cpp`, `include/offline/offline_types.h` |
+| `offline_types.h` | shared PODs + voxel/color helpers |
+| `offline_room_segmentation.{h,cpp}` | rooms layer (this README's deep-dive subject) |
+| `offline_navgraph.{h,cpp}` | keypose-dump loader, downsampler, navgraph.json ([below](#offline_navgraph)) |
+| `offline_scene_graph.{h,cpp}` | rooms-layer readers, assembler, debug overlay ([below](#offline_scene_graph)) |
+| `offline_pipeline.{h,cpp}` | the whole DAG as one in-process call |
+
+Config: **`config/offline_scene_graph.yaml`** — the pipeline's own flat yaml (same
+key names as the online scenario yamls so tuning transfers; values copied from
+`go2w_bag_direct.yaml`).
+
+Two entry points, both thin: the **production `offline_scene_graph_node`** — the only
+ROS code in the pipeline — listens for a signal and runs the whole DAG
+([below](#offline_scene_graph_node-production)); `offline_cli` is the ROS-free debug
+CLI with one subcommand per stage (`run | seg | navgraph | assemble`).
 
 ---
 
@@ -22,11 +47,26 @@ untouched).
 
 ```bash
 colcon build --packages-select tare_planner --cmake-args -DCMAKE_BUILD_TYPE=Release
+```
 
-./install/tare_planner/lib/tare_planner/offline_room_segmentation \
+The whole pipeline, one command (production runs the same thing through
+[the node](#offline_scene_graph_node-production) instead):
+
+```bash
+./install/tare_planner/lib/tare_planner/offline_cli run \
+    --session /path/to/training/20260722_060723 \
+    --config src/exploration_planner/tare_planner/config/offline_scene_graph.yaml \
+    --building AlphaZ \
+    [--out <dir>] [--floor floor_1]
+```
+
+### Rooms layer alone (segmentation tuning loop)
+
+```bash
+./install/tare_planner/lib/tare_planner/offline_cli seg \
     --pcd scans.pcd \
     --floors blueprint.yaml \
-    --config src/exploration_planner/tare_planner/config/go2w_bag_direct.yaml \
+    --config src/exploration_planner/tare_planner/config/offline_scene_graph.yaml \
     --out output/offline/alphaz_building \
     [--floor floor_1]
 ```
@@ -39,8 +79,8 @@ colcon build --packages-select tare_planner --cmake-args -DCMAKE_BUILD_TYPE=Rele
 | `--config` | no | Scenario yaml or flat yaml with tuning parameters. Without it, all defaults apply. |
 | `--floor` | no | Process a single floor by name (tuning loop). |
 
-Runtime on the AlphaZ building map (8.6 M points, 2 floors): ~1 s per floor after the
-one-time PCD load.
+Runtime on the AlphaZ building maps (~7–9 M points, 2 floors): ~1 s per floor after
+the one-time PCD load; the whole pipeline (`run`) is ~1 s total per building.
 
 Exit code is non-zero if any floor fails (empty slab) or no floor was processed.
 
@@ -262,11 +302,19 @@ online `isDebug` dumps mean the same thing there:
 
 ## Configuration
 
-`--config` accepts either an existing **scenario yaml** (keys under
-`room_segmentation: ros__parameters:` and/or the `/**: ros__parameters:` wildcard,
-e.g. `config/go2w_bag_direct.yaml`) or a **flat yaml** with top-level keys. Lookup
-priority per key: `room_segmentation:` scope → `/**:` scope → top level. So a
-scenario file tunes the online node and this tool identically.
+The pipeline's config is **`config/offline_scene_graph.yaml`** — a flat yaml with the
+same key names as the online scenario yamls (so tuning transfers) and values copied
+from `go2w_bag_direct.yaml` where it overrode a default. **Pass it explicitly to
+`offline_cli`**: the compiled defaults below are the *online node's* defaults, and
+several differ from the pipeline yaml's tuned values (`dilation_iteration` 4 vs 3,
+`ceilingHeight_` 2.0 vs 2.3, `distance_threshold` 2.5 vs 2.0) — running config-less
+gives different rooms. Only `offline_scene_graph_node` auto-defaults to the installed
+copy of the yaml.
+
+`--config` also accepts an online **scenario yaml** directly (keys under
+`room_segmentation: ros__parameters:` and/or the `/**: ros__parameters:` wildcard).
+Lookup priority per key: `room_segmentation:` scope → `/**:` scope → top level
+(`navigation_graph/kNavNodeMinDist` uses the `tare_planner_node:` scope instead).
 
 ### Shared with the online node (same keys, same defaults, same meaning)
 
@@ -334,11 +382,102 @@ to `getWall`), `exploredAreaDisplayInterval`, `kViewPointCollisionMarginZ*`,
 
 ---
 
-## Downstream consumers
+## offline_navgraph
 
-The `room_mask.png` + `mask_meta.json` pair is the contract for the later offline
-stages: the offline navgraph builder tags nav nodes with room ids by projecting node
-positions through the `pixel_to_world` inverse, and the labeling/export stages take
-room identity (`id`), geometry (`polygon`, `interior_point`) and topology
-(`neighbors`, `doors.json`) from here. Everything is in the input pcd's frame — keep
-every other artifact (keypose-graph dump, image poses) in that same frame.
+Downsamples a keypose-graph dump into the scene graph's navigation layer. The input
+`keypose_graph.json` is written by the ONLINE planner on the `skg` `/keyboard_input`
+trigger (see the [exporter README](../scene_graph_exporter/README.md)); its `connected`
+array is replayed verbatim (deduped, first-occurrence order — it contains duplicates by
+contract and must never be recomputed from adjacency, which overstates traversability).
+
+```bash
+./install/tare_planner/lib/tare_planner/offline_cli navgraph \
+    --graph <session>/floor_1/keypose_graph.json \
+    --config config/offline_scene_graph.yaml \    # navigation_graph/kNavNodeMinDist
+    --rooms <seg_out>/floor_1 \                   # OPTIONAL: debug overlay only
+    --out <seg_out>/floor_1
+```
+
+One-shot port of the live `NavGraph::Reconcile` (`src/navgraph/navgraph.cpp`), minus
+the incremental machinery: **seed** (greedy distance-gated coverage in flood order) →
+**label** (geodesic Voronoi, multi-source BFS along collision-checked keypose edges —
+wall-leak-proof) → **edges** (region adjacency, weight = min crossing
+`‖node_u−a‖ + len(a,b) + ‖b−node_v‖`). Deterministic: same input → same output.
+
+Output `navgraph.json`: `metadata` (frame/stamp/`nav_node_min_dist`/counts), `nodes`
+(`{id, position, seed_keypose_ind}`, ids dense 0..N−1 in seed order), `edges`
+(`[u,v,meters]`, canonical `u<v`). **No room ids** — by the naming contract, rooms are
+the assembler's business. `--rooms` adds `debug/navgraph_overlay.png` (nodes/edges over
+`room_mask_vis.png`, debug orientation; untagged nodes draw grey) and prints the
+nodes-inside-a-room coverage — the frame-consistency check between the robot-side dump
+and the pcd-side masks.
+
+## offline_scene_graph
+
+Assembles one floor's layers into a GADM-style `scene_graph.json` with the **same
+schema as the online exporter's snapshots** (`SceneGraphExporter::Build`), so
+downstream consumers work unchanged. Room labels are `"unknown"` until the offline
+labeling stage exists; `objects` arrays are empty until an object layer exists.
+
+```bash
+./install/tare_planner/lib/tare_planner/offline_cli assemble \
+    --rooms <seg_out>/floor_1 \                   # rooms.json + doors.json + mask
+    --navgraph <seg_out>/floor_1/navgraph.json \
+    --building AlphaZ \                           # optional metadata knobs; also
+    --out <seg_out>/floor_1/scene_graph.json      #   --floor-level --floor-id --map-name
+```
+
+All cross-layer relationships happen here: nav nodes are tagged into rooms via the
+mask (`RoomIdAt`, the cropped-mask port of the online `TagRooms`), named
+`<room_key>-wp_<n>` (wp_0 = the room's interior point), and given 3×3 `area` tags from
+per-room grids built on building axes fitted from all room polygons
+(`cv::minAreaRect`, canonicalized exactly like `QuadrantManager::FitAxes` — the
+compass in `layout.metadata` comes from the same axes). Doors become `entrances`,
+navgraph edges become `layout.edges` between waypoint ids (edges touching an untagged
+node are dropped and counted in the console summary). `--floor-level` defaults to the
+trailing number of the floor name in `mask_meta.json`.
+
+## offline_scene_graph_node (production)
+
+The orchestrator: a ROS 2 node wrapping the ROS-free
+`RunOfflinePipeline()` (`include/offline/offline_pipeline.h`) — room segmentation
+(all floors, one pcd pass) → per floor navgraph → per floor scene-graph assembly,
+in-process on a worker thread.
+
+```bash
+ros2 run tare_planner offline_scene_graph_node --ros-args \
+    -p session_dir:=/path/to/training/20260722_060723 \
+    -p building:=AlphaZ
+# trigger:
+ros2 topic pub -1 /scene_graph_generator/request std_msgs/msg/String "{data: generate}"
+```
+
+`config_yaml` defaults to the installed `offline_scene_graph.yaml` (resolved via the
+package share directory); pass the parameter to override. The same run is available
+without ROS as `offline_cli run --session <dir> [--config <yaml>] [--building NAME]
+[--out <dir>] [--floor <name>]`.
+
+The session folder must contain `scans.pcd`, `blueprint.yaml` and per-floor
+`<floor>/keypose_graph.json` dumps. Signal semantics on `request_topic`
+(param, default `/scene_graph_generator/request`): `trigger_keyword` (param, default
+`"generate"`) runs on the `session_dir` parameter; a message whose payload is an
+existing directory path runs on that folder instead. One run at a time (a second
+trigger gets `{"status":"busy"}`).
+
+Outputs land in `output_dir` (param, default `<session>/scene_graph/<floor>/` —
+everything this README documents per floor, plus `navgraph.json` +
+`scene_graph.json`). One JSON response per run on `response_topic` (default
+`/scene_graph_generator/response`): `status` (`complete`/`error`/`busy`), per-floor
+stats (`rooms`, `nav_nodes`, `nav_edges`, `nodes_in_rooms`), paths, and the full
+scene graphs inline. A floor without a keypose dump is reported in the response
+(`skipped_reason`) and keeps its rooms layer — dump the graph (`skg` on
+`/keyboard_input`) and re-trigger.
+
+## Frame consistency
+
+Everything is in the input pcd's (FAST-LIO map) frame — keypose dumps label it
+`odom`, the segmentation labels it `map`; same physical frame, and the assembler
+prints a note rather than failing on the label mismatch. Keep every future artifact
+(image poses, objects) in that same frame. The navgraph overlay's
+nodes-inside-a-room count is the cheap end-to-end check that a session's dumps and
+masks actually agree.

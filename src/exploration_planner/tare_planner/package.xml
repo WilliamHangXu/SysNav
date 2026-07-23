@@ -11,6 +11,7 @@
 
   <depend>rclpy</depend>
   <depend>rclcpp</depend>
+  <depend>ament_index_cpp</depend>
   <depend>vlm</depend>
   <depend>std_msgs</depend>
   <depend>nav_msgs</depend>

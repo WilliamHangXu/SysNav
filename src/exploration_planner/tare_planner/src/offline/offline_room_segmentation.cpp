@@ -23,8 +23,10 @@
  */
 
 #include "offline/offline_types.h"
+#include "offline/offline_room_segmentation.h"
 
 #include <chrono>
+#include <stdexcept>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -1489,64 +1491,37 @@ std::vector<ors::FloorSpec> loadFloors(const std::string &path,
     return floors;
 }
 
-void usage(const char *prog)
-{
-    std::fprintf(stderr,
-                 "Usage: %s --pcd <scans.pcd> --floors <blueprint.yaml> "
-                 "--out <dir> [--config <yaml>] [--floor <name>]\n",
-                 prog);
-}
-
 }  // namespace
 
-int main(int argc, char **argv)
+// ---------------- library entry points (room_segmentation_run.h) -------------
+
+namespace offline_room_segmentation {
+
+OfflineConfig LoadOfflineConfig(const std::string &path)
 {
-    std::string pcd_path, floors_path, config_path, out_dir, only_floor;
-    for (int i = 1; i < argc; ++i) {
-        const std::string arg = argv[i];
-        auto next = [&](std::string &dst) {
-            if (i + 1 >= argc) {
-                usage(argv[0]);
-                std::exit(2);
-            }
-            dst = argv[++i];
-        };
-        if (arg == "--pcd") next(pcd_path);
-        else if (arg == "--floors") next(floors_path);
-        else if (arg == "--config") next(config_path);
-        else if (arg == "--out") next(out_dir);
-        else if (arg == "--floor") next(only_floor);
-        else {
-            std::fprintf(stderr, "Unknown argument: %s\n", arg.c_str());
-            usage(argv[0]);
-            return 2;
-        }
-    }
-    if (pcd_path.empty() || floors_path.empty() || out_dir.empty()) {
-        usage(argv[0]);
-        return 2;
-    }
+    return loadConfig(path);
+}
 
-    ors::OfflineConfig cfg;
-    std::vector<ors::FloorSpec> floors;
-    try {
-        cfg = loadConfig(config_path);
-        floors = loadFloors(floors_path, cfg);
-    } catch (const std::exception &e) {
-        std::fprintf(stderr, "[offline_seg] config/floors parse error: %s\n", e.what());
-        return 1;
-    }
+std::vector<FloorSpec> LoadFloorSpecs(const std::string &path, const OfflineConfig &cfg)
+{
+    return loadFloors(path, cfg);
+}
 
+SegmentationRunResult RunRoomSegmentation(const std::string &pcd_path,
+                                          const std::vector<FloorSpec> &floors,
+                                          const OfflineConfig &cfg,
+                                          const std::string &out_dir,
+                                          const std::string &only_floor)
+{
     pcl::PointCloud<pcl::PointXYZ>::Ptr building(new pcl::PointCloud<pcl::PointXYZ>);
     const double t_load = NowSec();
     if (pcl::io::loadPCDFile<pcl::PointXYZ>(pcd_path, *building) < 0) {
-        std::fprintf(stderr, "[offline_seg] failed to load %s\n", pcd_path.c_str());
-        return 1;
+        throw std::runtime_error("failed to load " + pcd_path);
     }
     std::printf("[offline_seg] loaded %zu points from %s in %.1f s\n",
                 building->size(), pcd_path.c_str(), NowSec() - t_load);
 
-    int processed = 0, failed = 0;
+    SegmentationRunResult result;
     for (const auto &floor : floors) {
         if (!only_floor.empty() && floor.name != only_floor) {
             continue;
@@ -1557,19 +1532,14 @@ int main(int argc, char **argv)
                     floor.slab_z_max, floor.wall_thres_height, floor.ceiling_height);
         OfflineRoomSegmenter seg(cfg, floor, out_dir + "/" + floor.name);
         if (seg.run(building)) {
-            processed++;
+            result.processed++;
         } else {
-            failed++;
+            result.failed++;
         }
     }
-
-    if (processed == 0) {
-        std::string hint =
-            only_floor.empty() ? "" : " (--floor " + only_floor + " not found?)";
-        std::fprintf(stderr, "[offline_seg] no floor processed%s\n", hint.c_str());
-        return 1;
-    }
-    std::printf("[offline_seg] done: %d floor(s) processed, %d failed\n", processed,
-                failed);
-    return failed > 0 ? 1 : 0;
+    std::printf("[offline_seg] done: %d floor(s) processed, %d failed\n",
+                result.processed, result.failed);
+    return result;
 }
+
+}  // namespace offline_room_segmentation

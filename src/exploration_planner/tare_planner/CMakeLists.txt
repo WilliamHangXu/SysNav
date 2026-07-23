@@ -18,6 +18,7 @@ endif()
 find_package(ament_cmake REQUIRED)
 
 find_package(rclcpp REQUIRED)
+find_package(ament_index_cpp REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
@@ -191,13 +192,35 @@ rosidl_target_interfaces(room_segmentation
 # Offline batch room segmentation (non-ROS: plain main, files in/out).
 # No CMAKE_BUILD_TYPE is set anywhere in this tree, so force optimization
 # per-target: normal estimation / region growing are unusable at -O0.
-add_executable(offline_room_segmentation src/offline/offline_room_segmentation.cpp)
-target_compile_options(offline_room_segmentation PRIVATE -O2)
-target_link_libraries(offline_room_segmentation
+# The offline scene-graph pipeline: one ROS-free static library holding all
+# stages, one module per layer -- offline_room_segmentation (rooms),
+# offline_navgraph (downsampled keypose graph), offline_scene_graph (assembler
+# + rooms-layer readers), offline_pipeline (the in-process DAG). The ONLY ROS
+# code in the pipeline is the offline_scene_graph_node wrapper below;
+# offline_cli is the ROS-free debug CLI over the same library.
+add_library(offline_scene_graph_core STATIC
+  src/offline/offline_room_segmentation.cpp
+  src/offline/offline_navgraph.cpp
+  src/offline/offline_scene_graph.cpp
+  src/offline/offline_pipeline.cpp)
+target_compile_options(offline_scene_graph_core PRIVATE -O2)
+target_link_libraries(offline_scene_graph_core
   ${PCL_LIBRARIES}
   ${OpenCV_LIBRARIES}
   nlohmann_json::nlohmann_json
   ${OFFLINE_YAML_CPP_TARGET})
+
+# Debug CLI: every stage as a subcommand (run | seg | navgraph | assemble).
+add_executable(offline_cli src/offline/offline_cli.cpp)
+target_compile_options(offline_cli PRIVATE -O2)
+target_link_libraries(offline_cli offline_scene_graph_core)
+
+# Production entry point: signal on the request topic -> full offline DAG ->
+# scene graphs on disk + JSON response.
+add_executable(offline_scene_graph_node src/offline/offline_scene_graph_node.cpp)
+target_compile_options(offline_scene_graph_node PRIVATE -O2)
+ament_target_dependencies(offline_scene_graph_node rclcpp std_msgs ament_index_cpp)
+target_link_libraries(offline_scene_graph_node offline_scene_graph_core)
 
 #############
 ## Install ##
@@ -206,7 +229,8 @@ target_link_libraries(offline_room_segmentation
 install(TARGETS
   room_segmentation
   tare_planner_node
-  offline_room_segmentation
+  offline_cli
+  offline_scene_graph_node
   DESTINATION lib/${PROJECT_NAME})
 
 install(DIRECTORY launch/
