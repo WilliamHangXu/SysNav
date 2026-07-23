@@ -4,10 +4,12 @@
  *
  *   room segmentation (scans.pcd + blueprint.yaml, all floors)
  *     -> per floor: navgraph (<session>/<floor>/keypose_graph.json)
- *     -> per floor: scene-graph assembly (scene_graph.json)
+ *     -> building compass (fit once, largest-footprint floor)
+ *     -> assembly: ONE multifloor scene_graph.json at the output root
+ *        (zones.floor_<M> per floor, floor-qualified ids)
  *
  * ROS-free by design: the production entry point is the thin
- * offline_scene_graph_node wrapper (signal in -> scene graphs out), and the
+ * offline_scene_graph_node wrapper (signal in -> scene graph out), and the
  * same call serves the CLI (`offline_cli run`) or any future embedding.
  * Per-floor problems (missing keypose dump, failed segmentation) are reported
  * in the result, not thrown; session-level problems (missing pcd/blueprint,
@@ -40,19 +42,19 @@ struct PipelineConfig {
 
 struct FloorResult {
     std::string floor;
-    std::string skipped_reason;     // empty <=> the floor completed
-    std::string scene_graph_path;   // set when completed
-    nlohmann::json scene_graph;     // the assembled graph (null when skipped)
+    std::string skipped_reason;  // empty <=> the floor is in the scene graph
     int rooms = 0;
     int nav_nodes = 0;
     int nav_edges = 0;
-    int nodes_in_rooms = 0;         // overlay coverage (frame-consistency check)
+    int nodes_in_rooms = 0;      // overlay coverage (frame-consistency check)
 };
 
 struct PipelineResult {
     std::string output_dir;
+    std::string scene_graph_path;  // set iff at least one floor completed
+    nlohmann::json scene_graph;    // the merged multifloor graph (null otherwise)
     std::vector<FloorResult> floors;
-    // True iff at least one floor produced a scene graph.
+    // True iff at least one floor made it into the scene graph.
     bool AnyCompleted() const
     {
         for (const FloorResult &f : floors) {

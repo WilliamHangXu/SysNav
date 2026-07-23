@@ -13,8 +13,9 @@
  *   - response topic (std_msgs/String, default /scene_graph_generator/response):
  *     one JSON message per run --
  *       {"status":"complete","session":...,"output_dir":...,
- *        "floors":[{"floor","scene_graph_path","rooms","nav_nodes","nav_edges",
- *                   "nodes_in_rooms","scene_graph":{...}} | {"floor","skipped_reason"}]}
+ *        "scene_graph_path":...,"scene_graph":{...merged multifloor graph...},
+ *        "floors":[{"floor","rooms","nav_nodes","nav_edges","nodes_in_rooms"}
+ *                  | {"floor","skipped_reason"}]}
  *     or {"status":"error","message":...} / {"status":"busy","message":...}.
  *
  * The pipeline runs on a worker thread so the executor (and this protocol)
@@ -81,7 +82,7 @@ public:
         [this](std_msgs::msg::String::ConstSharedPtr msg) { OnRequest(msg->data); });
 
     RCLCPP_INFO(this->get_logger(),
-                "ready: '%s' (or a session path) on %s -> scene graphs + response on %s",
+                "ready: '%s' (or a session path) on %s -> scene graph + response on %s",
                 trigger_keyword_.c_str(), request_topic.c_str(), response_topic.c_str());
   }
 
@@ -145,17 +146,19 @@ private:
           continue;
         }
         floors.push_back({ { "floor", fr.floor },
-                           { "scene_graph_path", fr.scene_graph_path },
                            { "rooms", fr.rooms },
                            { "nav_nodes", fr.nav_nodes },
                            { "nav_edges", fr.nav_edges },
-                           { "nodes_in_rooms", fr.nodes_in_rooms },
-                           { "scene_graph", fr.scene_graph } });
+                           { "nodes_in_rooms", fr.nodes_in_rooms } });
       }
-      const json response = { { "status", result.AnyCompleted() ? "complete" : "error" },
-                              { "session", session },
-                              { "output_dir", result.output_dir },
-                              { "floors", std::move(floors) } };
+      json response = { { "status", result.AnyCompleted() ? "complete" : "error" },
+                        { "session", session },
+                        { "output_dir", result.output_dir },
+                        { "floors", std::move(floors) } };
+      if (result.AnyCompleted()) {
+        response["scene_graph_path"] = result.scene_graph_path;
+        response["scene_graph"] = result.scene_graph;
+      }
       std_msgs::msg::String msg;
       msg.data = response.dump();
       response_pub_->publish(msg);

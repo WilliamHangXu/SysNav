@@ -12,7 +12,11 @@
  *                         [--config <yaml>] [--rooms <seg floor dir>]
  *   offline_cli assemble  --rooms <seg floor dir> --navgraph <navgraph.json>
  *                         --out <scene_graph.json> [--building NAME]
- *                         [--floor-level N] [--floor-id ID] [--map-name NAME]
+ *                         [--floor-level N]
+ *
+ * `assemble` emits the same multifloor scene-graph shape as `run`, with the
+ * single given floor under zones.floor_<N>; its compass is fit from that floor
+ * (in a full `run` the compass comes from the largest-footprint floor).
  */
 
 #include <cstdio>
@@ -47,7 +51,7 @@ int Usage()
         "            [--config <yaml>] [--rooms <seg floor dir>]  navgraph layer\n"
         "  assemble  --rooms <seg floor dir> --navgraph <navgraph.json>\n"
         "            --out <scene_graph.json> [--building NAME]\n"
-        "            [--floor-level N] [--floor-id ID] [--map-name NAME]\n");
+        "            [--floor-level N]                          one-floor assembly\n");
     return 2;
 }
 
@@ -143,13 +147,17 @@ int RunAssemble(const std::map<std::string, std::string> &flags)
 
     osg::AssemblerConfig cfg;
     if (flags.count("--building")) cfg.building = flags.at("--building");
-    if (flags.count("--floor-id")) cfg.floor_id = flags.at("--floor-id");
-    if (flags.count("--map-name")) cfg.name = flags.at("--map-name");
-    cfg.floor_level = flags.count("--floor-level")
-                          ? std::stoi(flags.at("--floor-level"))
-                          : osg::FloorLevelFromName(floor.mask.floor_name, cfg.floor_level);
+    const int floor_level =
+        flags.count("--floor-level")
+            ? std::stoi(flags.at("--floor-level"))
+            : osg::FloorLevelFromName(floor.mask.floor_name, 1);
 
-    const nlohmann::json scene_graph = osg::BuildSceneGraph(floor, nav, cfg);
+    // Single-floor assembly: this floor also supplies the building compass.
+    const osg::BuildingCompass compass =
+        osg::FitBuildingCompass(floor, cfg.compass_radius_m);
+    const osg::FloorAssembly assembly =
+        osg::BuildFloorAssembly(floor, nav, compass.axes, cfg, floor_level);
+    const nlohmann::json scene_graph = osg::BuildSceneGraph({ assembly }, compass, cfg);
 
     const std::string out_path = flags.at("--out");
     if (out_path.find('/') != std::string::npos) {

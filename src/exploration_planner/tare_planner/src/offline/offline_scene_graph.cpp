@@ -1,10 +1,11 @@
 /**
  * @file offline_scene_graph.cpp
  * @brief Assembler-side implementation (see offline_scene_graph.h): rooms-layer
- *        file parsing, one-floor scene-graph assembly (JSON shape is a faithful
- *        port of SceneGraphExporter::Build/BuildRoomJson; the axes fit ports
- *        QuadrantManager::FitAxes/BuildRoomGrids), and the navgraph-over-rooms
- *        debug overlay.
+ *        file parsing, per-floor assembly + the multifloor merge (JSON shape
+ *        follows the online SceneGraphExporter::Build/BuildRoomJson port, with
+ *        floor-qualified ids and one zones.floor_<M> per floor; the axes fit
+ *        ports QuadrantManager::FitAxes/BuildRoomGrids), and the
+ *        navgraph-over-rooms debug overlay.
  */
 
 #include "offline/offline_scene_graph.h"
@@ -141,13 +142,28 @@ FloorRoomData LoadFloorRoomData(const std::string &floor_dir)
 
 namespace {
 
-// Label used while the offline room-labeling stage doesn't exist (matches the
-// online exporter's pre-VLM placeholder).
+// Label used while the offline room-labeling stage doesn't exist. Lives ONLY in
+// the room's "type" field -- ids below are label-free so they never change when
+// labels arrive.
 const char *kUnknownLabel = "unknown";
 
-std::string RoomKey(const RoomEntry &room)
+// Floor-qualified ids (see offline_scene_graph.h): unique across a whole
+// multifloor building, since room ids restart at 1 on every floor.
+std::string RoomKey(int level, int room_id)
 {
-    return std::string(kUnknownLabel) + "-room_" + std::to_string(room.id);
+    return "room_" + std::to_string(level) + "_" + std::to_string(room_id);
+}
+
+std::string WaypointKey(int level, int room_id, int wp_index)
+{
+    return "wp_" + std::to_string(level) + "_" + std::to_string(room_id) + "_" +
+           std::to_string(wp_index);
+}
+
+std::string EntranceKey(int level, int room_a, int room_b, int pair_index)
+{
+    return "entrance_" + std::to_string(level) + "_" + std::to_string(room_a) + "_" +
+           std::to_string(room_b) + "_" + std::to_string(pair_index);
 }
 
 // Per-room 3x3 grid from its polygon's oriented-bbox extents (port of
@@ -231,10 +247,58 @@ navgraph_ns::BuildingAxes FitBuildingAxes(const std::vector<RoomEntry> &rooms)
     return axes;
 }
 
-json BuildSceneGraph(const FloorRoomData &floor, const NavGraphData &nav,
-                     const AssemblerConfig &cfg)
+BuildingCompass FitBuildingCompass(const FloorRoomData &floor, double compass_radius_m)
 {
-    const navgraph_ns::BuildingAxes axes = FitBuildingAxes(floor.rooms);
+    BuildingCompass bc;
+    bc.frame = floor.mask.frame;
+    bc.axes = FitBuildingAxes(floor.rooms);
+
+    double min_x = std::numeric_limits<double>::max();
+    double min_y = std::numeric_limits<double>::max();
+    double max_x = std::numeric_limits<double>::lowest();
+    double max_y = std::numeric_limits<double>::lowest();
+    bool any_vertex = false;
+    for (const RoomEntry &room : floor.rooms) {
+        for (const Eigen::Vector2d &p : room.polygon) {
+            any_vertex = true;
+            min_x = std::min(min_x, p.x());
+            min_y = std::min(min_y, p.y());
+            max_x = std::max(max_x, p.x());
+            max_y = std::max(max_y, p.y());
+        }
+    }
+    bc.dimensions = { { "width", any_vertex ? (max_x - min_x) : 0.0 },
+                      { "height", any_vertex ? (max_y - min_y) : 0.0 } };
+    if (bc.axes.valid && any_vertex) {
+        const Eigen::Vector3d center(0.5 * (min_x + max_x), 0.5 * (min_y + max_y),
+                                     floor.mask.robot_z);
+        const double radius = (compass_radius_m > 0.0)
+                                  ? compass_radius_m
+                                  : 0.5 * std::max(max_x - min_x, max_y - min_y);
+        const Eigen::Vector3d e(bc.axes.east.x(), bc.axes.east.y(), 0.0);
+        const Eigen::Vector3d n(bc.axes.north.x(), bc.axes.north.y(), 0.0);
+        const auto pt = [](const Eigen::Vector3d &p) {
+            return json{ { "x", p.x() }, { "y", p.y() }, { "z", p.z() } };
+        };
+        bc.compass = {
+            { "center", pt(center) },
+            { "north", pt(center + radius * n) },
+            { "south", pt(center - radius * n) },
+            { "east", pt(center + radius * e) },
+            { "west", pt(center - radius * e) },
+        };
+    }
+    return bc;
+}
+
+FloorAssembly BuildFloorAssembly(const FloorRoomData &floor, const NavGraphData &nav,
+                                 const navgraph_ns::BuildingAxes &axes,
+                                 const AssemblerConfig &cfg, int floor_level)
+{
+    FloorAssembly out;
+    out.level = floor_level;
+    out.floor_name = floor.mask.floor_name;
+
     const std::map<int, navgraph_ns::RoomGrid> grids =
         BuildRoomGrids(floor.rooms, axes, cfg.center_fraction);
 
@@ -251,7 +315,7 @@ json BuildSceneGraph(const FloorRoomData &floor, const NavGraphData &nav,
     }
 
     json rooms_json = json::object();
-    json all_waypoints = json::array();
+    json waypoint_ids = json::array();
     std::map<int, std::string> nav_id_to_wpid;
 
     std::map<int, const RoomEntry *> rooms_by_id;
@@ -261,40 +325,39 @@ json BuildSceneGraph(const FloorRoomData &floor, const NavGraphData &nav,
 
     int entrances_total = 0;
     for (const RoomEntry &room : floor.rooms) {
-        const std::string room_key = RoomKey(room);
+        const std::string room_key = RoomKey(floor_level, room.id);
 
-        // --- entrances: one per door touching this room ----------------------
+        // --- entrances: one per door touching this room, indexed per neighbor
+        //     pair (a double doorway to the same neighbor gets k = 1, 2, ...) --
         json entrances = json::array();
-        int entrance_count = 0;
+        std::map<int, int> pair_count;
         for (const DoorEntry &door : floor.doors) {
             if (door.room_a != room.id && door.room_b != room.id) {
                 continue;
             }
             const int neighbor_id = (door.room_a == room.id) ? door.room_b : door.room_a;
-            const auto neighbor_it = rooms_by_id.find(neighbor_id);
-            if (neighbor_it == rooms_by_id.end()) {
+            if (rooms_by_id.find(neighbor_id) == rooms_by_id.end()) {
                 continue;
             }
-            ++entrance_count;
+            const int k = ++pair_count[neighbor_id];
             ++entrances_total;
             entrances.push_back(json{
-                { "id", std::to_string(room.id) + "_" + std::to_string(neighbor_id) +
-                            "_entrance_" + std::to_string(entrance_count) },
-                { "connected_to", RoomKey(*neighbor_it->second) },
+                { "id", EntranceKey(floor_level, room.id, neighbor_id, k) },
+                { "connected_to", RoomKey(floor_level, neighbor_id) },
                 { "x", door.centroid.x() },
                 { "y", door.centroid.y() },
                 { "z", door.centroid.z() },
             });
         }
 
-        // --- waypoints: wp_0 = interior point, wp_1..N = the room's nav nodes -
+        // --- waypoints: wp_M_N_0 = interior point, then the room's nav nodes --
         const navgraph_ns::RoomGrid grid =
             grids.count(room.id) ? grids.at(room.id) : navgraph_ns::RoomGrid{};
         json waypoints = json::array();
         const navgraph_ns::Area wp0_area =
             navgraph_ns::AssignArea(room.interior_point.head<2>(), grid);
         waypoints.push_back(json{
-            { "id", room_key + "-wp_0" },
+            { "id", WaypointKey(floor_level, room.id, 0) },
             { "x", room.interior_point.x() },
             { "y", room.interior_point.y() },
             { "z", room.interior_point.z() },
@@ -304,7 +367,7 @@ json BuildSceneGraph(const FloorRoomData &floor, const NavGraphData &nav,
         const auto nodes_it = nodes_by_room.find(room.id);
         if (nodes_it != nodes_by_room.end()) {
             for (const NavGraphNode *node : nodes_it->second) {
-                const std::string wp_id = room_key + "-wp_" + std::to_string(wp_index);
+                const std::string wp_id = WaypointKey(floor_level, room.id, wp_index);
                 const navgraph_ns::Area area =
                     navgraph_ns::AssignArea(node->position.head<2>(), grid);
                 waypoints.push_back(json{
@@ -320,7 +383,7 @@ json BuildSceneGraph(const FloorRoomData &floor, const NavGraphData &nav,
         }
 
         for (const json &wp : waypoints) {
-            all_waypoints.push_back(wp["id"]);
+            waypoint_ids.push_back(wp["id"]);
         }
         rooms_json[room_key] = json{
             { "type", kUnknownLabel },  // labels are the missing (future) stage
@@ -348,68 +411,74 @@ json BuildSceneGraph(const FloorRoomData &floor, const NavGraphData &nav,
         });
     }
 
-    // --- metadata: dimensions + compass over the room polygons ----------------
-    double min_x = std::numeric_limits<double>::max();
-    double min_y = std::numeric_limits<double>::max();
-    double max_x = std::numeric_limits<double>::lowest();
-    double max_y = std::numeric_limits<double>::lowest();
-    bool any_vertex = false;
-    for (const RoomEntry &room : floor.rooms) {
-        for (const Eigen::Vector2d &p : room.polygon) {
-            any_vertex = true;
-            min_x = std::min(min_x, p.x());
-            min_y = std::min(min_y, p.y());
-            max_x = std::max(max_x, p.x());
-            max_y = std::max(max_y, p.y());
+    std::printf("[assembler] %s (floor_%d): %zu rooms, %d entrances, %zu waypoints "
+                "(%zu nav nodes tagged, %d untagged), %zu edges (%d dropped)\n",
+                floor.mask.floor_name.c_str(), floor_level, floor.rooms.size(),
+                entrances_total, waypoint_ids.size(), nav_id_to_wpid.size(), untagged,
+                edges.size(), edges_dropped);
+
+    out.rooms = std::move(rooms_json);
+    out.waypoint_ids = std::move(waypoint_ids);
+    out.edges = std::move(edges);
+    return out;
+}
+
+json BuildSceneGraph(const std::vector<FloorAssembly> &floors,
+                     const BuildingCompass &compass, const AssemblerConfig &cfg)
+{
+    // Deterministic floor order in every list, whatever order the caller built.
+    std::vector<const FloorAssembly *> ordered;
+    for (const FloorAssembly &f : floors) {
+        ordered.push_back(&f);
+    }
+    std::sort(ordered.begin(), ordered.end(),
+              [](const FloorAssembly *a, const FloorAssembly *b) {
+                  return a->level < b->level;
+              });
+
+    json zones = json::object();
+    json waypoints = json::array();
+    json edges = json::array();
+    json floor_levels = json::array();
+    for (const FloorAssembly *f : ordered) {
+        const std::string zone_key = "floor_" + std::to_string(f->level);
+        if (zones.contains(zone_key)) {
+            throw std::runtime_error("duplicate floor level " + std::to_string(f->level) +
+                                     " (" + f->floor_name + "): zone keys would collide");
         }
+        zones[zone_key] = { { "rooms", f->rooms } };
+        for (const json &wp : f->waypoint_ids) {
+            waypoints.push_back(wp);
+        }
+        for (const json &e : f->edges) {
+            edges.push_back(e);
+        }
+        floor_levels.push_back(f->level);
     }
 
     json metadata = {
         { "units", cfg.units },
-        { "frame", floor.mask.frame },
+        { "frame", compass.frame },
         { "building", cfg.building },
-        { "floor_level", cfg.floor_level },
-        { "floor_id", cfg.floor_id },
-        { "dimensions",
-          { { "width", any_vertex ? (max_x - min_x) : 0.0 },
-            { "height", any_vertex ? (max_y - min_y) : 0.0 } } },
+        { "floors", std::move(floor_levels) },
+        { "dimensions", compass.dimensions },
     };
-    if (axes.valid && any_vertex) {
-        const Eigen::Vector3d center(0.5 * (min_x + max_x), 0.5 * (min_y + max_y),
-                                     floor.mask.robot_z);
-        const double radius = (cfg.compass_radius_m > 0.0)
-                                  ? cfg.compass_radius_m
-                                  : 0.5 * std::max(max_x - min_x, max_y - min_y);
-        const Eigen::Vector3d e(axes.east.x(), axes.east.y(), 0.0);
-        const Eigen::Vector3d n(axes.north.x(), axes.north.y(), 0.0);
-        const auto pt = [](const Eigen::Vector3d &p) {
-            return json{ { "x", p.x() }, { "y", p.y() }, { "z", p.z() } };
-        };
-        metadata["compass"] = {
-            { "center", pt(center) },
-            { "north", pt(center + radius * n) },
-            { "south", pt(center - radius * n) },
-            { "east", pt(center + radius * e) },
-            { "west", pt(center - radius * e) },
-        };
+    if (!compass.compass.is_null()) {
+        metadata["compass"] = compass.compass;
     }
 
-    std::printf("[assembler] %s: %zu rooms, %d entrances, %zu waypoints "
-                "(%zu nav nodes tagged, %d untagged), %zu edges (%d dropped)\n",
-                floor.mask.floor_name.c_str(), floor.rooms.size(), entrances_total,
-                all_waypoints.size(), nav_id_to_wpid.size(), untagged, edges.size(),
-                edges_dropped);
-
+    const std::string graph_name = cfg.building.empty() ? "map" : cfg.building;
     return json{
-        { "map_id", cfg.map_id },
-        { "warehouse_id", cfg.warehouse_id },
-        { "name", cfg.name },
+        { "map_id", graph_name },
+        { "warehouse_id", graph_name },
+        { "name", graph_name },
         { "client_id", cfg.client_id },
         { "uploaded_by", cfg.uploaded_by },
+        { "update", true },
         { "layout",
           {
-              { "zones", { { cfg.zone, { { "rooms", std::move(rooms_json) } } } } },
-              { "waypoints", std::move(all_waypoints) },
+              { "zones", std::move(zones) },
+              { "waypoints", std::move(waypoints) },
               { "edges", std::move(edges) },
               { "metadata", std::move(metadata) },
           } },

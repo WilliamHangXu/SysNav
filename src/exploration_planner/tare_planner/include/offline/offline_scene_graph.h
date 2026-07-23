@@ -2,15 +2,21 @@
  * @file offline_scene_graph.h
  * @brief The assembler side of the offline pipeline: loaders for one floor's
  *        offline_room_segmentation outputs (room_mask.png + mask_meta.json +
- *        rooms.json + doors.json), the scene-graph assembly, and the
- *        navgraph-over-rooms debug overlay.
+ *        rooms.json + doors.json), per-floor assembly + the multifloor merge,
+ *        and the navgraph-over-rooms debug overlay.
  *
- * The assembler emits the SAME GADM-style JSON schema as the online
- * SceneGraphExporter::Build(), so downstream consumers work unchanged; room
- * labels are "unknown" until the offline labeling stage exists.
+ * The output is the multifloor GADM-style JSON: one zones.floor_<M> entry per
+ * floor and ONE metadata block (single building-wide compass, fit once from the
+ * largest-footprint floor and shared by every floor's area tags). Ids are
+ * floor-qualified so a multifloor building never collides:
+ *   room_<M>_<N>            room N on floor M
+ *   wp_<M>_<N>_<K>          waypoint K in that room (K=0 = interior point)
+ *   entrance_<M>_<A>_<B>_<k> k-th door from room A to room B on floor M
+ * The room label lives ONLY in the room's "type" field ("unknown" until the
+ * labeling stage exists), so ids stay stable when labels arrive.
  *
  * All cross-layer relationships live HERE by contract: waypoint-in-room tagging
- * (mask lookup), wp_<n> naming, per-room 3x3 areas, the building-axes compass,
+ * (mask lookup), waypoint naming, per-room 3x3 areas, the building-axes compass,
  * and the debug overlay (navgraph drawn over the room mask). Layer producers
  * (offline_room_segmentation.h, offline_navgraph.h) stay relationship-free.
  */
@@ -83,19 +89,12 @@ FloorRoomData LoadFloorRoomData(const std::string &floor_dir);
 
 // ---- assembly ----------------------------------------------------------------
 
-// Mirrors the identifier/metadata slice of the online SceneGraphExportConfig
-// (defaults match), plus the axes' center fraction (quadrant/kCenterFraction).
 struct AssemblerConfig {
-    std::string map_id = "map";
-    std::string warehouse_id = "map";
-    std::string name = "map";
+    // Names the graph: top-level name/map_id/warehouse_id ("map" when empty).
+    std::string building;
     std::string client_id;
     std::string uploaded_by;
-    std::string zone = "all";
     std::string units = "meters";
-    std::string building;
-    int floor_level = 1;
-    std::string floor_id;
     double compass_radius_m = 0.0;       // <= 0 => auto (half the larger AABB extent)
     double center_fraction = 1.0 / 3.0;  // 3x3 grid center-band size
 };
@@ -109,10 +108,42 @@ int FloorLevelFromName(const std::string &name, int fallback);
 // geometry -- areas then come out "unknown" and the compass is omitted.
 navgraph_ns::BuildingAxes FitBuildingAxes(const std::vector<RoomEntry> &rooms);
 
-// Build the scene-graph JSON for one floor. Coordinates pass through unchanged
-// (everything already shares the map frame); rooms are keyed
-// "unknown-room_<id>" until labels exist.
-nlohmann::json BuildSceneGraph(const FloorRoomData &floor, const NavGraphData &nav,
+// The single per-building compass: axes + the metadata slice derived from the
+// fit floor (compass points, AABB dimensions, frame label). Fit ONCE per run
+// from the largest-footprint floor; every floor's area tags use the same axes.
+struct BuildingCompass {
+    navgraph_ns::BuildingAxes axes;
+    nlohmann::json compass;     // null on degenerate geometry (then omitted)
+    nlohmann::json dimensions;  // {width, height} of the fit floor's AABB
+    std::string frame;          // frame label carried into layout.metadata
+};
+
+// Fit the building compass from one floor's rooms. Compass point z = the
+// floor's robot_z.
+BuildingCompass FitBuildingCompass(const FloorRoomData &floor, double compass_radius_m);
+
+// One floor assembled with floor-qualified ids: the rooms object destined for
+// zones.floor_<level> plus this floor's slice of the flat waypoint/edge lists.
+struct FloorAssembly {
+    int level = 1;           // M in floor_<M> / room_<M>_<N> / wp_<M>_<N>_<K>
+    std::string floor_name;  // source floor name, for logs
+    nlohmann::json rooms;    // zones.floor_<M>.rooms object
+    nlohmann::json waypoint_ids;  // array of this floor's waypoint ids
+    nlohmann::json edges;         // array of {u, v, meters} between them
+};
+
+// Assemble one floor. Coordinates (including z) pass through unchanged --
+// everything already shares the map frame. `axes` is the building-wide fit.
+FloorAssembly BuildFloorAssembly(const FloorRoomData &floor, const NavGraphData &nav,
+                                 const navgraph_ns::BuildingAxes &axes,
+                                 const AssemblerConfig &cfg, int floor_level);
+
+// Merge the assembled floors into the final scene-graph JSON: one
+// zones.floor_<M> per floor, concatenated waypoint/edge lists, one metadata
+// block (units/frame/building/floors/dimensions/compass). Throws on duplicate
+// floor levels (zone keys would collide).
+nlohmann::json BuildSceneGraph(const std::vector<FloorAssembly> &floors,
+                               const BuildingCompass &compass,
                                const AssemblerConfig &cfg);
 
 // ---- debug overlay -----------------------------------------------------------

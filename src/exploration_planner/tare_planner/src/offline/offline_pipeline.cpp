@@ -66,7 +66,14 @@ PipelineResult RunOfflinePipeline(const PipelineConfig &pc)
     const NavGraphConfig nav_cfg =
         pc.config_yaml.empty() ? NavGraphConfig{} : LoadNavGraphConfig(pc.config_yaml);
 
-    // --- stages 2+3 per floor: navgraph, then assembly ------------------------
+    // --- stage 2 per floor: navgraph + rooms-layer loading --------------------
+    struct ReadyFloor {
+        int level;
+        FloorRoomData data;
+        NavGraphData nav;
+    };
+    std::vector<ReadyFloor> ready;  // blueprint order (ascending floors)
+
     for (const ors::FloorSpec &spec : floors) {
         if (!pc.only_floor.empty() && spec.name != pc.only_floor) {
             continue;
@@ -90,10 +97,10 @@ PipelineResult RunOfflinePipeline(const PipelineConfig &pc)
         }
 
         const KeyposeGraphData keypose_graph = LoadKeyposeGraph(graph_path);
-        const NavGraphData nav = BuildNavGraph(keypose_graph, nav_cfg);
+        NavGraphData nav = BuildNavGraph(keypose_graph, nav_cfg);
         SaveNavGraphJson(nav, floor_dir + "/navgraph.json");
 
-        const FloorRoomData floor_data = LoadFloorRoomData(floor_dir);
+        FloorRoomData floor_data = LoadFloorRoomData(floor_dir);
         fr.nodes_in_rooms = SaveNavGraphOverlay(
             nav, floor_data.mask, floor_dir + "/room_mask_vis.png", floor_dir);
         if (!nav.frame.empty() && nav.frame != floor_data.mask.frame) {
@@ -101,24 +108,59 @@ PipelineResult RunOfflinePipeline(const PipelineConfig &pc)
                         "label '%s' (same physical frame for this pipeline)\n",
                         nav.frame.c_str(), floor_data.mask.frame.c_str());
         }
-
-        AssemblerConfig asm_cfg;
-        asm_cfg.building = pc.building;
-        asm_cfg.floor_level = FloorLevelFromName(spec.name, asm_cfg.floor_level);
-        fr.scene_graph = BuildSceneGraph(floor_data, nav, asm_cfg);
-
-        fr.scene_graph_path = floor_dir + "/scene_graph.json";
-        std::ofstream out(fr.scene_graph_path);
-        if (!out) {
-            throw std::runtime_error("cannot write " + fr.scene_graph_path);
-        }
-        out << fr.scene_graph.dump(2) << "\n";
-        std::printf("[pipeline] wrote %s\n", fr.scene_graph_path.c_str());
+        // The per-floor scene_graph.json of the pre-multifloor layout; remove so
+        // a re-run over an old output dir can't leave a stale second format.
+        fs::remove(floor_dir + "/scene_graph.json");
 
         fr.rooms = static_cast<int>(floor_data.rooms.size());
         fr.nav_nodes = static_cast<int>(nav.nodes.size());
         fr.nav_edges = static_cast<int>(nav.edges.size());
         result.floors.push_back(std::move(fr));
+
+        const int level =
+            FloorLevelFromName(spec.name, static_cast<int>(ready.size()) + 1);
+        ready.push_back({ level, std::move(floor_data), std::move(nav) });
+    }
+
+    // --- stage 3: one building compass, then the multifloor assembly ----------
+    if (!ready.empty()) {
+        AssemblerConfig asm_cfg;
+        asm_cfg.building = pc.building;
+
+        // One compass per building: fit once from the floor with the largest
+        // room footprint (ties -> the lower floor, ready is in ascending order).
+        const ReadyFloor *compass_floor = &ready.front();
+        double best_area = -1.0;
+        for (const ReadyFloor &f : ready) {
+            double area = 0.0;
+            for (const RoomEntry &room : f.data.rooms) {
+                area += room.area_m2;
+            }
+            if (area > best_area) {
+                best_area = area;
+                compass_floor = &f;
+            }
+        }
+        const BuildingCompass compass =
+            FitBuildingCompass(compass_floor->data, asm_cfg.compass_radius_m);
+        std::printf("[pipeline] building compass fit from floor_%d "
+                    "(largest footprint, %.1f m^2)\n",
+                    compass_floor->level, best_area);
+
+        std::vector<FloorAssembly> assemblies;
+        for (const ReadyFloor &f : ready) {
+            assemblies.push_back(
+                BuildFloorAssembly(f.data, f.nav, compass.axes, asm_cfg, f.level));
+        }
+        result.scene_graph = BuildSceneGraph(assemblies, compass, asm_cfg);
+
+        result.scene_graph_path = result.output_dir + "/scene_graph.json";
+        std::ofstream out(result.scene_graph_path);
+        if (!out) {
+            throw std::runtime_error("cannot write " + result.scene_graph_path);
+        }
+        out << result.scene_graph.dump(2) << "\n";
+        std::printf("[pipeline] wrote %s\n", result.scene_graph_path.c_str());
     }
 
     int completed = 0;
@@ -130,8 +172,10 @@ PipelineResult RunOfflinePipeline(const PipelineConfig &pc)
             ++completed;
         }
     }
-    std::printf("[pipeline] done: %d of %zu floor(s) have a scene graph -> %s\n",
-                completed, result.floors.size(), result.output_dir.c_str());
+    std::printf("[pipeline] done: %d of %zu floor(s) in the scene graph -> %s\n",
+                completed, result.floors.size(),
+                result.scene_graph_path.empty() ? "(none)"
+                                                : result.scene_graph_path.c_str());
     return result;
 }
 

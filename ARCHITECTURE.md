@@ -265,7 +265,7 @@ Full schema, build logic, triggers, and gotchas:
 |---|---|
 | The exported JSON shape / save logic | [`scene_graph_exporter/README.md`](src/exploration_planner/tare_planner/src/scene_graph_exporter/README.md) |
 | Rooms / doors / the room mask (geometry) | [`room_segmentation/README.md`](src/exploration_planner/tare_planner/src/room_segmentation/README.md) |
-| The offline scene-graph pipeline (session folder → per-floor scene_graph.json; rooms + navgraph + assembler, `offline_scene_graph_node` / `offline_cli`) | [`offline/README.md`](src/exploration_planner/tare_planner/src/offline/README.md) |
+| The offline scene-graph pipeline (session folder → one multifloor scene_graph.json; rooms + navgraph + assembler, `offline_scene_graph_node` / `offline_cli`) | [`offline/README.md`](src/exploration_planner/tare_planner/src/offline/README.md) |
 | Room *type* labeling (views → VLM → apply) | [`sensor_coverage_planner/ROOM_LABELING.md`](src/exploration_planner/tare_planner/src/sensor_coverage_planner/ROOM_LABELING.md), `vlm_node/` |
 | 3D objects / detection | [`semantic_mapping/README.md`](src/semantic_mapping/README.md) |
 | Traversability roadmap / routing distances | [`keypose_graph/README.md`](src/exploration_planner/tare_planner/src/keypose_graph/README.md) |

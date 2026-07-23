@@ -1,25 +1,34 @@
 # Offline scene-graph pipeline
 
-Builds a complete per-floor **scene graph** from one training-session folder — no
+Builds a complete **multifloor scene graph** from one training-session folder — no
 live robot, no streaming: `scans.pcd` (full-building FAST-LIO map) + `blueprint.yaml`
-(per-floor robot z) + per-floor `keypose_graph.json` dumps go in; per-floor
-`scene_graph.json` (plus every layer artifact and debug image) comes out. Room
-*labels* are the one missing piece (`unknown-room_<id>` until the offline labeling
-stage exists); objects are a future layer.
+(per-floor robot z) + per-floor `keypose_graph.json` dumps go in; ONE
+`scene_graph.json` for the whole building (plus every per-floor layer artifact and
+debug image) comes out. Room *labels* are the one missing piece (`"type": "unknown"`
+until the offline labeling stage exists); objects and inter-floor stair edges are
+future layers.
 
 The DAG: **room segmentation** (rooms layer) → **navgraph** (downsampled keypose
-graph, per floor) → **assembly** (scene_graph.json, per floor); labeling will slot in
-before assembly. The segmentation core — two-source wall extraction (region-grown
-vertical planes ∪ wall-band column histogram) → dilate → `cv::watershed` → door
-detection → per-room polygon / centroid / interior point — is **lifted** from the
-online [`room_segmentation`](../room_segmentation/README.md) node (copy-first, the
+graph, per floor) → **assembly** (one building compass, then the merged multifloor
+scene_graph.json); labeling will slot in before assembly. The segmentation core —
+two-source wall extraction (region-grown vertical planes ∪ wall-band column
+histogram) → dilate → `cv::watershed` → door detection → per-room polygon /
+centroid / interior point — is **lifted** from the online
+[`room_segmentation`](../room_segmentation/README.md) node (copy-first, the
 online node is untouched); most of this README is the deep dive into that stage.
 
 **Naming contract (keep strict):** a *navgraph* is ONLY the downsampled keypose graph
 (nodes + reachability edges). The *scene graph* is the assembled whole — rooms +
 navgraph + future objects. Every cross-layer relationship (waypoint∈room tagging,
-`wp_<n>` naming, 3×3 areas, compass) lives in the **assembler**; the layer producers
+waypoint naming, 3×3 areas, compass) lives in the **assembler**; the layer producers
 stay relationship-free.
+
+**Id scheme (multifloor-safe):** room ids restart at 1 on every floor, so every id is
+floor-qualified — floor M is zone `floor_M`, room N on floor M is `room_M_N`,
+waypoint K in that room is `wp_M_N_K` (K = 0 is the room's interior point), and the
+k-th door from room A to room B on floor M is `entrance_M_A_B_k`. Ids are label-free:
+the room label lives ONLY in the room's `type` field, so labeling never renames
+anything.
 
 All stages live in one ROS-free static library (`offline_scene_graph_core`), one
 module per layer:
@@ -185,13 +194,16 @@ clusters.
 ## Outputs
 
 ```
-<out>/<floor_name>/
-├── room_mask.png       # CV_16U label image, 0 = background, pixel value = room id
-├── room_mask_vis.png   # idToColor-colored mask, door pixels in red
-├── mask_meta.json      # the pixel↔world contract (below)
-├── rooms.json
-├── doors.json
-└── debug/              # every intermediate, saved unconditionally
+<out>/
+├── scene_graph.json    # THE deliverable: the merged multifloor scene graph
+└── <floor_name>/
+    ├── room_mask.png       # CV_16U label image, 0 = background, pixel value = room id
+    ├── room_mask_vis.png   # idToColor-colored mask, door pixels in red
+    ├── mask_meta.json      # the pixel↔world contract (below)
+    ├── rooms.json
+    ├── doors.json
+    ├── navgraph.json       # written by the navgraph stage (`run` / `navgraph`)
+    └── debug/              # every intermediate, saved unconditionally
 ```
 
 ### Orientation — read this before consuming any image
@@ -414,35 +426,50 @@ and the pcd-side masks.
 
 ## offline_scene_graph
 
-Assembles one floor's layers into a GADM-style `scene_graph.json` with the **same
-schema as the online exporter's snapshots** (`SceneGraphExporter::Build`), so
-downstream consumers work unchanged. Room labels are `"unknown"` until the offline
-labeling stage exists; `objects` arrays are empty until an object layer exists.
+Assembles the floors into ONE multifloor GADM-style `scene_graph.json`: a
+`zones.floor_M` entry per floor (each holding that floor's `rooms`), flat
+building-wide `layout.waypoints` / `layout.edges` lists, and a single
+`layout.metadata` block (`units`, `frame`, `building`, `floors: [1, 2]`,
+`dimensions`, `compass`). Top-level `name`/`map_id`/`warehouse_id` are the
+`--building` name. Room labels are `"unknown"` (in `type`) until the offline
+labeling stage exists; `objects` arrays are empty until an object layer exists;
+inter-floor stair edges are a future stage (the merged graph is disconnected
+across floors until then).
+
+**One compass per building.** The building axes are fit ONCE per run — from the
+floor with the largest room footprint (`cv::minAreaRect` over its room polygons,
+canonicalized exactly like `QuadrantManager::FitAxes`) — and every floor's 3×3
+`area` tags and the metadata `compass`/`dimensions` come from that single fit,
+so area names agree across floors.
 
 ```bash
 ./install/tare_planner/lib/tare_planner/offline_cli assemble \
     --rooms <seg_out>/floor_1 \                   # rooms.json + doors.json + mask
     --navgraph <seg_out>/floor_1/navgraph.json \
-    --building AlphaZ \                           # optional metadata knobs; also
-    --out <seg_out>/floor_1/scene_graph.json      #   --floor-level --floor-id --map-name
+    --building AlphaZ \
+    --out <seg_out>/floor_1_only.json             # optional: --floor-level N
 ```
+
+`assemble` is the one-floor tuning path: same multifloor shape with a single
+`zones.floor_N`, compass fit from that floor (a full `run` picks the
+largest-footprint floor). `--floor-level` defaults to the trailing number of the
+floor name in `mask_meta.json`.
 
 All cross-layer relationships happen here: nav nodes are tagged into rooms via the
 mask (`RoomIdAt`, the cropped-mask port of the online `TagRooms`), named
-`<room_key>-wp_<n>` (wp_0 = the room's interior point), and given 3×3 `area` tags from
-per-room grids built on building axes fitted from all room polygons
-(`cv::minAreaRect`, canonicalized exactly like `QuadrantManager::FitAxes` — the
-compass in `layout.metadata` comes from the same axes). Doors become `entrances`,
-navgraph edges become `layout.edges` between waypoint ids (edges touching an untagged
-node are dropped and counted in the console summary). `--floor-level` defaults to the
-trailing number of the floor name in `mask_meta.json`.
+`wp_M_N_K` (K = 0 = the room's interior point), and given 3×3 `area` tags from
+per-room grids built on the building axes. Doors become `entrances`
+(`entrance_M_A_B_k`, mirrored in both rooms of the pair), navgraph edges become
+`layout.edges` between waypoint ids (edges touching an untagged node are dropped
+and counted in the console summary). Coordinates — including z — pass through
+unchanged.
 
 ## offline_scene_graph_node (production)
 
 The orchestrator: a ROS 2 node wrapping the ROS-free
 `RunOfflinePipeline()` (`include/offline/offline_pipeline.h`) — room segmentation
-(all floors, one pcd pass) → per floor navgraph → per floor scene-graph assembly,
-in-process on a worker thread.
+(all floors, one pcd pass) → per floor navgraph → building compass + multifloor
+assembly, in-process on a worker thread.
 
 ```bash
 ros2 run tare_planner offline_scene_graph_node --ros-args \
@@ -464,14 +491,15 @@ The session folder must contain `scans.pcd`, `blueprint.yaml` and per-floor
 existing directory path runs on that folder instead. One run at a time (a second
 trigger gets `{"status":"busy"}`).
 
-Outputs land in `output_dir` (param, default `<session>/scene_graph/<floor>/` —
-everything this README documents per floor, plus `navgraph.json` +
-`scene_graph.json`). One JSON response per run on `response_topic` (default
-`/scene_graph_generator/response`): `status` (`complete`/`error`/`busy`), per-floor
-stats (`rooms`, `nav_nodes`, `nav_edges`, `nodes_in_rooms`), paths, and the full
-scene graphs inline. A floor without a keypose dump is reported in the response
-(`skipped_reason`) and keeps its rooms layer — dump the graph (`skg` on
-`/keyboard_input`) and re-trigger.
+Outputs land in `output_dir` (param, default `<session>/scene_graph/` — the merged
+`scene_graph.json` at the root plus everything this README documents per floor).
+One JSON response per run on `response_topic` (default
+`/scene_graph_generator/response`): `status` (`complete`/`error`/`busy`),
+`scene_graph_path` + the full merged `scene_graph` inline, and per-floor stats
+(`rooms`, `nav_nodes`, `nav_edges`, `nodes_in_rooms`). A floor without a keypose
+dump is reported in the response (`skipped_reason`) and keeps its rooms layer —
+dump the graph (`skg` on `/keyboard_input`) and re-trigger; the merged graph then
+contains the floors that did complete.
 
 ## Frame consistency
 
