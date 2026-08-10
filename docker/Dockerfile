@@ -56,13 +56,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ----------------------------------------------------------------------------
 # 2) System + ROS packages, build toolchain, and native-dep build deps
 #    (desktop-full is required to BUILD the rviz/overlay plugins and to RUN RViz
-#     in the container. Boost/TBB/Eigen/glog/SuiteSparse/fmt are for the SLAM deps.)
+#     in the container. Boost/TBB/Eigen/glog/SuiteSparse/fmt are for the SLAM deps.
+#     python3-catkin-pkg: catkin_make against the grafted Noetic needs the
+#     catkin_find_pkg script (the bridge graft bundles only -modules); used to
+#     build ROS 1 packages like scene_graph in-container.)
 # ----------------------------------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ros-jazzy-desktop-full \
         ros-jazzy-pcl-ros \
         ros-jazzy-backward-ros \
         python3-colcon-common-extensions \
+        python3-catkin-pkg \
         python3-pip \
         build-essential cmake ninja-build git pkg-config \
         libpcl-dev nlohmann-json3-dev \
