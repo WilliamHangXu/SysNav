@@ -48,24 +48,12 @@ class DetectNode(Node):
         self.declare_parameter('grounding_score_thresh', 0.3)
         self.declare_parameter('device', device)
         self.declare_parameter('annotate_image', True)
-        self.declare_parameter('object_file', str(self.CONFIG_DIR / 'config' / 'objects_office.yaml'))
-        self.declare_parameter('image_topic', '/camera/image')
-        self.declare_parameter('robot_namespace', '')
-        self.declare_parameter('topic_suffix.camera_image', 'camera/image_raw')
-
+        self.declare_parameter('object_file', str(self.CONFIG_DIR / 'config' / 'objects.yaml'))
 
         self.platform = self.get_parameter('platform').get_parameter_value().string_value
         self.ANNOTATE = self.get_parameter('annotate_image').get_parameter_value().bool_value
         self.grounding_score_thresh = self.get_parameter('grounding_score_thresh').get_parameter_value().double_value
         object_file_path = self.get_parameter('object_file').get_parameter_value().string_value
-        self.image_topic = self.get_parameter('image_topic').get_parameter_value().string_value
-        # --- Multi-robot portability: one knob (robot_namespace) ---
-        # Compose /<robot_namespace>/<camera suffix>; empty namespace keeps the
-        # image_topic value above (pre-namespace behavior).
-        robot_ns = self.get_parameter('robot_namespace').get_parameter_value().string_value
-        if robot_ns:
-            cam_suf = self.get_parameter('topic_suffix.camera_image').get_parameter_value().string_value
-            self.image_topic = f"/{robot_ns}/{cam_suf}"
 
         with open(object_file_path, "r") as file:
             self.object_config = yaml.safe_load(file)
@@ -77,7 +65,7 @@ class DetectNode(Node):
         self.text_prompt_list = np.array(self.text_prompt_list)
         print(f"Text prompt: {self.text_prompt}")
 
-        # self.grounding_model = YOLO(self.CONFIG_DIR / "external/yolov8x-worldv2_cus.engine", task='detect')
+        self.grounding_model = YOLO(self.CONFIG_DIR / "external/yolov8x-worldv2_cus.engine", task='detect')
         # self.grounding_model = YOLOE(self.CONFIG_DIR / "external/yoloe-11l-seg.engine", task="segment")
         self.grounding_model = YOLOE(self.CONFIG_DIR / "external/yoloe-26x-seg.engine", task="segment")
 
@@ -106,7 +94,7 @@ class DetectNode(Node):
         # ROS2 subscriptions and publishers
         self.rgb_sub = self.create_subscription(
             Image,
-            self.image_topic,
+            '/camera/image',
             self.image_callback,
             10,
             # qos_profile=QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT),
@@ -137,7 +125,7 @@ class DetectNode(Node):
 
         # 如果没有ID信息，直接返回空结果
         if boxes.id is None:
-            # self.log_info("No track IDs found in the results.")
+            self.log_info("No track IDs found in the results.")
             return {
                 "bboxes": np.empty((0, 4), dtype=float),
                 "labels": np.array([], dtype=str),

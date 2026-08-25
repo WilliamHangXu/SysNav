@@ -32,8 +32,6 @@ from cv_bridge import CvBridge
 from sensor_msgs.msg import Image
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
-from sensor_msgs.msg import CameraInfo
-from tf2_ros import Buffer, TransformListener
 # Gain the pose of the robot
 from nav_msgs.msg import Odometry
 from visualization_msgs.msg import Marker
@@ -90,11 +88,6 @@ class MappingNode(Node):
         self.declare_parameter("grounding_score_thresh", 0.3)
         self.declare_parameter("object_file", "config/objects_rfdetr.yaml")
         self.declare_parameter("save_png", False)
-        self.declare_parameter("robot_namespace", "")
-        self.declare_parameter("topic_suffix.registered_scan", "cloud_registered")
-        self.declare_parameter("topic_suffix.odometry", "lio/odometry")
-        self.declare_parameter("topic_suffix.camera_info", "camera_rect/camera_info")
-        self.declare_parameter("base_frame_suffix", "base")
 
         # class global containers
         self.cloud_stack = []
@@ -131,31 +124,6 @@ class MappingNode(Node):
         self.grounding_score_thresh = self.get_parameter('grounding_score_thresh').get_parameter_value().double_value
         self.object_file_path = self.get_parameter('object_file').get_parameter_value().string_value
         self.save_png = self.get_parameter('save_png').get_parameter_value().bool_value
-        # --- Multi-robot portability: one knob (robot_namespace) ---
-        # Robot-source inputs become /<robot_namespace>/<suffix>; empty namespace
-        # falls back to the constant names (pre-namespace behavior).
-        robot_ns = self.get_parameter('robot_namespace').get_parameter_value().string_value
-        if robot_ns:
-            reg_suf = self.get_parameter('topic_suffix.registered_scan').get_parameter_value().string_value
-            odom_suf = self.get_parameter('topic_suffix.odometry').get_parameter_value().string_value
-            ci_suf = self.get_parameter('topic_suffix.camera_info').get_parameter_value().string_value
-            base_suf = self.get_parameter('base_frame_suffix').get_parameter_value().string_value
-            self.registered_scan_topic = f"/{robot_ns}/{reg_suf}"
-            self.odom_topic = f"/{robot_ns}/{odom_suf}"
-            self.camera_info_topic = f"/{robot_ns}/{ci_suf}"
-            self.base_frame = f"{robot_ns}/{base_suf}"
-        else:
-            self.registered_scan_topic = "/registered_scan"
-            self.odom_topic = "/state_estimation"
-            self.camera_info_topic = "/camera_rect/camera_info"
-            self.base_frame = "base"
-        # Topic-driven calibration state (camera_info + tf). go2w_bag uses the
-        # rectified image, so the projection is pinhole with no distortion.
-        self.uses_topic_calib = (self.platform == 'go2w_bag')
-        self.calibrated = False
-        self.latest_camera_info = None
-        self.tf_buffer = Buffer()
-        self.tf_listener = TransformListener(self.tf_buffer, self)
 
         print(
             f'Platform: {self.platform}\n,\
@@ -222,30 +190,26 @@ class MappingNode(Node):
         # ROS2 subscriptions and publishers
         self.cloud_sub = self.create_subscription(
             PointCloud2,
-            self.registered_scan_topic,
+            '/registered_scan',
             self.cloud_callback,
             10,
             callback_group=MutuallyExclusiveCallbackGroup()
         )
 
-        # mecanum_bagfile is a legacy platform that uses a different LIO odom
-        # topic; every other platform uses the (namespace-composed) odom topic.
-        odom_topic = '/aft_mapped_to_init_incremental' if self.platform == 'mecanum_bagfile' else self.odom_topic
-        self.odom_sub = self.create_subscription(
-            Odometry,
-            odom_topic,
-            self.odom_callback,
-            50,
-            callback_group=MutuallyExclusiveCallbackGroup()
-        )
-
-        # Camera intrinsics for the topic-driven projection (rectified P matrix).
-        if self.uses_topic_calib:
-            self.camera_info_sub = self.create_subscription(
-                CameraInfo,
-                self.camera_info_topic,
-                self.camera_info_callback,
-                10,
+        if self.platform == 'mecanum_bagfile':
+            self.odom_sub = self.create_subscription(
+                Odometry,
+                '/aft_mapped_to_init_incremental',
+                self.odom_callback,
+                50,
+                callback_group=MutuallyExclusiveCallbackGroup()
+            )
+        else:
+            self.odom_sub = self.create_subscription(
+                Odometry,
+                '/state_estimation',
+                self.odom_callback,
+                50,
                 callback_group=MutuallyExclusiveCallbackGroup()
             )
 
@@ -565,7 +529,6 @@ class MappingNode(Node):
 
             map_update_start = time.time()
             if not self.demo_frozen:
-                # self.log_info(f"🚨🚨 Detection number: {len(detections_tracked['ids'])}")
                 self.obj_mapper.update_map(detections_tracked, detection_stamp, camera_odom, neighboring_cloud, image, viewpoint_stamp_to_process)
             map_update_time = time.time() - map_update_start
 
@@ -587,7 +550,7 @@ class MappingNode(Node):
             self.total_mapping_calls += 1
             if total_time > 3.0:
                 self.mapping_over_3s += 1
-                self.log_info(f"🚨🚨 Mapping processing took over 3 seconds! Total calls: {self.total_mapping_calls}, Over 3s calls: {self.mapping_over_3s}")
+                self.log_info(f"Mapping processing took over 3 seconds! Total calls: {self.total_mapping_calls}, Over 3s calls: {self.mapping_over_3s}")
             
             # 定期强制垃圾回收
             if self.total_mapping_calls % 10 == 0:
@@ -598,44 +561,6 @@ class MappingNode(Node):
             # with open('mapping_timing_gates.txt', 'a') as f:
             #     f.write(f"{detection_stamp}, {inference_time}, {map_update_time}, {sam2_time}, {annotate_time}, {time.time() - start_time}\n")
 
-    def camera_info_callback(self, msg):
-        # Latest camera_info; only the (static) intrinsics are used.
-        self.latest_camera_info = msg
-
-    def _try_set_calibration(self):
-        """Resolve intrinsics (from camera_info.P) + extrinsic (base->camera
-        optical, from tf) once both are available, and hand them to the cloud-
-        image fusion. Returns True once calibration is set."""
-        if self.calibrated:
-            return True
-        ci = self.latest_camera_info
-        if ci is None:
-            return False
-        optical_frame = ci.header.frame_id
-        if not optical_frame:
-            return False
-        try:
-            tf = self.tf_buffer.lookup_transform(optical_frame, self.base_frame, Time())
-        except Exception as e:
-            self.get_logger().warn(
-                f"Waiting for tf {self.base_frame} -> {optical_frame}: {e}",
-                throttle_duration_sec=5.0)
-            return False
-        q = tf.transform.rotation
-        t = tf.transform.translation
-        R_l2c = Rotation.from_quat([q.x, q.y, q.z, q.w]).as_matrix()
-        t_l2c = np.array([t.x, t.y, t.z])
-        # Rectified image: project with the P matrix, no distortion.
-        fx, fy, cx, cy = ci.p[0], ci.p[5], ci.p[2], ci.p[6]
-        self.cloud_img_fusion.set_calibration(
-            R_l2c, t_l2c, fx, fy, cx, cy, ci.width, ci.height, dist=None)
-        self.calibrated = True
-        self.get_logger().info(
-            f"Calibration set from topics: optical_frame={optical_frame} "
-            f"base_frame={self.base_frame} fx={fx:.2f} fy={fy:.2f} "
-            f"cx={cx:.2f} cy={cy:.2f} {ci.width}x{ci.height}")
-        return True
-
     def mapping_callback(self):
         # if self.detection_counter == 2:
         start = time.time()
@@ -645,14 +570,6 @@ class MappingNode(Node):
         if self.total_mapping_calls % 10 == 0:
             gc.collect()
             torch.cuda.empty_cache() if torch.cuda.is_available() else None
-
-        # Gate processing until topic-driven calibration (camera_info + tf) is
-        # ready, so projection never runs with missing/garbage calibration.
-        if self.uses_topic_calib and not self._try_set_calibration():
-            self.get_logger().warn(
-                "Waiting for camera_info + tf calibration...",
-                throttle_duration_sec=5.0)
-            return
 
         if self.mapping_processing_lock.locked():
             print("Mapping processing is still ongoing. Skipping this cycle.")
@@ -795,7 +712,6 @@ class MappingNode(Node):
         self.timestamp = detection_stamp - 0.5
 
         # threading.Thread(target=self.mapping_processing, args=(image, camera_odom, detections, detection_stamp, neighboring_cloud, viewpoint_stamp_to_process)).start()
-        # self.log_info(f"🚨🚨 Detection number: {len(detections['ids'])}")
         self.mapping_processing(image, camera_odom, detections, detection_stamp, neighboring_cloud, viewpoint_stamp_to_process)
 
     def publish_map(self, stamp):

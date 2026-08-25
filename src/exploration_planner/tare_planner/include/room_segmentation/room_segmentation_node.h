@@ -13,11 +13,11 @@
 #include <string>
 #include <vector>
 #include <array>
+#include <deque>
 #include <map>
 #include <set>
 #include <numeric>
 #include <limits>
-#include <deque>
 
 // ROS 2
 #include "rclcpp/rclcpp.hpp"
@@ -91,6 +91,9 @@ private:
     void occupiedCloudCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg);
     void freespaceCloudCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg);
     void stateEstimationCallback(const nav_msgs::msg::Odometry::ConstSharedPtr msg);
+    // Cloud-vs-pose freshness gate: true when the latest registered cloud lags
+    // the latest odom by more than cloud_pose_lag_dist_ (meters of robot motion).
+    bool cloudPoseStale();
     void keyboardInputCallback(const std_msgs::msg::String::ConstSharedPtr msg);
     void timerCallback();
 
@@ -111,11 +114,6 @@ private:
     void saveImageToFile(const cv::Mat &image, const std::string &filename, bool force_save = false);
     int toIndex(int x, int y, int z);
     int toIndex(int x, int y);
-
-    // Freshness gate: true when the registered cloud lags the pose enough that
-    // the latest-odom pose is spatially far from where the robot actually was
-    // when the cloud was captured -> destructive wall ops must be skipped.
-    bool cloudPoseStale();
 
     // ==================== Publishing Functions ====================
     void publishRoomNodes();
@@ -172,8 +170,10 @@ private:
     float kViewPointCollisionMarginZPlus_;
     float kViewPointCollisionMarginZMinus_;
     bool is_debug_; // whether to save debug images
-    std::vector<int> room_voxel_dimension_;
     float cloud_pose_lag_dist_; // freshness gate: skip destructive wall ops when the registered cloud lags the pose by more than this (m)
+    double latest_cloud_stamp_sec_; // stamp of the last registered scan
+    std::deque<std::array<double, 3>> odom_buf_; // (stamp, x, y) history for the gate
+    std::vector<int> room_voxel_dimension_;
 
     // ==================== Point Clouds ====================
     pcl::PointCloud<pcl::PointXYZINormal>::Ptr laser_cloud_;
@@ -221,10 +221,6 @@ private:
     bool segment_flag_; // flag to trigger room segmentation
     bool demo_frozen_; // when true, stop updating and keep republishing cached results
     int demo_publish_count_; // counter for throttling publish rate while frozen
-
-    // ==================== Cloud-vs-pose freshness gate ====================
-    double latest_cloud_stamp_sec_; // stamp (s) of the most recent registered scan
-    std::deque<std::array<double, 3>> odom_buf_; // (stamp_s, x, y) odom history (~5 s) for the freshness gate
 };
 
 } // namespace room_segmentation

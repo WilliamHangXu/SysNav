@@ -2,11 +2,11 @@ import os
 import yaml
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, GroupAction, IncludeLaunchDescription
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PythonExpression
-from launch_ros.actions import Node
+from launch_ros.actions import Node, SetRemap
 
 # One bringup launch for the whole scene-graph pipeline. Scenario / vlm
 # config selection is baked in here so the tmux runner carries only per-run knobs
@@ -127,12 +127,22 @@ def generate_launch_description():
                  "'", decompress, "' == 'true' or ('", decompress,
                  "' == 'auto' and '", use_sim_time, "' == 'false')"])),
              output='screen'),
-        include(os.path.join(sem_share, 'detection_node_go2w_bag.launch'),
+        # sysnav (rsb) object branch: platform/topics come from the
+        # mapping_mecanum_*.yaml the two launches load (/camera/image,
+        # /registered_scan, /state_estimation). Not namespace-aware.
+        include(os.path.join(sem_share, 'detection_node.launch'),
                 condition=IfCondition(objects)),
-        include(os.path.join(sem_share, 'semantic_mapping_go2w_bag.launch'),
+        include(os.path.join(sem_share, 'semantic_mapping_real.launch'),
                 condition=IfCondition(objects)),
-        include(os.path.join(tare_share, 'room_segmentation.launch'),
-                {'scenario': SCENARIO, 'robot_config': robot_yaml}),
+        # room_segmentation is sysnav's verbatim node (subscribes /registered_scan
+        # + /state_estimation); a robot namespace is applied by remapping here.
+        GroupAction([
+            SetRemap('/registered_scan', f'/{ns}/cloud_registered'),
+            SetRemap('/state_estimation', f'/{ns}/lio/odometry'),
+            include(os.path.join(tare_share, 'room_segmentation.launch'),
+                    {'scenario': SCENARIO, 'robot_config': robot_yaml}),
+        ]) if ns else include(os.path.join(tare_share, 'room_segmentation.launch'),
+                              {'scenario': SCENARIO, 'robot_config': robot_yaml}),
         include(os.path.join(vlm_share, 'vlm_node.launch'),
                 {'config': VLM_CONFIG}),
         include(os.path.join(tare_share, 'explore.launch'),

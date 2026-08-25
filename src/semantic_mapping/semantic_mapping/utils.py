@@ -52,7 +52,7 @@ def map_label_to_color(label):
     if label in object_list:
         idx = object_list[label]
     else:
-        # print(f"Warning: Label '{label}' not found in object list. Assigning white.")
+        print(f"Warning: Label '{label}' not found in object list. Assigning white.")
         return [1.0, 1.0, 1.0]  # 白色
 
     # 限制 hue 在蓝绿色区间 [160°, 240°]

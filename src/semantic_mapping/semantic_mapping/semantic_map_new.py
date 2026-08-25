@@ -147,7 +147,7 @@ class ObjMapper():
 
         # params
         self.voxel_size = 0.03
-        self.confidence_thres = 0.07
+        self.confidence_thres = 0.30
         self.cloud_to_odom_dist_thres = 8.0
         self.ground_height = -0.5
         self.num_angle_bin = 20
@@ -236,7 +236,6 @@ class ObjMapper():
 
         # maintain adjacency graph
         if len(obj_ids) == 0:
-            # self.log_info(f"🚨🚨 No objects detected.")
             return
         
         t0 = time.time()
@@ -244,9 +243,7 @@ class ObjMapper():
         #     obj_clouds_world = self.cloud_image_fusion.generate_seg_cloud(cloud_body, masks, labels, confidences, R_b2w, t_b2w, image)
         # else:
         #     obj_clouds_world = self.cloud_image_fusion.generate_seg_cloud(cloud_body, masks, labels, confidences, R_b2w, t_b2w)
-        # if image is not None:
-        #     self.log_info(f"🚨🚨 Image is not None before generate_seg_cloud")
-        obj_clouds_world = self.cloud_image_fusion.generate_seg_cloud(cloud_body, masks, labels, confidences, R_b2w, t_b2w, image)
+        obj_clouds_world = self.cloud_image_fusion.generate_seg_cloud(cloud_body, masks, labels, confidences, R_b2w, t_b2w)
         
         self.frame_count += 1
         t1 = time.time()
@@ -369,7 +366,7 @@ class ObjMapper():
                     single_obj.inactive_frame += 1
                     single_obj.regularize_shape_v2(self.percentile_thresh)
                     # self.log_info(f"Obj {single_obj.class_id}:{single_obj.obj_id} with points {single_obj.valid_indices_regularized.shape[0]}, inactive frame {single_obj.inactive_frame}")
-                    if single_obj.valid_indices_regularized.shape[0] < 15 and single_obj.inactive_frame > 50 and single_obj.get_dominant_label()!=self.target_object: # TODO: voxel count thresh should be related to the object class
+                    if single_obj.valid_indices_regularized.shape[0] < 15 and single_obj.inactive_frame > 50 and single_obj.get_dominant_label!=self.target_object: # TODO: voxel count thresh should be related to the object class
                         self.publish_deleted_object(single_obj, detection_stamp)
                         single_obj.cleanup_images(self.save_queue)
                         self.single_obj_list.remove(single_obj)
@@ -450,37 +447,37 @@ class ObjMapper():
                         i -= 1
                         del target_obj_same
                     
-                # whether to perform cross-class merging (keep this)
-                if (not merged_obj) and (target_obj_diff is not None):
-                    (center_object, extent_object, q_object), bbox3d_object = single_obj.infer_bbox_oriented(diversity_percentile=self.percentile_thresh, regularized=True)
-                    (center_target, extent_target, q_target), bbox3d_target = target_obj_diff.infer_bbox_oriented(diversity_percentile=self.percentile_thresh, regularized=True)
+                # # whether to perform cross-class merging (keep this)
+                # if (not merged_obj) and (target_obj_diff is not None):
+                #     (center_object, extent_object, q_object), bbox3d_object = single_obj.infer_bbox_oriented(diversity_percentile=self.percentile_thresh, regularized=True)
+                #     (center_target, extent_target, q_target), bbox3d_target = target_obj_diff.infer_bbox_oriented(diversity_percentile=self.percentile_thresh, regularized=True)
 
-                    if center_object is None or center_target is None:
-                        i += 1
-                        continue
+                #     if center_object is None or center_target is None:
+                #         i += 1
+                #         continue
 
-                    # merge directly if the distance is extremely small
-                    if (minimum_dist_diff < 0.1):
-                        self.log_info(f"Distance Merge {single_obj.class_id}:{single_obj.obj_id} to {target_obj_diff.class_id}:{target_obj_diff.obj_id} with dist thresh {minimum_dist_diff}")
-                        merged_obj = True
+                #     # # merge directly if the distance is extremely small
+                #     # if (minimum_dist_diff < 0.1):
+                #     #     self.log_info(f"Distance Merge {single_obj.class_id}:{single_obj.obj_id} to {target_obj_diff.class_id}:{target_obj_diff.obj_id} with dist thresh {minimum_dist_diff}")
+                #     #     merged_obj = True
 
-                    if not merged_obj:
-                        iou_3d, ratio_obj, ratio_target = self.IoU_3D_Bbox(bbox3d_object, bbox3d_target, extent_object, extent_target)
-                        # self.log_info(f"Diff Class Object {single_obj.class_id}:{single_obj.obj_id} to {target_obj_diff.class_id}:{target_obj_diff.obj_id} IoU {iou_3d:.2f}, ratio_obj {ratio_obj:.2f}, ratio_target {ratio_target:.2f}")
-                        if iou_3d > 0.7 or ratio_obj > 0.9 or ratio_target > 0.9:
-                            self.log_info(f"Diff Class IoU Merge {single_obj.class_id}:{single_obj.obj_id} to {target_obj_diff.class_id}:{target_obj_diff.obj_id} with IoU {iou_3d:.2f} ratio_obj {ratio_obj:.2f} ratio_target {ratio_target:.2f}")
-                            merged_obj = True
-                    if merged_obj:
-                        if target_index_diff < i and not swapped:
-                                single_obj, target_obj_diff = target_obj_diff, single_obj
-                                target_index_diff = i
-                        single_obj.merge_object(target_obj_diff)
-                        single_obj.inactive_frame = -1
-                        self.publish_deleted_object(target_obj_diff, detection_stamp)
-                        target_obj_diff.cleanup_images(self.save_queue)
-                        self.single_obj_list.remove(target_obj_diff)
-                        i -= 1
-                        del target_obj_diff
+                #     if not merged_obj:
+                #         iou_3d, ratio_obj, ratio_target = self.IoU_3D_Bbox(bbox3d_object, bbox3d_target, extent_object, extent_target)
+                #         # self.log_info(f"Diff Class Object {single_obj.class_id}:{single_obj.obj_id} to {target_obj_diff.class_id}:{target_obj_diff.obj_id} IoU {iou_3d:.2f}, ratio_obj {ratio_obj:.2f}, ratio_target {ratio_target:.2f}")
+                #         if iou_3d > 0.7 or ratio_obj > 0.9 or ratio_target > 0.9:
+                #             self.log_info(f"Diff Class IoU Merge {single_obj.class_id}:{single_obj.obj_id} to {target_obj_diff.class_id}:{target_obj_diff.obj_id} with IoU {iou_3d:.2f} ratio_obj {ratio_obj:.2f} ratio_target {ratio_target:.2f}")
+                #             merged_obj = True
+                #     if merged_obj:
+                #         if target_index_diff < i and not swapped:
+                #                 single_obj, target_obj_diff = target_obj_diff, single_obj
+                #                 target_index_diff = i
+                #         single_obj.merge_object(target_obj_diff)
+                #         single_obj.inactive_frame = -1
+                #         self.publish_deleted_object(target_obj_diff, detection_stamp)
+                #         target_obj_diff.cleanup_images(self.save_queue)
+                #         self.single_obj_list.remove(target_obj_diff)
+                #         i -= 1
+                #         del target_obj_diff
 
             if not merged_obj:
                 single_obj.regularize_shape_v2(self.percentile_thresh)
