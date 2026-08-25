@@ -23,24 +23,17 @@ def generate_launch_description():
         default_value='true',
         description='Use boundary for navigation')
 
-    sg_export_config_arg = DeclareLaunchArgument(
-        'sg_export_config',
-        default_value='scene_graph_export',
-        description='scene-graph export config yaml (without .yaml)')
-
     explore_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             [get_package_share_directory('tare_planner'), '/explore.launch']),
         launch_arguments={
             'use_sim_time': LaunchConfiguration('use_sim_time'),
-            'scenario': LaunchConfiguration('scenario'),
-            'sg_export_config': LaunchConfiguration('sg_export_config')
+            'scenario': LaunchConfiguration('scenario')
         }.items())
 
     return LaunchDescription([
         use_sim_time_arg,
         scenario_arg,
         use_boundary_arg,
-        sg_export_config_arg,
         explore_launch,
     ])

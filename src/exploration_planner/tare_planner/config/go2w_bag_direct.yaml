@@ -97,25 +97,6 @@ tare_planner_node:
     keypose_graph/kAddEdgeCollisionCheckRadius : 0.2
     keypose_graph/kAddEdgeCollisionCheckPointNumThr : 1
 
-    # NavGraph (lightweight contraction of the keypose graph for path planning)
-    navigation_graph/kNavNodeMinDist : 2.5
-    navigation_graph/kNavGraphUpdateInterval : 4
-
-    # Quadrant / room-area tagging: ONE global building orientation; buckets each
-    # waypoint into a 3x3 grid of its room (center + 8 compass cells, equal thirds).
-    # Primary source = dominant wall orientation (/wall_axis from room_segmentation);
-    # the minAreaRect-over-room-polygons fit is used ONLY as a hard-cap fallback.
-    # Frozen once stable. quadrant/debug_log is a runtime toggle.
-    quadrant/kUpdateInterval : 6
-    quadrant/kWarmupMinRooms : 1
-    quadrant/kFreezeStableCycles : 5
-    quadrant/kFreezeAngleEpsDeg : 2.0
-    quadrant/kCrossLineWidth : 0.08
-    quadrant/kWallMinConfidence : 0.5
-    quadrant/kWallMinSupportM : 3.0
-    quadrant/kCenterFraction : 0.333
-    quadrant/debug_log : false
-
     # ViewPointManager
     viewpoint_manager/number_x : 45
     viewpoint_manager/number_y : 45
@@ -209,12 +190,3 @@ room_segmentation:
     # for that cycle, so a stale cloud cannot carve real walls as free space.
     # Lower = more protective. Default in code is 0.3 if this key is omitted.
     cloud_pose_lag_dist: 0.5
-
-    # Wall-axis estimator: dominant Manhattan grid angle from the wall planes
-    # (length-weighted circular-histogram mode + refine), published on /wall_axis
-    # and consumed by QuadrantManager as the primary building-axis source.
-    wall_axis/min_wall_len : 0.5      # drop walls shorter than this (m) from voting
-    wall_axis/hist_bins : 90          # phi histogram bins (4 deg/bin = 1 deg in theta)
-    wall_axis/inlier_window_deg : 6.0 # inlier half-window in theta-deg
-    wall_axis/min_total_len : 3.0     # min total wall length for a valid estimate (m)
-    wall_axis/refine_iters : 2

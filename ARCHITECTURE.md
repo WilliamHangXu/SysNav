@@ -1,3 +1,8 @@
+> **OUT OF DATE (2026-08-25).** Describes the `deepclean` pipeline. On this branch
+> the NavGraph, JSON exporter and quadrant/room-area tagging have been removed
+> (see [`RSB_TEST_PLAN.md`](RSB_TEST_PLAN.md), Phase 1); the room-labeling and
+> producer sections will change again in Phases 2-3. Rewritten in Phase 6.
+
 # SysNav — Architecture Guide (Scene-Graph Pipeline)
 
 > **What this document is.** A developer/coding-agent onboarding guide to the

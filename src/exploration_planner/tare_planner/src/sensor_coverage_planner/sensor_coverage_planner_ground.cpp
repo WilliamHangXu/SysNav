@@ -107,27 +107,6 @@ void SensorCoveragePlanner3D::ReadParameters() {
   this->declare_parameter<int>(
       "keypose_graph/kAddEdgeCollisionCheckPointNumThr", 1);
 
-  // navigation_graph
-  this->declare_parameter<double>("navigation_graph/kNavNodeMinDist", 1.25);
-  this->declare_parameter<double>("navigation_graph/kNavNodeReanchorDist", 0.2);
-  this->declare_parameter<int>("navigation_graph/kNavGraphUpdateInterval", 2);
-  this->declare_parameter<std::string>("navigation_graph/world_frame_id",
-                                       kWorldFrameID);
-
-  // quadrant (room area / building-axes tagging; read by QuadrantManager)
-  this->declare_parameter<int>("quadrant/kUpdateInterval", 4);
-  this->declare_parameter<int>("quadrant/kWarmupMinRooms", 1);  // geometry gate (>=1 room)
-  this->declare_parameter<int>("quadrant/kWarmupMinVertices", 8);
-  this->declare_parameter<int>("quadrant/kFreezeStableCycles", 5);
-  this->declare_parameter<double>("quadrant/kFreezeAngleEpsDeg", 2.0);
-  this->declare_parameter<int>("quadrant/kMaxWarmupCycles", 60);
-  this->declare_parameter<double>("quadrant/kCrossLineWidth", 0.08);
-  this->declare_parameter<double>("quadrant/kWallMinConfidence", 0.5);  // trust /wall_axis above this
-  this->declare_parameter<double>("quadrant/kWallMinSupportM", 3.0);    // and this aligned wall length (m)
-  this->declare_parameter<double>("quadrant/kCenterFraction", 1.0 / 3.0);  // 3x3 center band (1/3 = equal thirds)
-  this->declare_parameter<std::string>("quadrant/world_frame_id", kWorldFrameID);
-  this->declare_parameter<bool>("quadrant/debug_log", false);  // runtime toggle
-
   // planning_env
   this->declare_parameter<double>("kSurfaceCloudDwzLeafSize", 0.2);
   this->declare_parameter<double>("kCollisionCloudDwzLeafSize", 0.2);
@@ -286,50 +265,9 @@ void SensorCoveragePlanner3D::ReadParameters() {
   room_view_last_y_ = 0.0f;
   room_view_last_yaw_ = 0.0f;
 
-  // Scene-graph JSON export (see config/scene_graph_export.yaml)
-  this->declare_parameter<bool>("scene_graph_export.enabled", scene_graph_cfg_.enabled);
-  this->declare_parameter<std::string>("scene_graph_export.output_root", scene_graph_cfg_.output_root);
-  this->declare_parameter<double>("scene_graph_export.save_interval_s", scene_graph_cfg_.save_interval_s);
-  this->declare_parameter<bool>("scene_graph_export.end_of_bag_save", scene_graph_cfg_.end_of_bag_save);
-  this->declare_parameter<double>("scene_graph_export.bag_end_timeout_s", scene_graph_cfg_.bag_end_timeout_s);
-  this->declare_parameter<std::string>("scene_graph_export.manual_save_keyword", scene_graph_cfg_.manual_save_keyword);
-  this->declare_parameter<std::string>("scene_graph_export.zone", scene_graph_cfg_.zone);
-  this->declare_parameter<std::string>("scene_graph_export.map_id", scene_graph_cfg_.map_id);
-  this->declare_parameter<std::string>("scene_graph_export.warehouse_id", scene_graph_cfg_.warehouse_id);
-  this->declare_parameter<std::string>("scene_graph_export.name", scene_graph_cfg_.name);
-  this->declare_parameter<std::string>("scene_graph_export.client_id", scene_graph_cfg_.client_id);
-  this->declare_parameter<std::string>("scene_graph_export.uploaded_by", scene_graph_cfg_.uploaded_by);
-  this->declare_parameter<std::string>("scene_graph_export.units", scene_graph_cfg_.units);
-  this->declare_parameter<std::string>("scene_graph_export.frame", scene_graph_cfg_.frame);
-  this->declare_parameter<std::string>("scene_graph_export.building", scene_graph_cfg_.building);
-  this->declare_parameter<int>("scene_graph_export.floor_level", scene_graph_cfg_.floor_level);
-  this->declare_parameter<std::string>("scene_graph_export.floor_id", scene_graph_cfg_.floor_id);
-  this->declare_parameter<bool>("scene_graph_export.world_transform.enabled", scene_graph_cfg_.enabled_world_transform);
-  this->declare_parameter<std::string>("scene_graph_export.world_transform.world_frame", scene_graph_cfg_.world_frame);
-  this->declare_parameter<std::string>("scene_graph_export.world_transform.source_frame", scene_graph_cfg_.source_frame);
-  this->declare_parameter<double>("scene_graph_export.compass_radius_m", scene_graph_cfg_.compass_radius_m);
-
-  this->get_parameter("scene_graph_export.enabled", scene_graph_cfg_.enabled);
-  this->get_parameter("scene_graph_export.output_root", scene_graph_cfg_.output_root);
-  this->get_parameter("scene_graph_export.save_interval_s", scene_graph_cfg_.save_interval_s);
-  this->get_parameter("scene_graph_export.end_of_bag_save", scene_graph_cfg_.end_of_bag_save);
-  this->get_parameter("scene_graph_export.bag_end_timeout_s", scene_graph_cfg_.bag_end_timeout_s);
-  this->get_parameter("scene_graph_export.manual_save_keyword", scene_graph_cfg_.manual_save_keyword);
-  this->get_parameter("scene_graph_export.zone", scene_graph_cfg_.zone);
-  this->get_parameter("scene_graph_export.map_id", scene_graph_cfg_.map_id);
-  this->get_parameter("scene_graph_export.warehouse_id", scene_graph_cfg_.warehouse_id);
-  this->get_parameter("scene_graph_export.name", scene_graph_cfg_.name);
-  this->get_parameter("scene_graph_export.client_id", scene_graph_cfg_.client_id);
-  this->get_parameter("scene_graph_export.uploaded_by", scene_graph_cfg_.uploaded_by);
-  this->get_parameter("scene_graph_export.units", scene_graph_cfg_.units);
-  this->get_parameter("scene_graph_export.frame", scene_graph_cfg_.frame);
-  this->get_parameter("scene_graph_export.building", scene_graph_cfg_.building);
-  this->get_parameter("scene_graph_export.floor_level", scene_graph_cfg_.floor_level);
-  this->get_parameter("scene_graph_export.floor_id", scene_graph_cfg_.floor_id);
-  this->get_parameter("scene_graph_export.world_transform.enabled", scene_graph_cfg_.enabled_world_transform);
-  this->get_parameter("scene_graph_export.world_transform.world_frame", scene_graph_cfg_.world_frame);
-  this->get_parameter("scene_graph_export.world_transform.source_frame", scene_graph_cfg_.source_frame);
-  this->get_parameter("scene_graph_export.compass_radius_m", scene_graph_cfg_.compass_radius_m);
+  // Per-run output root for room-view images / query logs.
+  this->declare_parameter<std::string>("output_root", "output/scene_graph");
+  this->get_parameter("output_root", output_root_);
 }
 
 // void PlannerData::Initialize(rclcpp::Node::SharedPtr node_)
@@ -363,8 +301,6 @@ void SensorCoveragePlanner3D::InitializeData() {
       shared_from_this());
   keypose_graph_ =
       std::make_shared<keypose_graph_ns::KeyposeGraph>(shared_from_this());
-  navgraph_ = std::make_shared<navgraph_ns::NavGraph>(shared_from_this());
-  quadrant_mgr_ = std::make_shared<quadrant_ns::QuadrantManager>(shared_from_this());
   planning_env_ =
       std::make_shared<planning_env_ns::PlanningEnv>(shared_from_this());
   grid_world_ = std::make_shared<grid_world_ns::GridWorld>(shared_from_this());
@@ -488,9 +424,7 @@ SensorCoveragePlanner3D::SensorCoveragePlanner3D()
     : Node("tare_planner_node"), keypose_cloud_update_(false),
       initialized_(false),
       test_point_update_(false), viewpoint_ind_update_(false), step_(false),
-      registered_cloud_count_(0), keypose_count_(0),
-      scene_graph_snapshot_count_(0), scene_graph_final_saved_(false),
-      scene_graph_clock_started_(false), add_viewpoint_rep_(false)
+      registered_cloud_count_(0), keypose_count_(0), add_viewpoint_rep_(false)
 {
   std::cout << "finished constructor" << std::endl;
 }
@@ -507,78 +441,27 @@ bool SensorCoveragePlanner3D::initialize() {
   execution_timer_ = this->create_wall_timer(
       1000ms, std::bind(&SensorCoveragePlanner3D::execute, this));
 
-  // ---- Scene-graph JSON export setup ----
-  if (scene_graph_cfg_.enabled)
+  // ---- Per-run output folder ----
+  // <output_root>/run_<wallclock>/ holds the room-view images the room-type
+  // queries reference by path, plus the optional query/answer JSON logs.
   {
-    scene_graph_exporter_ =
-        std::make_unique<scene_graph_exporter_ns::SceneGraphExporter>(scene_graph_cfg_);
-
-    // Create a fresh per-run output folder: <output_root>/run_<wallclock>/
     std::time_t now_time = std::time(nullptr);
     char run_stamp[32];
     std::strftime(run_stamp, sizeof(run_stamp), "%Y-%m-%d_%H-%M-%S",
                   std::localtime(&now_time));
     std::filesystem::path run_dir =
-        std::filesystem::path(scene_graph_cfg_.output_root) /
-        (std::string("run_") + run_stamp);
+        std::filesystem::path(output_root_) / (std::string("run_") + run_stamp);
     std::error_code ec;
     std::filesystem::create_directories(run_dir, ec);
     if (ec)
     {
-      RCLCPP_ERROR(this->get_logger(),
-                   "[scene_graph] failed to create run dir %s: %s",
+      RCLCPP_ERROR(this->get_logger(), "[run_dir] failed to create %s: %s",
                    run_dir.c_str(), ec.message().c_str());
-      scene_graph_exporter_.reset();  // disable export rather than crash later
     }
     else
     {
-      scene_graph_run_dir_ = run_dir.string();
-      RCLCPP_INFO(this->get_logger(), "[scene_graph] snapshots -> %s",
-                  scene_graph_run_dir_.c_str());
-
-      // Express the (odom-frame) scene graph in a building-fixed `world` frame
-      // by looking up the single static world_T_source transform once and
-      // freezing it. The buffer hears /tf + /tf_static.
-      if (scene_graph_cfg_.enabled_world_transform)
-      {
-        scene_graph_tf_buffer_ =
-            std::make_shared<tf2_ros::Buffer>(this->get_clock());
-        scene_graph_tf_listener_ =
-            std::make_shared<tf2_ros::TransformListener>(*scene_graph_tf_buffer_);
-        RCLCPP_INFO(this->get_logger(),
-                    "[scene_graph] world transform on: %s <- %s",
-                    scene_graph_cfg_.world_frame.c_str(),
-                    scene_graph_cfg_.source_frame.c_str());
-        // Retry until tf is flowing, then freeze and stop retrying.
-        scene_graph_world_tf_timer_ = this->create_wall_timer(
-            std::chrono::duration<double>(1.0), [this]() {
-              if (TryFreezeWorldFromOdom())
-              {
-                scene_graph_world_tf_timer_->cancel();
-              }
-            });
-      }
-
-      // Periodic snapshots (wall clock so they fire under sim time too).
-      if (scene_graph_cfg_.save_interval_s > 0.0)
-      {
-        scene_graph_save_timer_ = this->create_wall_timer(
-            std::chrono::duration<double>(scene_graph_cfg_.save_interval_s),
-            [this]() { SaveSceneGraphSnapshot("periodic"); });
-      }
-
-      // End-of-bag watchdog: only meaningful when replaying on sim time.
-      bool use_sim_time = false;
-      this->get_parameter("use_sim_time", use_sim_time);
-      if (scene_graph_cfg_.end_of_bag_save && use_sim_time)
-      {
-        scene_graph_last_sim_time_ = this->now();
-        scene_graph_clock_started_ = false;
-        scene_graph_watchdog_timer_ = this->create_wall_timer(
-            std::chrono::duration<double>(
-                std::max(0.5, scene_graph_cfg_.bag_end_timeout_s)),
-            std::bind(&SensorCoveragePlanner3D::SceneGraphWatchdogCallback, this));
-      }
+      run_dir_ = run_dir.string();
+      RCLCPP_INFO(this->get_logger(), "[run_dir] outputs -> %s", run_dir_.c_str());
     }
   }
 
@@ -586,12 +469,11 @@ bool SensorCoveragePlanner3D::initialize() {
   // The view buffer is always on; it needs a folder to persist the best-3
   // images, which the queries then reference by path. Query/answer JSON logs
   // are optional (room_type_query_log.enabled). Both land in the per-run
-  // scene-graph folder when export is on, else under the configured output root.
+  // folder when it exists, else under the configured output root.
   {
     std::filesystem::path base =
-        !scene_graph_run_dir_.empty()
-            ? std::filesystem::path(scene_graph_run_dir_)
-            : std::filesystem::path(scene_graph_cfg_.output_root);
+        !run_dir_.empty() ? std::filesystem::path(run_dir_)
+                          : std::filesystem::path(output_root_);
     std::error_code ec;
 
     std::filesystem::path views_dir = base / "room_views";
@@ -1131,10 +1013,6 @@ void SensorCoveragePlanner3D::KeyboardInputCallback(const std_msgs::msg::String:
   if (keyboard_input_msg->data == "reset")
   {
     tmp_flag_ = true;
-  }
-  if (keyboard_input_msg->data == scene_graph_cfg_.manual_save_keyword)
-  {
-    SaveSceneGraphSnapshot("manual");
   }
 }
 
@@ -1976,11 +1854,11 @@ void SensorCoveragePlanner3D::execute() {
     int viewpoint_candidate_count = UpdateViewPoints();
     // SCENE-GRAPH BULLETPROOFING: a zero candidate-viewpoint count is a *motion-
     // planning* condition, not a scene-graph one. This used to `return` here, which
-    // also skipped the keypose-graph / NavGraph / room-finishing work below -- i.e.
+    // also skipped the keypose-graph / room-finishing work below -- i.e.
     // froze the scene graph (and thus the exported JSON). Instead, keep building the
     // scene graph every cycle and only skip the parts that genuinely need candidate
     // viewpoints (the TSP path planning + coverage update, which only steer the robot
-    // and never touch the JSON). UpdateKeyposeGraph()/navgraph_->Update() below do not
+    // and never touch the scene graph). UpdateKeyposeGraph() below does not
     // iterate the candidate set, so they are safe to run with zero candidates.
     bool have_viewpoints = (viewpoint_candidate_count > 0);
     if (!have_viewpoints) {
@@ -1990,26 +1868,6 @@ void SensorCoveragePlanner3D::execute() {
     }
 
     UpdateKeyposeGraph();
-    // Derive the lightweight NavGraph from the freshly healed + connectivity-
-    // checked keypose graph (self-throttled to every Nth call). The room mask
-    // tags each NavGraph node with its room id; room_keys names each node with
-    // its eventual scene-graph waypoint id (same key the exporter uses).
-    std::map<int, std::string> navgraph_room_keys;
-    for (const auto& id_room : representation_->GetRoomNodesMap())
-    {
-      navgraph_room_keys[id_room.second.id_] =
-          scene_graph_exporter_ns::SceneGraphExporter::RoomKey(id_room.second);
-    }
-    // Fit + freeze the global building axes (self-throttled), then hand the NavGraph
-    // each room's 3x3 grid so nodes get tagged with their grid cell for live RViz.
-    bool quadrant_debug_log = false;
-    this->get_parameter("quadrant/debug_log", quadrant_debug_log);
-    quadrant_mgr_->Update(representation_->GetRoomNodesMap(), quadrant_debug_log);
-    const auto navgraph_room_grids =
-        quadrant_mgr_->BuildRoomGrids(representation_->GetRoomNodesMap());
-    navgraph_->Update(keypose_graph_, room_mask_, shift_, room_resolution_,
-                      navgraph_room_keys, navgraph_room_grids);
-
     int uncovered_point_num = 0;
     int uncovered_frontier_point_num = 0;
     if (have_viewpoints) {
@@ -2019,7 +1877,7 @@ void SensorCoveragePlanner3D::execute() {
 
     // Connector-node injection: bin the candidate viewpoints into grid_world cells
     // and add the inter-cell paths into the keypose graph (these non-keypose nodes
-    // seed the NavGraph). Only meaningful when there are candidates.
+    // are kept as part of the traversability roadmap). Only meaningful when there are candidates.
     if (have_viewpoints) {
       GlobalPlanning();
     }
@@ -2978,186 +2836,6 @@ cv::Mat SensorCoveragePlanner3D::project_pcl_to_image(
     cv::Mat cropped = rotated_image.clone();
     return cropped; // 返回原图像
   }
-}
-
-bool SensorCoveragePlanner3D::TryFreezeWorldFromOdom()
-{
-  if (!scene_graph_cfg_.enabled_world_transform)
-  {
-    return true;  // disabled: identity, export stays in the odom frame
-  }
-  if (!scene_graph_tf_buffer_)
-  {
-    return false;
-  }
-  try
-  {
-    // Single static transform world_T_source (= world<-odom): the scene graph is
-    // built entirely in odom, so this is the only transform needed to express it
-    // in the building-fixed world frame. No gravity bridge, no per-run constant.
-    const geometry_msgs::msg::TransformStamped world_T_source_msg =
-        scene_graph_tf_buffer_->lookupTransform(
-            scene_graph_cfg_.world_frame, scene_graph_cfg_.source_frame,
-            tf2::TimePointZero);
-
-    const auto& t = world_T_source_msg.transform.translation;
-    const auto& r = world_T_source_msg.transform.rotation;
-    scene_graph_world_from_map_ = Eigen::Isometry3d::Identity();
-    scene_graph_world_from_map_.translation() = Eigen::Vector3d(t.x, t.y, t.z);
-    scene_graph_world_from_map_.linear() =
-        Eigen::Quaterniond(r.w, r.x, r.y, r.z).normalized().toRotationMatrix();
-    scene_graph_world_from_map_valid_ = true;
-
-    const Eigen::Vector3d trans = scene_graph_world_from_map_.translation();
-    RCLCPP_INFO(this->get_logger(),
-                "[scene_graph] world<-odom frozen (%s <- %s): t=(%.3f, %.3f, %.3f)",
-                scene_graph_cfg_.world_frame.c_str(),
-                scene_graph_cfg_.source_frame.c_str(), trans.x(), trans.y(),
-                trans.z());
-    return true;
-  }
-  catch (const tf2::TransformException& ex)
-  {
-    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-                         "[scene_graph] world<-odom lookup pending (%s)",
-                         ex.what());
-    return false;
-  }
-}
-
-void SensorCoveragePlanner3D::SaveSceneGraphSnapshot(const std::string &reason)
-{
-  if (!scene_graph_exporter_ || !initialized_)
-  {
-    return;
-  }
-
-  // world_T_odom is looked up once and frozen (TryFreezeWorldFromOdom). If it
-  // isn't latched yet (e.g. an early snapshot before TF is flowing), try now; on
-  // failure fall back to identity and write the snapshot in the odom frame.
-  if (scene_graph_cfg_.enabled_world_transform && !scene_graph_world_from_map_valid_)
-  {
-    if (!TryFreezeWorldFromOdom())
-    {
-      RCLCPP_WARN(this->get_logger(),
-                  "[scene_graph] world<-odom not available yet; writing %s "
-                  "snapshot in odom frame",
-                  reason.c_str());
-    }
-  }
-
-  // Identity unless a world transform was actually latched (so the fallback
-  // stays in odom); the metadata frame below is set to match.
-  const bool world_applied =
-      scene_graph_cfg_.enabled_world_transform && scene_graph_world_from_map_valid_;
-
-  json snapshot = scene_graph_exporter_->Build(
-      representation_->GetRoomNodesMap(), representation_->GetObjectNodeRepMap(),
-      navgraph_->GetNodes(), navgraph_->GetEdges(), *door_cloud_,
-      scene_graph_world_from_map_, quadrant_mgr_->GetAxes(),
-      quadrant_mgr_->BuildRoomGrids(representation_->GetRoomNodesMap()));
-
-  // The exporter writes config_.frame as a default; set the true coordinate
-  // frame based on whether the world transform was actually applied.
-  snapshot["layout"]["metadata"]["frame"] =
-      world_applied ? scene_graph_cfg_.world_frame : scene_graph_cfg_.frame;
-
-  // "final" gets a stable name; everything else is a numbered, time-stamped file.
-  std::string filename;
-  if (reason == "final")
-  {
-    filename = "snapshot_final.json";
-  }
-  else
-  {
-    char buf[64];
-    std::snprintf(buf, sizeof(buf), "snapshot_%04d_%.3f.json",
-                  scene_graph_snapshot_count_, this->now().seconds());
-    filename = buf;
-  }
-
-  std::filesystem::path run_dir(scene_graph_run_dir_);
-  std::filesystem::path out_path = run_dir / filename;
-
-  // Write to a hidden temp in the same dir, then atomically rename it into place,
-  // so a concurrent reader (e.g. the demo-mode responder streaming the JSON back
-  // to the robot) never observes a half-written file.
-  std::filesystem::path tmp_path = run_dir / ("." + filename + ".tmp");
-  {
-    std::ofstream out(tmp_path);
-    if (!out)
-    {
-      RCLCPP_ERROR(this->get_logger(), "[scene_graph] cannot write %s",
-                   tmp_path.c_str());
-      return;
-    }
-    out << snapshot.dump(2);
-  }
-  std::error_code ec;
-  std::filesystem::rename(tmp_path, out_path, ec);
-  if (ec)
-  {
-    RCLCPP_ERROR(this->get_logger(), "[scene_graph] cannot finalize %s: %s",
-                 out_path.c_str(), ec.message().c_str());
-    std::filesystem::remove(tmp_path, ec);
-    return;
-  }
-
-  // Maintain a stable pointer (latest.json -> the file just written) so consumers
-  // can read "the current snapshot" without scanning for the newest timestamped
-  // name. Atomic: create a temp symlink, then rename it over latest.json. Failure
-  // is non-fatal (consumers can still pick the newest snapshot_*.json).
-  std::filesystem::path latest_tmp = run_dir / ".latest.json.tmp";
-  std::filesystem::remove(latest_tmp, ec);
-  std::filesystem::create_symlink(filename, latest_tmp, ec);
-  if (!ec)
-  {
-    std::filesystem::rename(latest_tmp, run_dir / "latest.json", ec);
-  }
-  if (ec)
-  {
-    RCLCPP_WARN(this->get_logger(), "[scene_graph] could not update latest.json: %s",
-                ec.message().c_str());
-    std::filesystem::remove(latest_tmp, ec);
-  }
-
-  ++scene_graph_snapshot_count_;
-  RCLCPP_INFO(this->get_logger(), "[scene_graph] saved %s snapshot -> %s",
-              reason.c_str(), out_path.c_str());
-}
-
-void SensorCoveragePlanner3D::SceneGraphWatchdogCallback()
-{
-  if (!scene_graph_exporter_ || scene_graph_final_saved_)
-  {
-    return;
-  }
-  rclcpp::Time current_sim_time = this->now();
-
-  // Arming: ignore the pre-playback window. While the bag is paused (or before it
-  // starts) the sim clock is either 0 or held constant, which must NOT be mistaken
-  // for "bag finished". Only arm the watchdog once we have seen the clock advance.
-  if (!scene_graph_clock_started_)
-  {
-    if (current_sim_time.seconds() > 0.0 &&
-        current_sim_time > scene_graph_last_sim_time_)
-    {
-      scene_graph_clock_started_ = true;  // bag has begun playing
-    }
-    scene_graph_last_sim_time_ = current_sim_time;
-    return;
-  }
-
-  // Armed: sim time held constant over a full watchdog period => playback ended.
-  if (current_sim_time == scene_graph_last_sim_time_)
-  {
-    RCLCPP_INFO(this->get_logger(),
-                "[scene_graph] sim time stalled; writing final snapshot");
-    SaveSceneGraphSnapshot("final");
-    scene_graph_final_saved_ = true;
-    return;
-  }
-  scene_graph_last_sim_time_ = current_sim_time;
 }
 
 void SensorCoveragePlanner3D::PublishObjectNodeMarkers()

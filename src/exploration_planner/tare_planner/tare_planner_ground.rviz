@@ -75,7 +75,7 @@ Visualization Manager:
       Enabled: true
       Invert Rainbow: false
       Max Color: 255; 255; 255
-      Max Intensity: 255
+      Max Intensity: 171
       Min Color: 0; 0; 0
       Min Intensity: 0
       Name: PointCloud2
@@ -104,85 +104,85 @@ Visualization Manager:
           Value: true
         ar_marker_4_corrected:
           Value: true
-        go2w_008/FL_calf:
+        go2w_026/FL_calf:
           Value: true
-        go2w_008/FL_calflower:
+        go2w_026/FL_calflower:
           Value: true
-        go2w_008/FL_calflower1:
+        go2w_026/FL_calflower1:
           Value: true
-        go2w_008/FL_foot:
+        go2w_026/FL_foot:
           Value: true
-        go2w_008/FL_foot_motor:
+        go2w_026/FL_foot_motor:
           Value: true
-        go2w_008/FL_hip:
+        go2w_026/FL_hip:
           Value: true
-        go2w_008/FL_thigh:
+        go2w_026/FL_thigh:
           Value: true
-        go2w_008/FR_calf:
+        go2w_026/FR_calf:
           Value: true
-        go2w_008/FR_calflower:
+        go2w_026/FR_calflower:
           Value: true
-        go2w_008/FR_calflower1:
+        go2w_026/FR_calflower1:
           Value: true
-        go2w_008/FR_foot:
+        go2w_026/FR_foot:
           Value: true
-        go2w_008/FR_foot_motor:
+        go2w_026/FR_foot_motor:
           Value: true
-        go2w_008/FR_hip:
+        go2w_026/FR_hip:
           Value: true
-        go2w_008/FR_thigh:
+        go2w_026/FR_thigh:
           Value: true
-        go2w_008/Head_lower:
+        go2w_026/Head_lower:
           Value: true
-        go2w_008/Head_upper:
+        go2w_026/Head_upper:
           Value: true
-        go2w_008/RL_calf:
+        go2w_026/RL_calf:
           Value: true
-        go2w_008/RL_calflower:
+        go2w_026/RL_calflower:
           Value: true
-        go2w_008/RL_calflower1:
+        go2w_026/RL_calflower1:
           Value: true
-        go2w_008/RL_foot:
+        go2w_026/RL_foot:
           Value: true
-        go2w_008/RL_foot_motor:
+        go2w_026/RL_foot_motor:
           Value: true
-        go2w_008/RL_hip:
+        go2w_026/RL_hip:
           Value: true
-        go2w_008/RL_thigh:
+        go2w_026/RL_thigh:
           Value: true
-        go2w_008/RR_calf:
+        go2w_026/RR_calf:
           Value: true
-        go2w_008/RR_calflower:
+        go2w_026/RR_calflower:
           Value: true
-        go2w_008/RR_calflower1:
+        go2w_026/RR_calflower1:
           Value: true
-        go2w_008/RR_foot:
+        go2w_026/RR_foot:
           Value: true
-        go2w_008/RR_foot_motor:
+        go2w_026/RR_foot_motor:
           Value: true
-        go2w_008/RR_hip:
+        go2w_026/RR_hip:
           Value: true
-        go2w_008/RR_thigh:
+        go2w_026/RR_thigh:
           Value: true
-        go2w_008/base:
+        go2w_026/base:
           Value: true
-        go2w_008/base_ground:
+        go2w_026/base_ground:
           Value: true
-        go2w_008/depth_cam_link:
+        go2w_026/depth_cam_link:
           Value: true
-        go2w_008/front_cam:
+        go2w_026/front_cam:
           Value: true
-        go2w_008/front_cam_ar:
+        go2w_026/front_cam_ar:
           Value: true
-        go2w_008/imu:
+        go2w_026/imu:
           Value: true
-        go2w_008/lidar:
+        go2w_026/lidar:
           Value: true
-        go2w_008/livox_frame:
+        go2w_026/livox_frame:
           Value: true
-        go2w_008/odom:
+        go2w_026/odom:
           Value: true
-        go2w_008/radar:
+        go2w_026/radar:
           Value: true
         map:
           Value: true
@@ -196,65 +196,65 @@ Visualization Manager:
       Show Axes: true
       Show Names: false
       Tree:
-        go2w_008/odom:
-          go2w_008/base:
-            go2w_008/FL_hip:
-              go2w_008/FL_thigh:
-                go2w_008/FL_calf:
-                  go2w_008/FL_calflower:
-                    go2w_008/FL_calflower1:
+        go2w_026/odom:
+          go2w_026/base:
+            go2w_026/FL_hip:
+              go2w_026/FL_thigh:
+                go2w_026/FL_calf:
+                  go2w_026/FL_calflower:
+                    go2w_026/FL_calflower1:
                       {}
-                  go2w_008/FL_foot:
+                  go2w_026/FL_foot:
                     {}
-                  go2w_008/FL_foot_motor:
+                  go2w_026/FL_foot_motor:
                     {}
-            go2w_008/FR_hip:
-              go2w_008/FR_thigh:
-                go2w_008/FR_calf:
-                  go2w_008/FR_calflower:
-                    go2w_008/FR_calflower1:
+            go2w_026/FR_hip:
+              go2w_026/FR_thigh:
+                go2w_026/FR_calf:
+                  go2w_026/FR_calflower:
+                    go2w_026/FR_calflower1:
                       {}
-                  go2w_008/FR_foot:
+                  go2w_026/FR_foot:
                     {}
-                  go2w_008/FR_foot_motor:
+                  go2w_026/FR_foot_motor:
                     {}
-            go2w_008/Head_upper:
-              go2w_008/Head_lower:
+            go2w_026/Head_upper:
+              go2w_026/Head_lower:
                 {}
-            go2w_008/RL_hip:
-              go2w_008/RL_thigh:
-                go2w_008/RL_calf:
-                  go2w_008/RL_calflower:
-                    go2w_008/RL_calflower1:
+            go2w_026/RL_hip:
+              go2w_026/RL_thigh:
+                go2w_026/RL_calf:
+                  go2w_026/RL_calflower:
+                    go2w_026/RL_calflower1:
                       {}
-                  go2w_008/RL_foot:
+                  go2w_026/RL_foot:
                     {}
-                  go2w_008/RL_foot_motor:
+                  go2w_026/RL_foot_motor:
                     {}
-            go2w_008/RR_hip:
-              go2w_008/RR_thigh:
-                go2w_008/RR_calf:
-                  go2w_008/RR_calflower:
-                    go2w_008/RR_calflower1:
+            go2w_026/RR_hip:
+              go2w_026/RR_thigh:
+                go2w_026/RR_calf:
+                  go2w_026/RR_calflower:
+                    go2w_026/RR_calflower1:
                       {}
-                  go2w_008/RR_foot:
+                  go2w_026/RR_foot:
                     {}
-                  go2w_008/RR_foot_motor:
+                  go2w_026/RR_foot_motor:
                     {}
-            go2w_008/base_ground:
+            go2w_026/base_ground:
               {}
-            go2w_008/depth_cam_link:
+            go2w_026/depth_cam_link:
               {}
-            go2w_008/front_cam:
-              go2w_008/front_cam_ar:
+            go2w_026/front_cam:
+              go2w_026/front_cam_ar:
                 {}
-            go2w_008/imu:
+            go2w_026/imu:
               {}
-            go2w_008/lidar:
+            go2w_026/lidar:
               {}
-            go2w_008/livox_frame:
+            go2w_026/livox_frame:
               {}
-            go2w_008/radar:
+            go2w_026/radar:
               {}
           map:
             {}
@@ -275,7 +275,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /go2w_008/camera/image_rect_color
+        Value: /annotated_image_detection
       Value: true
     - Class: rviz_default_plugins/MarkerArray
       Enabled: true
@@ -290,29 +290,29 @@ Visualization Manager:
         Value: /room_boundaries
       Value: true
     - Class: rviz_default_plugins/MarkerArray
-      Enabled: false
+      Enabled: true
       Name: MarkerArray
       Namespaces:
-        {}
+        bbox: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /obj_boxes
-      Value: false
+      Value: true
     - Class: rviz_default_plugins/MarkerArray
-      Enabled: false
+      Enabled: true
       Name: MarkerArray
       Namespaces:
-        {}
+        text: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /obj_labels
-      Value: false
+      Value: true
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
@@ -325,7 +325,7 @@ Visualization Manager:
       Color: 255; 255; 255
       Color Transformer: RGB8
       Decay Time: 0
-      Enabled: false
+      Enabled: true
       Invert Rainbow: false
       Max Color: 255; 255; 255
       Max Intensity: 4096
@@ -345,7 +345,7 @@ Visualization Manager:
         Value: /obj_points
       Use Fixed Frame: true
       Use rainbow: true
-      Value: false
+      Value: true
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
@@ -437,44 +437,6 @@ Visualization Manager:
       Use Fixed Frame: true
       Use rainbow: true
       Value: false
-    - Class: rviz_default_plugins/Marker
-      Enabled: true
-      Name: Marker
-      Namespaces:
-        navgraph_nodes: true
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        Filter size: 10
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /navgraph/node_marker
-      Value: true
-    - Class: rviz_default_plugins/Marker
-      Enabled: true
-      Name: Marker
-      Namespaces:
-        navgraph_edges: true
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        Filter size: 10
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /navgraph/edge_marker
-      Value: true
-    - Class: rviz_default_plugins/MarkerArray
-      Enabled: true
-      Name: MarkerArray
-      Namespaces:
-        navgraph_labels: true
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /navgraph/label_marker
-      Value: true
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
@@ -508,26 +470,6 @@ Visualization Manager:
       Use Fixed Frame: true
       Use rainbow: true
       Value: false
-    - Class: rviz_default_plugins/Marker
-      Enabled: true
-      Name: Marker
-      Namespaces:
-        quadrant_cross: true
-      Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        Filter size: 10
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /quadrant/cross_marker
-      Value: true
-  Enabled: true
-  Global Options:
-    Background Color: 48; 48; 48
-    Fixed Frame: map
-    Frame Rate: 30
-  Name: root
-  Tools:
     - Class: rviz_default_plugins/Interact
       Hide Inactive Objects: true
     - Class: rviz_default_plugins/MoveCamera
@@ -566,21 +508,26 @@ Visualization Manager:
   Value: true
   Views:
     Current:
-      Angle: 1.6350005865097046
-      Class: rviz_default_plugins/TopDownOrtho
+      Class: rviz_default_plugins/Orbit
+      Distance: 1.651624083518982
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
+      Focal Point:
+        X: -4.311214923858643
+        Y: -2.950239896774292
+        Z: 1.2249774932861328
+      Focal Shape Fixed Size: true
+      Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Scale: 61.96583938598633
+      Pitch: 0.4947970509529114
       Target Frame: <Fixed Frame>
-      Value: TopDownOrtho (rviz_default_plugins)
-      X: -6.377328395843506
-      Y: 3.0717933177948
+      Value: Orbit (rviz_default_plugins)
+      Yaw: 2.2373738288879395
     Saved: ~
 Window Geometry:
   Displays:

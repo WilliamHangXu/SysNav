@@ -1,3 +1,8 @@
+> **SUPERSEDED (2026-08-25).** Historical record of the `deepclean` reduction. The
+> active worklist for this branch is [`RSB_TEST_PLAN.md`](RSB_TEST_PLAN.md);
+> Phase 1 removed the NavGraph, scene-graph exporter, quadrant manager, docker
+> and ros1_bridge described below.
+
 # EXTRACTION_AUDIT — scene-graph-only pipeline
 
 > **What this is.** The dependency audit for extracting a **self-contained

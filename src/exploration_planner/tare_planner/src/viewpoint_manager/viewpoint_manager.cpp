@@ -557,7 +557,7 @@ void ViewPointManager::CheckViewPointRoomBoundaryCollision()
     // SetCurrentRoomId() flags enter_wrong_room_ but keeps current_room_id_ pinned to the OLD
     // room. Without this term every nearby viewpoint (now in the new room) fails the room gate,
     // so GetViewPointCandidate() returns 0, execute() bails at "Cannot get candidate viewpoints"
-    // and the keypose graph / navgraph / room labels / exporter -- i.e. the scene graph -- freeze
+    // and the keypose graph / room labels -- i.e. the scene graph -- freeze
     // until the VLM reconciles the room (~50 s). Accepting viewpoints while enter_wrong_room_ is
     // set keeps the planner producing candidates so the scene-graph pipeline never stalls. This
     // mirrors the existing (ViewPointConnected(i) || enter_wrong_room_) relaxation in

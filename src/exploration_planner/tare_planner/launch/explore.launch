@@ -7,11 +7,9 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node, SetParameter
 
 
-def launch_tare_node(context, scenario, sg_export_config, robot_config):
+def launch_tare_node(context, scenario, robot_config):
     scenario_str = str(scenario.perform(context))
-    sg_export_str = str(sg_export_config.perform(context))
-    params = [get_package_share_directory('tare_planner')+'/' + scenario_str + '.yaml',
-              get_package_share_directory('tare_planner')+'/' + sg_export_str + '.yaml']
+    params = [get_package_share_directory('tare_planner')+'/' + scenario_str + '.yaml']
     # Optional per-robot config (robot.yaml) providing robot_namespace; prepended
     # so the scenario yaml could still override. Empty => not loaded (generic use,
     # so non-go2w scenarios are unaffected).
@@ -46,13 +44,6 @@ def generate_launch_description():
         default_value='outdoor',
         description='description for scenario argument')
 
-    sg_export_config = LaunchConfiguration('sg_export_config')
-
-    declare_sg_export_config = DeclareLaunchArgument(
-        'sg_export_config',
-        default_value='scene_graph_export',
-        description='scene-graph export config yaml (without .yaml), merged after the scenario yaml')
-
     robot_config = LaunchConfiguration('robot_config')
 
     declare_robot_config = DeclareLaunchArgument(
@@ -63,8 +54,7 @@ def generate_launch_description():
     return LaunchDescription([
         declare_use_sim_time_cmd,
         declare_scenario,
-        declare_sg_export_config,
         declare_robot_config,
         SetParameter(name='use_sim_time', value=use_sim_time),
-        OpaqueFunction(function=launch_tare_node, args=[scenario, sg_export_config, robot_config])
+        OpaqueFunction(function=launch_tare_node, args=[scenario, robot_config])
     ])

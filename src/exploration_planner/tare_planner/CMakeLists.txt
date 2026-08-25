@@ -68,7 +68,6 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/DetectionResult.msg"
   "msg/ObjectType.msg"
   "msg/TargetObjectInstruction.msg"
-  "msg/WallAxis.msg"
  DEPENDENCIES std_msgs geometry_msgs sensor_msgs
 )
 
@@ -108,10 +107,6 @@ add_library(keypose_graph STATIC src/keypose_graph/keypose_graph.cpp)
 ament_target_dependencies(keypose_graph rclcpp std_msgs nav_msgs geometry_msgs sensor_msgs tf2_ros tf2_geometry_msgs tf2)
 target_link_libraries(keypose_graph ${catkin_LIBRARIES} ${PCL_LIBRARIES} viewpoint_manager)
 
-add_library(navgraph STATIC src/navgraph/navgraph.cpp)
-ament_target_dependencies(navgraph rclcpp std_msgs nav_msgs geometry_msgs sensor_msgs visualization_msgs pcl_ros pcl_conversions OpenCV)
-target_link_libraries(navgraph ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBRARIES} keypose_graph misc_utils)
-
 add_library(rolling_occupancy_grid src/rolling_occupancy_grid/rolling_occupancy_grid.cpp)
 ament_target_dependencies(rolling_occupancy_grid rclcpp std_msgs nav_msgs geometry_msgs sensor_msgs tf2_ros tf2_geometry_msgs tf2 pcl_ros pcl_conversions visualization_msgs)
 target_link_libraries(rolling_occupancy_grid ${catkin_LIBRARIES} misc_utils rolling_grid)
@@ -128,27 +123,11 @@ rosidl_target_interfaces(representation
   ${PROJECT_NAME}
   "rosidl_typesupport_cpp")
 
-add_library(scene_graph_exporter src/scene_graph_exporter/scene_graph_exporter.cpp)
-ament_target_dependencies(scene_graph_exporter rclcpp std_msgs nav_msgs geometry_msgs sensor_msgs tf2_ros tf2_geometry_msgs tf2 pcl_conversions visualization_msgs OpenCV cv_bridge)
-target_link_libraries(scene_graph_exporter ${catkin_LIBRARIES} ${OpenCV_LIBRARIES} representation nlohmann_json::nlohmann_json)
-
-rosidl_target_interfaces(scene_graph_exporter
-  ${PROJECT_NAME}
-  "rosidl_typesupport_cpp")
-
-add_library(quadrant_manager src/quadrant_manager/quadrant_manager.cpp)
-ament_target_dependencies(quadrant_manager rclcpp std_msgs nav_msgs geometry_msgs sensor_msgs tf2_ros tf2_geometry_msgs tf2 pcl_conversions visualization_msgs OpenCV cv_bridge)
-target_link_libraries(quadrant_manager ${catkin_LIBRARIES} ${OpenCV_LIBRARIES} representation misc_utils)
-
-rosidl_target_interfaces(quadrant_manager
-  ${PROJECT_NAME}
-  "rosidl_typesupport_cpp")
-
 add_library(sensor_coverage_planner_ground src/sensor_coverage_planner/sensor_coverage_planner_ground.cpp)
 ament_target_dependencies(sensor_coverage_planner_ground rclcpp std_msgs nav_msgs geometry_msgs sensor_msgs tf2_ros tf2_geometry_msgs tf2 OpenCV visualization_msgs cv_bridge)
 # planning_env must come after the static archives (keypose_graph, grid_world, ...)
 # that reference its symbols, or --as-needed drops the DSO before they resolve.
-target_link_libraries(sensor_coverage_planner_ground ${catkin_LIBRARIES} ${OpenCV_LIBRARIES} keypose_graph navgraph viewpoint_manager pointcloud_manager grid_world planning_env misc_utils representation scene_graph_exporter quadrant_manager misc_utils nlohmann_json::nlohmann_json)
+target_link_libraries(sensor_coverage_planner_ground ${catkin_LIBRARIES} ${OpenCV_LIBRARIES} keypose_graph viewpoint_manager pointcloud_manager grid_world planning_env misc_utils representation misc_utils nlohmann_json::nlohmann_json)
 
 rosidl_target_interfaces(sensor_coverage_planner_ground
   ${PROJECT_NAME}

@@ -8,13 +8,12 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
-# One bringup launch for the whole scene-graph pipeline. Scenario / export / vlm
+# One bringup launch for the whole scene-graph pipeline. Scenario / vlm
 # config selection is baked in here so the tmux runner carries only per-run knobs
 # (which bag, start offset, playback duration). Starts:
 #   <ns>/odom->map static tf, detection_node, semantic_mapping_node,
-#   room_segmentation, vlm_node, planner (+ scene-graph exporter), and RViz.
+#   room_segmentation, vlm_node, planner, and RViz.
 SCENARIO = 'go2w_bag_direct'
-SG_EXPORT_CONFIG = 'scene_graph_export'
 VLM_CONFIG = 'vlm_config'
 
 
@@ -72,10 +71,9 @@ def generate_launch_description():
         DeclareLaunchArgument('rviz', default_value='true',
                               description='Launch RViz alongside the pipeline'),
         # Object mapping toggle. false (default) drops the object branch
-        # (detection_node + semantic_mapping_node) and exports scene graphs with
-        # rooms + navgraph only -- the planner just sees no object messages and
-        # exports an empty object list; room segmentation and navgraph are
-        # unaffected. NOTE room labeling still runs but DEGRADES to image-only:
+        # (detection_node + semantic_mapping_node) and builds the scene graph
+        # with rooms only -- the planner just sees no object messages; room
+        # segmentation is unaffected. NOTE room labeling still runs but DEGRADES to image-only:
         # the /room_type_query object inventory (the VLM's primary signal) goes
         # empty, so rooms are typed from the best-3 images alone. Set
         # objects:=true to restore the full objects-first pipeline.
@@ -138,7 +136,7 @@ def generate_launch_description():
         include(os.path.join(vlm_share, 'vlm_node.launch'),
                 {'config': VLM_CONFIG}),
         include(os.path.join(tare_share, 'explore.launch'),
-                {'scenario': SCENARIO, 'sg_export_config': SG_EXPORT_CONFIG,
+                {'scenario': SCENARIO,
                  'robot_config': robot_yaml}),
 
         Node(package='rviz2', executable='rviz2', name='rviz2',

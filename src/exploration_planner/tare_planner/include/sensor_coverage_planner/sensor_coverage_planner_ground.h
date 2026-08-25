@@ -53,14 +53,11 @@
 // Components
 #include "grid_world/grid_world.h"
 #include "keypose_graph/keypose_graph.h"
-#include "navgraph/navgraph.h"
-#include "quadrant_manager/quadrant_manager.h"
 #include "planning_env/planning_env.h"
 #include "rolling_occupancy_grid/rolling_occupancy_grid.h"
 #include "viewpoint_manager/viewpoint_manager.h"
 
 #include "representation/representation.h"
-#include "scene_graph_exporter/scene_graph_exporter.h"
 #include "grid/grid.h"
 #include "tare_planner/msg/object_node.hpp"
 #include "tare_planner/msg/object_node_list.hpp"
@@ -126,8 +123,6 @@ private:
   Eigen::Vector3d initial_position_;
 
   std::shared_ptr<keypose_graph_ns::KeyposeGraph> keypose_graph_;
-  std::shared_ptr<navgraph_ns::NavGraph> navgraph_;
-  std::shared_ptr<quadrant_ns::QuadrantManager> quadrant_mgr_;
   std::shared_ptr<planning_env_ns::PlanningEnv> planning_env_;
   std::shared_ptr<viewpoint_manager_ns::ViewPointManager> viewpoint_manager_;
   std::shared_ptr<grid_world_ns::GridWorld> grid_world_;
@@ -180,7 +175,7 @@ private:
                           int &uncovered_frontier_point_num);
   void UpdateVisitedPositions();
   void UpdateGlobalRepresentation();
-  // Connector-node injection into the keypose graph (feeds the NavGraph):
+  // Connector-node injection into the keypose graph:
   // UpdateCellStatus -> UpdateCellKeyposeGraphNodes -> AddPathsInBetweenCells.
   void GlobalPlanning();
 
@@ -267,20 +262,13 @@ private:
   void UpdateViewpointObjectVisibility();
   void ProcessObjectNodes();
   
-  // GADM-style scene-graph snapshot export
-  void SaveSceneGraphSnapshot(const std::string &reason);
-  void SceneGraphWatchdogCallback();
-  bool TryFreezeWorldFromOdom();  // look up & latch world_T_odom once
-
   // ========== VLM-Related Data Members ==========
   // Representation core
   std::shared_ptr<representation_ns::Representation> representation_;
 
-  // Scene-graph JSON export
-  scene_graph_exporter_ns::SceneGraphExportConfig scene_graph_cfg_;
-  std::unique_ptr<scene_graph_exporter_ns::SceneGraphExporter> scene_graph_exporter_;
-  std::string scene_graph_run_dir_;
-  int scene_graph_snapshot_count_;
+  // Per-run output folder (<output_root>/run_<stamp>) for room-view images / logs
+  std::string output_root_;
+  std::string run_dir_;
 
   // Room-type query debug log (off by default; param room_type_query_log.enabled)
   bool room_type_query_log_enabled_;
@@ -302,19 +290,6 @@ private:
   float room_view_motion_yaw_thresh_rad_;// intake gate: min turn since last eval
   bool room_view_have_last_pose_;       // has a previous eval pose been recorded
   float room_view_last_x_, room_view_last_y_, room_view_last_yaw_;
-  bool scene_graph_final_saved_;
-  bool scene_graph_clock_started_;  // sim clock has advanced at least once (bag playing)
-  rclcpp::Time scene_graph_last_sim_time_;
-  rclcpp::TimerBase::SharedPtr scene_graph_save_timer_;
-  rclcpp::TimerBase::SharedPtr scene_graph_watchdog_timer_;
-  // world_T_map for snapshots: composed once via the shared LiDAR across the
-  // bag's `world` tree and arise's `map` tree, then frozen. Buffer/listener only
-  // created when scene_graph_export.world_transform.enabled.
-  std::shared_ptr<tf2_ros::Buffer> scene_graph_tf_buffer_;
-  std::shared_ptr<tf2_ros::TransformListener> scene_graph_tf_listener_;
-  Eigen::Isometry3d scene_graph_world_from_map_ = Eigen::Isometry3d::Identity();
-  bool scene_graph_world_from_map_valid_ = false;
-  rclcpp::TimerBase::SharedPtr scene_graph_world_tf_timer_;
 
   // --- Camera calibration for room-view coverage (PointToCameraView) ---
   // Mirror of semantic_mapping's topic-driven calibration: intrinsics from the
