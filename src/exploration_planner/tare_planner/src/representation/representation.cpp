@@ -85,7 +85,6 @@ namespace representation_ns {
         show_id_ = msg.show_id; // Update the show ID from the message
         polygon_ = msg.polygon;
         centroid_ = Eigen::Vector3f(msg.centroid.x, msg.centroid.y, msg.centroid.z);
-        interior_point_ = msg.interior_point;
         neighbors_.clear();
         for (const auto &neighbor : msg.neighbors)
         {

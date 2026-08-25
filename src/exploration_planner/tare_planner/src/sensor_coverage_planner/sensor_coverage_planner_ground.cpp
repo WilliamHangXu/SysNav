@@ -37,33 +37,6 @@ namespace sensor_coverage_planner_3d_ns {
 #define ROOM_DBG(...) ((void)0)
 #endif
 
-// Resolve a world anchor against the current room mask and log the full
-// anchor -> voxel -> sampled-id chain (the exact computation the validation and
-// apply paths use to re-derive a room id). Returns the sampled id, or -999 if
-// the voxel falls outside the mask. Pure read-only; mutates nothing.
-static int DbgSampleMask(const rclcpp::Logger &logger, const char *tag,
-                         int expect_id, const geometry_msgs::msg::Point &anchor,
-                         const cv::Mat &room_mask, const Eigen::Vector3f &shift,
-                         float inv_res)
-{
-  Eigen::Vector3f a(anchor.x, anchor.y, anchor.z);
-  Eigen::Vector3i v = misc_utils_ns::point_to_voxel(a, shift, inv_res);
-  bool inb = (v.x() >= 0 && v.x() < room_mask.rows && v.y() >= 0 &&
-              v.y() < room_mask.cols);
-  int sampled = inb ? room_mask.at<int>(v.x(), v.y()) : -999;
-#if ROOM_DBG_ENABLED
-  RCLCPP_INFO(logger,
-              "[room_dbg] %s expect_id=%d anchor=(%.2f,%.2f,%.2f) voxel=(%d,%d) "
-              "mask=%dx%d inb=%d sampled_id=%d %s",
-              tag, expect_id, anchor.x, anchor.y, anchor.z, v.x(), v.y(),
-              room_mask.rows, room_mask.cols, inb ? 1 : 0, sampled,
-              sampled == expect_id ? "MATCH" : "MISMATCH");
-#else
-  (void)logger;
-  (void)tag;
-#endif
-  return sampled;
-}
 // ===========================================================================
 
 void SensorCoveragePlanner3D::ReadParameters() {
@@ -180,9 +153,6 @@ void SensorCoveragePlanner3D::ReadParameters() {
   this->declare_parameter<std::string>("topic_suffix.odometry", "lio/odometry");
   this->declare_parameter<std::string>("topic_suffix.camera_image",
                                        "camera/image_raw");
-  this->declare_parameter<std::string>("topic_suffix.camera_info",
-                                       "camera_rect/camera_info");
-  this->declare_parameter<std::string>("base_frame_suffix", "base");
   {
     const std::string robot_ns =
         this->get_parameter("robot_namespace").as_string();
@@ -196,20 +166,13 @@ void SensorCoveragePlanner3D::ReadParameters() {
       sub_camera_image_topic_ =
           "/" + robot_ns + "/" +
           this->get_parameter("topic_suffix.camera_image").as_string();
-      camera_info_topic_ =
-          "/" + robot_ns + "/" +
-          this->get_parameter("topic_suffix.camera_info").as_string();
-      base_frame_ =
-          robot_ns + "/" + this->get_parameter("base_frame_suffix").as_string();
-      uses_topic_calib_ = true;
       RCLCPP_INFO(this->get_logger(),
                   "[robot_namespace=%s] registered_scan=%s "
-                  "state_estimation=%s camera=%s camera_info=%s base_frame=%s",
+                  "state_estimation=%s camera=%s",
                   robot_ns.c_str(),
                   sub_registered_scan_topic_.c_str(),
                   sub_state_estimation_topic_.c_str(),
-                  sub_camera_image_topic_.c_str(), camera_info_topic_.c_str(),
-                  base_frame_.c_str());
+                  sub_camera_image_topic_.c_str());
     }
   }
   this->get_parameter("kKeyposeCloudDwzFilterLeafSize",
@@ -226,48 +189,6 @@ void SensorCoveragePlanner3D::ReadParameters() {
   room_voxel_dimension_.y() = this->get_parameter("room_y").as_int();
   room_voxel_dimension_.z() = this->get_parameter("room_z").as_int();
 
-  // Room-type query debug log: dump every /room_type_query payload to disk.
-  this->declare_parameter<bool>("room_type_query_log.enabled", false);
-  this->get_parameter("room_type_query_log.enabled", room_type_query_log_enabled_);
-  room_type_query_log_seq_ = 0;
-  room_type_answer_log_seq_ = 0;
-
-  // Per-room best-3 view buffer (stage one). All have defaults so no yaml needed.
-  // (Camera FOV is no longer a param: it comes from the pinhole intrinsics baked
-  // into PointToCameraView, so coverage uses the camera's true frame extent.)
-  this->declare_parameter<double>("room_view.max_range_m", 8.0);
-  this->declare_parameter<double>("room_view.pose_dist_m", 1.5);
-  this->declare_parameter<double>("room_view.pose_yaw_deg", 40.0);
-  this->declare_parameter<double>("room_view.motion_dist_m", 0.2);
-  this->declare_parameter<double>("room_view.motion_yaw_deg", 5.0);
-  this->declare_parameter<double>("room_view.min_coverage_m2", 1.0);
-  this->declare_parameter<double>("room_view.max_yaw_rate_deg_s", 30.0);
-  this->declare_parameter<double>("room_view.yaw_rate_window_s", 0.06);
-  this->declare_parameter<double>("room_view.object_conf_min", 0.3);
-  this->declare_parameter<double>("room_type_query.min_interval_s", 3.0);
-  room_view_max_range_ = this->get_parameter("room_view.max_range_m").as_double();
-  room_view_pose_dist_thresh_ = this->get_parameter("room_view.pose_dist_m").as_double();
-  room_view_yaw_thresh_rad_ =
-      this->get_parameter("room_view.pose_yaw_deg").as_double() * M_PI / 180.0;
-  room_view_motion_dist_thresh_ = this->get_parameter("room_view.motion_dist_m").as_double();
-  room_view_motion_yaw_thresh_rad_ =
-      this->get_parameter("room_view.motion_yaw_deg").as_double() * M_PI / 180.0;
-  room_view_min_coverage_m2_ = this->get_parameter("room_view.min_coverage_m2").as_double();
-  room_view_max_yaw_rate_ =
-      this->get_parameter("room_view.max_yaw_rate_deg_s").as_double() * M_PI / 180.0;
-  room_view_yaw_rate_window_s_ =
-      this->get_parameter("room_view.yaw_rate_window_s").as_double();
-  room_view_object_conf_min_ = this->get_parameter("room_view.object_conf_min").as_double();
-  room_type_query_min_interval_s_ =
-      this->get_parameter("room_type_query.min_interval_s").as_double();
-  room_view_have_last_pose_ = false;
-  room_view_last_x_ = 0.0f;
-  room_view_last_y_ = 0.0f;
-  room_view_last_yaw_ = 0.0f;
-
-  // Per-run output root for room-view images / query logs.
-  this->declare_parameter<std::string>("output_root", "output/scene_graph");
-  this->get_parameter("output_root", output_root_);
 }
 
 // void PlannerData::Initialize(rclcpp::Node::SharedPtr node_)
@@ -441,76 +362,6 @@ bool SensorCoveragePlanner3D::initialize() {
   execution_timer_ = this->create_wall_timer(
       1000ms, std::bind(&SensorCoveragePlanner3D::execute, this));
 
-  // ---- Per-run output folder ----
-  // <output_root>/run_<wallclock>/ holds the room-view images the room-type
-  // queries reference by path, plus the optional query/answer JSON logs.
-  {
-    std::time_t now_time = std::time(nullptr);
-    char run_stamp[32];
-    std::strftime(run_stamp, sizeof(run_stamp), "%Y-%m-%d_%H-%M-%S",
-                  std::localtime(&now_time));
-    std::filesystem::path run_dir =
-        std::filesystem::path(output_root_) / (std::string("run_") + run_stamp);
-    std::error_code ec;
-    std::filesystem::create_directories(run_dir, ec);
-    if (ec)
-    {
-      RCLCPP_ERROR(this->get_logger(), "[run_dir] failed to create %s: %s",
-                   run_dir.c_str(), ec.message().c_str());
-    }
-    else
-    {
-      run_dir_ = run_dir.string();
-      RCLCPP_INFO(this->get_logger(), "[run_dir] outputs -> %s", run_dir_.c_str());
-    }
-  }
-
-  // ---- Room-labeling storage setup ----
-  // The view buffer is always on; it needs a folder to persist the best-3
-  // images, which the queries then reference by path. Query/answer JSON logs
-  // are optional (room_type_query_log.enabled). Both land in the per-run
-  // folder when it exists, else under the configured output root.
-  {
-    std::filesystem::path base =
-        !run_dir_.empty() ? std::filesystem::path(run_dir_)
-                          : std::filesystem::path(output_root_);
-    std::error_code ec;
-
-    std::filesystem::path views_dir = base / "room_views";
-    std::filesystem::create_directories(views_dir, ec);
-    if (ec)
-    {
-      RCLCPP_ERROR(this->get_logger(), "[room_views] failed to create %s: %s",
-                   views_dir.c_str(), ec.message().c_str());
-    }
-    else
-    {
-      room_views_dir_ = views_dir.string();
-      RCLCPP_INFO(this->get_logger(), "[room_views] best-3 views -> %s",
-                  room_views_dir_.c_str());
-    }
-
-    if (room_type_query_log_enabled_)
-    {
-      std::filesystem::path log_dir = base / "room_type_queries";
-      std::filesystem::create_directories(log_dir, ec);
-      if (ec)
-      {
-        RCLCPP_ERROR(this->get_logger(),
-                     "[room_type_log] failed to create %s: %s — logging disabled",
-                     log_dir.c_str(), ec.message().c_str());
-        room_type_query_log_enabled_ = false;
-      }
-      else
-      {
-        room_type_query_log_dir_ = log_dir.string();
-        RCLCPP_INFO(this->get_logger(),
-                    "[room_type_log] room-type query payloads -> %s",
-                    room_type_query_log_dir_.c_str());
-      }
-    }
-  }
-
   registered_scan_sub_ =
       this->create_subscription<sensor_msgs::msg::PointCloud2>(
           sub_registered_scan_topic_, 5,
@@ -540,20 +391,10 @@ bool SensorCoveragePlanner3D::initialize() {
       sub_camera_image_topic_, 5,
       std::bind(&SensorCoveragePlanner3D::CameraImageCallback, this,
                 std::placeholders::_1));
-  // Topic-driven camera calibration for room-view coverage (rectified
-  // camera_info P + base->camera-optical extrinsic from tf). Only when a robot
-  // namespace is configured; otherwise PointToCameraView uses the legacy model.
-  if (uses_topic_calib_) {
-    camera_tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
-    camera_tf_listener_ =
-        std::make_shared<tf2_ros::TransformListener>(*camera_tf_buffer_);
-    camera_info_sub_ = this->create_subscription<sensor_msgs::msg::CameraInfo>(
-        camera_info_topic_, 5,
-        std::bind(&SensorCoveragePlanner3D::CameraInfoCallback, this,
-                  std::placeholders::_1));
-  }
   RCLCPP_INFO(this->get_logger(), "Room-type query crops use camera topic: %s",
               sub_camera_image_topic_.c_str());
+  room_cloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(
+      "/room_cloud", 1);
   room_type_sub_ = this->create_subscription<tare_planner::msg::RoomType>(
       "/room_type_answer", 10,
       std::bind(&SensorCoveragePlanner3D::RoomTypeCallback, this,
@@ -637,8 +478,6 @@ void SensorCoveragePlanner3D::CameraImageCallback(
   // 转换成 OpenCV 格式
   camera_image_ = cv_bridge::toCvCopy(camera_image_msg, "bgr8")->image;
   imageTime = rclcpp::Time(camera_image_msg->header.stamp).seconds();
-
-  UpdateRoomViews();
 }
 
 void SensorCoveragePlanner3D::RegisteredScanCallback(
@@ -843,19 +682,14 @@ void SensorCoveragePlanner3D::RoomNodeListCallback(
       representation_->GetRoomNode(room_node_msg.id).UpdateRoomNode(room_node_msg);
     }
   }
-  // Salvage the best-3 images of rooms about to be erased, then re-home them by
-  // position so a merge keeps both rooms' views (3-of-6); a true delete drops them.
-  std::vector<representation_ns::RoomView> orphan_views;
   for (auto it = representation_->GetRoomNodesMapMutable().begin(); it != representation_->GetRoomNodesMapMutable().end();)
   {
     if (!it->second.IsAlive())
     {
-      auto &dead_views = it->second.GetBestViewsMutable();
-      ROOM_DBG("[room_dbg] DEATH id=%d labeled=%d label='%s' views=%zu objects=%zu",
+      ROOM_DBG("[room_dbg] DEATH id=%d labeled=%d label='%s' objects=%zu",
                it->first, it->second.IsLabeled() ? 1 : 0,
-               it->second.GetRoomLabel().c_str(), dead_views.size(),
+               it->second.GetRoomLabel().c_str(),
                it->second.GetObjectIndices().size());
-      orphan_views.insert(orphan_views.end(), dead_views.begin(), dead_views.end());
       it = representation_->GetRoomNodesMapMutable().erase(it);
     }
     else
@@ -863,43 +697,33 @@ void SensorCoveragePlanner3D::RoomNodeListCallback(
       ++it;
     }
   }
-  if (!room_mask_.empty())
+  // sysnav anchor validation (ported from rsb): a labeled room whose anchor
+  // point no longer samples its own id in room_mask_ has been re-segmented;
+  // clear its labels so it is re-queried from scratch.
+  for (auto &id_to_room_node : representation_->GetRoomNodesMapMutable())
   {
-    for (const auto &v : orphan_views)
+    int room_id = id_to_room_node.first;
+    auto &room_node = id_to_room_node.second;
+    if (!room_node.IsLabeled())
     {
-      Eigen::Vector3f a(v.anchor_xy.x(), v.anchor_xy.y(), robot_position_.z);
-      Eigen::Vector3i av = misc_utils_ns::point_to_voxel(a, shift_, 1.0 / room_resolution_);
-      if (av.x() < 0 || av.x() >= room_mask_.rows || av.y() < 0 || av.y() >= room_mask_.cols)
-      {
-        continue;
-      }
-      int id = room_mask_.at<int>(av.x(), av.y());
-      if (id <= 0 || !representation_->HasRoomNode(id))
-      {
-        ROOM_DBG("[room_dbg] VIEW_ORPHAN_DROP anchor=(%.2f,%.2f) sampled_id=%d path=%s",
-                 v.anchor_xy.x(), v.anchor_xy.y(), id, v.image_path.c_str());
-        continue;  // the region became background -> drop the view
-      }
-      ROOM_DBG("[room_dbg] VIEW_REHOME to_id=%d anchor=(%.2f,%.2f) path=%s",
-               id, v.anchor_xy.x(), v.anchor_xy.y(), v.image_path.c_str());
-      auto &views = representation_->GetRoomNode(id).GetBestViewsMutable();
-      views.push_back(v);
-      if (views.size() > 3)  // keep the best 3 by coverage
-      {
-        std::sort(views.begin(), views.end(),
-                  [](const representation_ns::RoomView &x, const representation_ns::RoomView &y)
-                  { return x.coverage_m2 > y.coverage_m2; });
-        views.resize(3);
-      }
-      representation_->GetRoomNode(id).views_dirty_ = true;
+      continue;
+    }
+    Eigen::Vector3f anchor_point(room_node.anchor_point_.x, room_node.anchor_point_.y, room_node.anchor_point_.z);
+    Eigen::Vector3i anchor_point_voxel = misc_utils_ns::point_to_voxel(anchor_point, shift_, 1.0 / room_resolution_);
+    if (anchor_point_voxel.x() < 0 || anchor_point_voxel.x() >= room_mask_.rows ||
+        anchor_point_voxel.y() < 0 || anchor_point_voxel.y() >= room_mask_.cols)
+    {
+      RCLCPP_ERROR(this->get_logger(), "Anchor point of room %d is out of room mask bounds", room_id);
+      room_node.ClearRoomLabels();
+      continue;
+    }
+    int room_id_in_mask = room_mask_.at<int>(anchor_point_voxel.x(), anchor_point_voxel.y());
+    if (room_id_in_mask != room_id)
+    {
+      RCLCPP_ERROR(this->get_logger(), "Anchor point of room %d is not in the room, removing labels", room_id);
+      room_node.ClearRoomLabels();
     }
   }
-  // NOTE: the per-cycle anchor mask-sample STRIP that used to live here was
-  // removed. It re-derived a room's id by sampling room_mask_ at anchor_point_
-  // every cycle and called ClearRoomLabels() on a mismatch; because anchor_point_
-  // was a drifting in-range mean, transient mis-samples wiped valid labels (and
-  // their on-disk views). Label lifecycle now follows room lifecycle: genuine
-  // id churn (split/merge/death) is handled in RoomNodeListCallback.
 }
 
 void SensorCoveragePlanner3D::RoomMaskCallback(
@@ -940,72 +764,46 @@ void SensorCoveragePlanner3D::RoomMaskCallback(
 void SensorCoveragePlanner3D::RoomTypeCallback(
     const tare_planner::msg::RoomType::ConstSharedPtr room_type_msg)
 {
-  // Diagnostic: the VLM echoes the query verbatim, so room_id is the room this
-  // answer was asked about. The DbgSampleMask line keeps the old anchor-resolved
-  // id visible so apply-by-id vs apply-by-anchor stays measurable per run.
-  ROOM_DBG("[room_dbg] ANSWER_RECV msg_room_id=%d type='%s' in_room=%d interior=(%.2f,%.2f,%.2f) msg_id_has_node=%d",
-           room_type_msg->room_id, room_type_msg->room_type.c_str(), room_type_msg->in_room ? 1 : 0,
-           room_type_msg->interior_point.x, room_type_msg->interior_point.y, room_type_msg->interior_point.z,
-           representation_->HasRoomNode(room_type_msg->room_id) ? 1 : 0);
-  DbgSampleMask(this->get_logger(), "ANSWER", room_type_msg->room_id,
-                room_type_msg->interior_point, room_mask_, shift_, 1.0 / room_resolution_);
-
-  // Fix #1: apply the type to the room the query was actually issued for.
-  // room_id is the stable handle (monotonic, never reused: a dead room is erased
-  // and re-created fresh). The legacy path re-derived the id by sampling
-  // room_mask_ at the anchor, but that raster flickers per re-segmentation cycle
-  // (a valid room cell reads 0 on some cycles), which dropped correct answers.
-  int room_id = room_type_msg->room_id;
+  // sysnav answer apply (ported from rsb): re-resolve the room by sampling the
+  // mask at the query's anchor point, then accumulate a coverage-weighted vote.
+  Eigen::Vector3f anchor_point(
+      room_type_msg->anchor_point.x, room_type_msg->anchor_point.y,
+      room_type_msg->anchor_point.z);
+  Eigen::Vector3i anchor_point_voxel = misc_utils_ns::point_to_voxel(
+      anchor_point, shift_, 1.0 / room_resolution_);
+  if (anchor_point_voxel.x() < 0 || anchor_point_voxel.x() >= room_mask_.rows ||
+      anchor_point_voxel.y() < 0 || anchor_point_voxel.y() >= room_mask_.cols)
+  {
+    RCLCPP_ERROR(this->get_logger(), "Anchor point is out of room mask bounds");
+    return;
+  }
+  int room_id = room_mask_.at<int>(anchor_point_voxel.x(),
+                                   anchor_point_voxel.y());
   if (!representation_->HasRoomNode(room_id))
   {
-    // Fallback: the queried room is gone by answer time (genuine split/merge/
-    // death). Re-resolve via the interior point snapshot so a merge still lands a
-    // label; only drop if that, too, points at no live room. The interior point
-    // is deep inside the room, so this sample is robust to mask growth/churn.
-    Eigen::Vector3f interior_point(
-        room_type_msg->interior_point.x, room_type_msg->interior_point.y,
-        room_type_msg->interior_point.z);
-    Eigen::Vector3i interior_point_voxel = misc_utils_ns::point_to_voxel(
-        interior_point, shift_, 1.0 / room_resolution_);
-    if (interior_point_voxel.x() < 0 || interior_point_voxel.x() >= room_mask_.rows ||
-        interior_point_voxel.y() < 0 || interior_point_voxel.y() >= room_mask_.cols)
-    {
-      ROOM_DBG("[room_dbg] ANSWER_DROP reason=msgid_gone_interior_oob msg_room_id=%d",
-               room_type_msg->room_id);
-      RCLCPP_ERROR(this->get_logger(), "Interior point is out of room mask bounds");
-      return;
-    }
-    int fallback_id = room_mask_.at<int>(interior_point_voxel.x(),
-                                         interior_point_voxel.y());
-    if (!representation_->HasRoomNode(fallback_id))
-    {
-      ROOM_DBG("[room_dbg] ANSWER_DROP reason=msgid_gone_interior_no_node msg_room_id=%d fallback_id=%d",
-               room_type_msg->room_id, fallback_id);
-      RCLCPP_ERROR(this->get_logger(), "Room id %d is out of bounds", fallback_id);
-      return;
-    }
-    ROOM_DBG("[room_dbg] ANSWER_APPLY_FALLBACK msg_room_id=%d resolved_via_interior=%d type='%s'",
-             room_type_msg->room_id, fallback_id, room_type_msg->room_type.c_str());
-    room_id = fallback_id;
-  }
-  else
-  {
-    ROOM_DBG("[room_dbg] ANSWER_APPLY resolved_id=%d (by msg_room_id) type='%s'",
-             room_id, room_type_msg->room_type.c_str());
+    RCLCPP_ERROR(this->get_logger(), "Room id %d is out of bounds",
+                 room_id);
+    return;
   }
   std::string room_type = room_type_msg->room_type;
   std::string current_room_type_ = representation_->GetRoomNode(room_id).GetRoomLabel();
-  // RCLCPP_INFO(this->get_logger(), "Room id: %d, Room type: %s, Current room type: %s",
-  //             room_id, room_type.c_str(), current_room_type_.c_str());
-  // Latest answer wins: each re-query carries strictly better evidence, so the
-  // newest VLM answer replaces the label rather than accumulating votes.
-  auto &labels = representation_->GetRoomNode(room_id).GetLabelsMutable();
-  labels.clear();
-  labels[room_type] = 1;
+  RCLCPP_INFO(this->get_logger(), "Room id: %d, Room type: %s, Current room type: %s",
+              room_id, room_type.c_str(), current_room_type_.c_str());
+  representation_->GetRoomNode(room_id).GetLabelsMutable()[room_type] += room_type_msg->voxel_num; // accumulate the voxel number for each label
   representation_->GetRoomNode(room_id).SetIsLabeled(true); // mark the room as labeled
   std::string current_room_type_new_ = representation_->GetRoomNode(room_id).GetRoomLabel();
-  LogRoomTypeAnswer(*room_type_msg, room_id, current_room_type_,
-                    current_room_type_new_);
+  ROOM_DBG("[room_dbg] ANSWER_APPLY msg_room_id=%d resolved_id=%d (by anchor) type='%s' label='%s'->'%s'",
+           room_type_msg->room_id, room_id, room_type.c_str(),
+           current_room_type_.c_str(), current_room_type_new_.c_str());
+  if (current_room_type_new_ != current_room_type_)
+  {
+    for (auto object_id : representation_->GetRoomNode(room_id).GetObjectIndices())
+    {
+      if (representation_->HasObjectNode(object_id)) {
+        representation_->GetObjectNodeRep(object_id).SetIsConsidered(false);
+      }
+    }
+  }
 }
 
 void SensorCoveragePlanner3D::KeyboardInputCallback(const std_msgs::msg::String::ConstSharedPtr keyboard_input_msg)
@@ -1831,8 +1629,8 @@ void SensorCoveragePlanner3D::execute() {
 
   if (keypose_cloud_update_) {
     keypose_cloud_update_ = false;
+    UpdateRoomLabel();
     SetCurrentRoomId();
-    PublishRoomTypeQueries();
 
     UpdateObjectVisibility();
 
@@ -1963,558 +1761,6 @@ void SensorCoveragePlanner3D::UpdateViewpointRep(){
   covered_points_all_->Publish();
 }
 
-void SensorCoveragePlanner3D::CameraInfoCallback(
-    const sensor_msgs::msg::CameraInfo::SharedPtr msg)
-{
-  latest_camera_info_ = msg;  // only the (static) intrinsics are used
-}
-
-bool SensorCoveragePlanner3D::TryCalibrateCamera()
-{
-  if (camera_calibrated_) return true;
-  if (!latest_camera_info_ || !camera_tf_buffer_) return false;
-  const std::string optical_frame = latest_camera_info_->header.frame_id;
-  if (optical_frame.empty()) return false;
-  geometry_msgs::msg::TransformStamped tf;
-  try {
-    tf = camera_tf_buffer_->lookupTransform(optical_frame, base_frame_,
-                                            tf2::TimePointZero);
-  } catch (const tf2::TransformException &e) {
-    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-                         "[room_view] waiting for tf %s -> %s: %s",
-                         base_frame_.c_str(), optical_frame.c_str(), e.what());
-    return false;
-  }
-  const auto &q = tf.transform.rotation;
-  const auto &t = tf.transform.translation;
-  tf2::Matrix3x3 m(tf2::Quaternion(q.x, q.y, q.z, q.w));
-  for (int r = 0; r < 3; ++r)
-    for (int c = 0; c < 3; ++c)
-      cam_R_l2c_(r, c) = static_cast<float>(m[r][c]);
-  cam_t_l2c_ = Eigen::Vector3f(static_cast<float>(t.x), static_cast<float>(t.y),
-                               static_cast<float>(t.z));
-  const auto &P = latest_camera_info_->p;  // 3x4 row-major projection matrix
-  cam_fx_ = static_cast<float>(P[0]);
-  cam_fy_ = static_cast<float>(P[5]);
-  cam_cx_ = static_cast<float>(P[2]);
-  cam_cy_ = static_cast<float>(P[6]);
-  cam_img_w_ = static_cast<int>(latest_camera_info_->width);
-  cam_img_h_ = static_cast<int>(latest_camera_info_->height);
-  camera_calibrated_ = true;
-  RCLCPP_INFO(this->get_logger(),
-              "[room_view] calibration from topics: optical=%s base=%s fx=%.2f "
-              "fy=%.2f cx=%.2f cy=%.2f %dx%d",
-              optical_frame.c_str(), base_frame_.c_str(), cam_fx_, cam_fy_,
-              cam_cx_, cam_cy_, cam_img_w_, cam_img_h_);
-  return true;
-}
-
-bool SensorCoveragePlanner3D::PointToCameraView(
-    const Eigen::Vector3f &p_world, float lidarX, float lidarY, float lidarZ,
-    float lidarRoll, float lidarPitch, float lidarYaw, float &depth_out) const
-{
-  // Select calibration: topic-driven (rectified camera_info P + base->camera
-  // extrinsic from tf, no distortion) once latched; else the legacy hardcoded
-  // raw model, used only when no robot_namespace / not yet calibrated.
-  float R00, R01, R02, R10, R11, R12, R20, R21, R22, t0, t1, t2;
-  float fx, fy, cx, cy;
-  int imgW, imgH;
-  bool apply_dist;
-  float k1 = 0.f, k2 = 0.f, p1 = 0.f, p2 = 0.f, k3 = 0.f;
-  if (camera_calibrated_) {
-    R00 = cam_R_l2c_(0, 0); R01 = cam_R_l2c_(0, 1); R02 = cam_R_l2c_(0, 2);
-    R10 = cam_R_l2c_(1, 0); R11 = cam_R_l2c_(1, 1); R12 = cam_R_l2c_(1, 2);
-    R20 = cam_R_l2c_(2, 0); R21 = cam_R_l2c_(2, 1); R22 = cam_R_l2c_(2, 2);
-    t0 = cam_t_l2c_(0); t1 = cam_t_l2c_(1); t2 = cam_t_l2c_(2);
-    fx = cam_fx_; fy = cam_fy_; cx = cam_cx_; cy = cam_cy_;
-    imgW = cam_img_w_; imgH = cam_img_h_;
-    apply_dist = false;  // rectified image: no distortion
-  } else {
-    // Legacy hardcoded go2w raw model; no-namespace / pre-calibration fallback.
-    R00 = 0.000800f; R01 = -1.000000f; R02 = 0.000000f;
-    R10 = 0.000800f; R11 = 0.000000f; R12 = -1.000000f;
-    R20 = 0.999999f; R21 = 0.000800f; R22 = 0.000800f;
-    t0 = -0.000262f; t1 = 0.042738f; t2 = -0.327134f;
-    fx = 806.0578f; fy = 805.5558f; cx = 632.4743f; cy = 346.8795f;
-    imgW = 1280; imgH = 720;
-    apply_dist = true;
-    k1 = -0.3899f; k2 = 0.17881f; p1 = 0.0002f; p2 = -0.00068f; k3 = -0.04416f;
-  }
-
-  // World -> body (the robot's base frame): undo the state-estimation pose.
-  float x1 = p_world.x() - lidarX;
-  float y1 = p_world.y() - lidarY;
-  float z1 = p_world.z() - lidarZ;
-  float x2 = x1 * cos(lidarYaw) + y1 * sin(lidarYaw);
-  float y2 = -x1 * sin(lidarYaw) + y1 * cos(lidarYaw);
-  float z2 = z1;
-  float x3 = x2 * cos(lidarPitch) - z2 * sin(lidarPitch);
-  float y3 = y2;
-  float z3 = x2 * sin(lidarPitch) + z2 * cos(lidarPitch);
-  float xb = x3;
-  float yb = y3 * cos(lidarRoll) + z3 * sin(lidarRoll);
-  float zb = -y3 * sin(lidarRoll) + z3 * cos(lidarRoll);
-
-  // Body -> camera-optical.
-  float xc = R00 * xb + R01 * yb + R02 * zb + t0;
-  float yc = R10 * xb + R11 * yb + R12 * zb + t1;
-  float zc = R20 * xb + R21 * yb + R22 * zb + t2;
-  if (zc <= 1e-3f) return false;  // behind the camera
-
-  float xn = xc / zc;
-  float yn = yc / zc;
-  float x_d, y_d;
-  if (apply_dist) {
-    float r2 = xn * xn + yn * yn;
-    float radial = 1.0f + k1 * r2 + k2 * r2 * r2 + k3 * r2 * r2 * r2;
-    x_d = xn * radial + 2.0f * p1 * xn * yn + p2 * (r2 + 2.0f * xn * xn);
-    y_d = yn * radial + p1 * (r2 + 2.0f * yn * yn) + 2.0f * p2 * xn * yn;
-  } else {
-    x_d = xn;
-    y_d = yn;
-  }
-  float u = fx * x_d + cx;
-  float v = fy * y_d + cy;
-  if (u < 0.0f || u >= imgW || v < 0.0f || v >= imgH) return false;  // out of frame
-  depth_out = zc;  // forward distance along the optical axis
-  return true;
-}
-
-void SensorCoveragePlanner3D::UpdateRoomViews()
-{
-  if (room_views_dir_.empty())  // always on; only needs a place to store images
-  {
-    return;
-  }
-  if (camera_image_.empty() || room_mask_.empty() || !registered_cloud_ ||
-      registered_cloud_->cloud_->empty())
-  {
-    return;
-  }
-
-  // Gate until topic-driven camera calibration (camera_info + tf) is ready, so
-  // PointToCameraView never runs with a mismatched (raw vs rect) model.
-  if (uses_topic_calib_ && !TryCalibrateCamera())
-  {
-    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-                         "[room_view] waiting for camera_info + tf calibration...");
-    return;
-  }
-
-  // Pose at the time the frame was captured.
-  float lidarX, lidarY, lidarZ, lidarRoll, lidarPitch, lidarYaw;
-  GetPoseAtTime(imageTime, lidarX, lidarY, lidarZ, lidarRoll, lidarPitch,
-                lidarYaw);
-
-  // Yaw-rate gate: drop frames captured while turning fast (motion blur).
-  // The rate is measured at the *capture* instant (imageTime), centered over a
-  // fixed window, so it matches the pose/cloud the rest of this function uses.
-  // (The old version sampled the two newest odom entries, i.e. the rate "now" —
-  // wrong when the image stream lags, and noisy over a single odom step.)
-  if (odomLastIDPointer >= 0)
-  {
-    double h = room_view_yaw_rate_window_s_;
-    double tA = imageTime - h;
-    double tB = imageTime + h;
-    // Don't extrapolate past the newest odom sample (e.g. a very fresh frame);
-    // clamp the upper bound and divide by the actual span that remains.
-    double tNewest = odomTimeStack[odomLastIDPointer];
-    if (tB > tNewest) tB = tNewest;
-    double span = tB - tA;
-    if (span > 1e-6)
-    {
-      double dyaw = GetYawAtTime(tB) - GetYawAtTime(tA);
-      while (dyaw > M_PI) dyaw -= 2 * M_PI;
-      while (dyaw < -M_PI) dyaw += 2 * M_PI;
-      if (std::fabs(dyaw / span) > room_view_max_yaw_rate_)
-      {
-        return;
-      }
-    }
-  }
-
-  // Intake gate: skip frames taken too close to the last evaluated pose.
-  if (room_view_have_last_pose_)
-  {
-    float d = std::hypot(lidarX - room_view_last_x_, lidarY - room_view_last_y_);
-    float dyaw = lidarYaw - room_view_last_yaw_;
-    while (dyaw > M_PI) dyaw -= 2 * M_PI;
-    while (dyaw < -M_PI) dyaw += 2 * M_PI;
-    if (d < room_view_motion_dist_thresh_ &&
-        std::fabs(dyaw) < room_view_motion_yaw_thresh_rad_)
-    {
-      return;
-    }
-  }
-  room_view_last_x_ = lidarX;
-  room_view_last_y_ = lidarY;
-  room_view_last_yaw_ = lidarYaw;
-  room_view_have_last_pose_ = true;
-
-  // Coverage = room-floor cells actually hit by the current LiDAR sweep within
-  // the camera FOV. Using observed returns (not geometric mask cells) means a
-  // wall occludes the room behind it: those cells get no points, so they score
-  // zero. This kills both wall-facing frames and through-wall misattribution.
-  std::unordered_map<int, std::unordered_set<int64_t>> observed_cells; // room -> packed cells
-  std::unordered_map<int, Eigen::Vector2f> anchor_sum;                 // room -> sum of cell xy
-  for (const auto &pt : registered_cloud_->cloud_->points)
-  {
-    Eigen::Vector3f p(pt.x, pt.y, pt.z);
-    float depth;
-    // The pinhole in-frame test (horizontal + vertical FOV) is done inside
-    // PointToCameraView; here we only drop points beyond the useful range.
-    if (!PointToCameraView(p, lidarX, lidarY, lidarZ, lidarRoll, lidarPitch,
-                           lidarYaw, depth))
-    {
-      continue;
-    }
-    if (depth > room_view_max_range_)
-    {
-      continue;
-    }
-    Eigen::Vector3i v =
-        misc_utils_ns::point_to_voxel(p, shift_, 1.0 / room_resolution_);
-    if (v.x() < 0 || v.x() >= room_mask_.rows || v.y() < 0 ||
-        v.y() >= room_mask_.cols)
-    {
-      continue;
-    }
-    int id = room_mask_.at<int>(v.x(), v.y());
-    if (id <= 0 || !representation_->HasRoomNode(id))
-    {
-      continue;
-    }
-    int64_t key = static_cast<int64_t>(v.x()) * room_mask_.cols + v.y();
-    if (observed_cells[id].insert(key).second)  // first return on this cell
-    {
-      Eigen::Vector3f cell = misc_utils_ns::voxel_to_point(
-          Eigen::Vector3i(v.x(), v.y(), 0), shift_, room_resolution_);
-      anchor_sum[id] += Eigen::Vector2f(cell.x(), cell.y());
-    }
-  }
-
-  // Attribute the frame to the room with the most observed cells.
-  int best_room = -1;
-  size_t best_count = 0;
-  for (const auto &kv : observed_cells)
-  {
-    if (kv.second.size() > best_count)
-    {
-      best_count = kv.second.size();
-      best_room = kv.first;
-    }
-  }
-  if (best_room < 0 || best_count == 0)  // frame sees no room surface
-  {
-    return;
-  }
-  float best_cov = best_count * room_resolution_ * room_resolution_;
-  if (best_cov < room_view_min_coverage_m2_)  // too little in view (e.g. facing a wall)
-  {
-    return;
-  }
-  Eigen::Vector2f best_anchor =
-      anchor_sum[best_room] / static_cast<float>(best_count);
-
-  // Pose-diversity admission into this room's best-3.
-  auto &views = representation_->GetRoomNode(best_room).GetBestViewsMutable();
-  int close_idx = -1;
-  for (size_t i = 0; i < views.size(); ++i)
-  {
-    float d = std::hypot(views[i].camera_pos.x() - lidarX,
-                         views[i].camera_pos.y() - lidarY);
-    float dyaw = lidarYaw - views[i].camera_yaw;
-    while (dyaw > M_PI) dyaw -= 2 * M_PI;
-    while (dyaw < -M_PI) dyaw += 2 * M_PI;
-    if (d < room_view_pose_dist_thresh_ &&
-        std::fabs(dyaw) < room_view_yaw_thresh_rad_)
-    {
-      close_idx = static_cast<int>(i);
-      break;
-    }
-  }
-
-  int slot = -1;
-  if (close_idx >= 0)
-  {
-    // Same viewpoint as an existing one: keep only the better.
-    if (best_cov > views[close_idx].coverage_m2)
-    {
-      slot = close_idx;
-    }
-  }
-  else if (views.size() < 3)
-  {
-    slot = static_cast<int>(views.size());  // new distinct slot
-  }
-  else
-  {
-    // Full and pose-distinct: evict the weakest if we beat it.
-    int lo = 0;
-    for (size_t i = 1; i < views.size(); ++i)
-    {
-      if (views[i].coverage_m2 < views[lo].coverage_m2)
-      {
-        lo = static_cast<int>(i);
-      }
-    }
-    if (best_cov > views[lo].coverage_m2)
-    {
-      slot = lo;
-    }
-  }
-  if (slot < 0)  // not admitted
-  {
-    return;
-  }
-
-  // Persist the frame to disk (one file per slot, overwritten on replace).
-  representation_ns::RoomView view;
-  view.camera_pos = Eigen::Vector3f(lidarX, lidarY, lidarZ);
-  view.camera_yaw = lidarYaw;
-  view.anchor_xy = best_anchor;
-  view.coverage_m2 = best_cov;
-  view.image_path = (std::filesystem::path(room_views_dir_) /
-                     ("room_" + std::to_string(best_room) + "_slot_" +
-                      std::to_string(slot) + ".jpg"))
-                        .string();
-  cv::imwrite(view.image_path, camera_image_);
-  if (slot < static_cast<int>(views.size()))
-  {
-    views[slot] = view;
-  }
-  else
-  {
-    views.push_back(view);
-  }
-  representation_->GetRoomNode(best_room).views_dirty_ = true;  // triggers a re-query
-
-  // Dump the room's current best-3 for validation (optional).
-  if (room_type_query_log_enabled_)
-  {
-    json j = json::array();
-    for (const auto &v : views)
-    {
-      j.push_back({{"path", v.image_path},
-                   {"coverage_m2", v.coverage_m2},
-                   {"camera_pos", {v.camera_pos.x(), v.camera_pos.y(), v.camera_pos.z()}},
-                   {"camera_yaw", v.camera_yaw},
-                   {"anchor", {v.anchor_xy.x(), v.anchor_xy.y()}}});
-    }
-    std::ofstream ofs((std::filesystem::path(room_views_dir_) /
-                       ("room_" + std::to_string(best_room) + ".json"))
-                          .string());
-    if (ofs)
-    {
-      ofs << j.dump(2) << std::endl;
-    }
-  }
-  RCLCPP_INFO(this->get_logger(),
-              "[room_views] room %d: %zu view(s), admitted frame cov %.2f m^2 view_anchor=(%.2f,%.2f)",
-              best_room, views.size(), best_cov, best_anchor.x(), best_anchor.y());
-}
-
-void SensorCoveragePlanner3D::PublishRoomTypeQueries()
-{
-  double now = this->now().seconds();
-  for (auto &id_to_room_node : representation_->GetRoomNodesMapMutable())
-  {
-    int room_id = id_to_room_node.first;
-    auto &room_node = id_to_room_node.second;
-
-    // Object inventory: deduped labels with counts, confidence-filtered.
-    std::map<std::string, int> object_counts;
-    for (int object_id : room_node.GetObjectIndices())
-    {
-      if (!representation_->HasObjectNode(object_id))
-      {
-        continue;
-      }
-      const auto &obj = representation_->GetObjectNodeRep(object_id);
-      if (obj.GetConfidence() < room_view_object_conf_min_ || obj.GetLabel().empty())
-      {
-        continue;
-      }
-      object_counts[obj.GetLabel()]++;
-    }
-    int object_count = 0;
-    std::string objects_str;
-    for (const auto &kv : object_counts)
-    {
-      object_count += kv.second;
-      if (!objects_str.empty())
-      {
-        objects_str += ", ";
-      }
-      objects_str += kv.first + " x" + std::to_string(kv.second);
-    }
-
-    // Trigger: best-3 changed, or the object inventory grew. Nothing to send
-    // until there is at least one image or object as evidence.
-    bool object_changed = (object_count != room_node.objects_at_last_query_);
-    if (!(room_node.views_dirty_ || object_changed))
-    {
-      continue;
-    }
-    if (room_node.GetBestViews().empty() && object_count == 0)
-    {
-      continue;
-    }
-    if (room_node.last_query_time_ > 0.0 &&
-        (now - room_node.last_query_time_) < room_type_query_min_interval_s_)
-    {
-      // Room has fresh evidence (dirty/object change) but is rate-limited.
-      // Throttled so a held-back room does not flood the log every tick.
-#if ROOM_DBG_ENABLED
-      RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                           "[room_dbg] QUERY_SKIP id=%d reason=min_interval dirty=%d obj_changed=%d "
-                           "views=%zu objects=%d since_last=%.1fs",
-                           room_id, room_node.views_dirty_ ? 1 : 0, object_changed ? 1 : 0,
-                           room_node.GetBestViews().size(), object_count,
-                           now - room_node.last_query_time_);
-#endif
-      continue;
-    }
-
-    tare_planner::msg::RoomType msg;
-    msg.header.frame_id = kWorldFrameID;
-    msg.header.stamp = this->now();
-    geometry_msgs::msg::Point anchor;
-    anchor.x = room_node.centroid_.x();
-    anchor.y = room_node.centroid_.y();
-    anchor.z = room_node.centroid_.z();
-    msg.anchor_point = anchor;
-    // Snapshot the canonical interior point for async re-ID: if this room's id has
-    // churned by answer time, sampling the mask at this deep-interior point
-    // reliably re-resolves it (unlike the drifting anchor).
-    msg.interior_point = room_node.GetInteriorPoint();
-    msg.room_id = room_id;
-    msg.in_room = (room_id == current_room_id_);
-    for (const auto &v : room_node.GetBestViews())
-    {
-      msg.image_paths.push_back(v.image_path);
-    }
-    msg.objects = objects_str;
-    if (!room_node.room_mask_.empty())
-    {
-      auto room_mask_msg =
-          cv_bridge::CvImage(std_msgs::msg::Header(), "mono8", room_node.room_mask_)
-              .toImageMsg();
-      msg.room_mask = *room_mask_msg;
-    }
-    // Carry the current label so the VLM can keep it (stability / anti-synonym)
-    // rather than re-deciding from scratch each time.
-    msg.room_type = room_node.GetRoomLabel();
-    msg.voxel_num = room_node.GetVoxelNum();
-
-    room_type_pub_->publish(msg);
-    ROOM_DBG("[room_dbg] QUERY_PUB id=%d anchor=(%.2f,%.2f,%.2f) in_room=%d images=%zu objects=%d carried_label='%s'",
-             room_id, anchor.x, anchor.y, anchor.z, msg.in_room ? 1 : 0,
-             msg.image_paths.size(), object_count, msg.room_type.c_str());
-    LogRoomTypeQuery(msg);
-    room_node.views_dirty_ = false;
-    room_node.last_query_time_ = now;
-    room_node.objects_at_last_query_ = object_count;
-  }
-}
-
-void SensorCoveragePlanner3D::LogRoomTypeQuery(
-    const tare_planner::msg::RoomType &msg)
-{
-  if (!room_type_query_log_enabled_ || room_type_query_log_dir_.empty())
-  {
-    return;
-  }
-
-  // Ordered, unique base name per query: query_<6-digit seq>_room<id>.
-  std::string seq_str = std::to_string(room_type_query_log_seq_);
-  seq_str = std::string(6 - std::min<size_t>(6, seq_str.size()), '0') + seq_str;
-  std::string base = "query_" + seq_str + "_room" + std::to_string(msg.room_id);
-  std::filesystem::path dir(room_type_query_log_dir_);
-
-  // The best-3 images already live on disk (room_views/); just record the paths.
-  json j;
-  j["seq"] = room_type_query_log_seq_;
-  j["stamp_sec"] = msg.header.stamp.sec;
-  j["stamp_nanosec"] = msg.header.stamp.nanosec;
-  j["room_id"] = msg.room_id;
-  j["in_room"] = msg.in_room;
-  j["room_type"] = msg.room_type;  // the room's current label, sent for stability
-  j["objects"] = msg.objects;
-  j["anchor_point"] = {{"x", msg.anchor_point.x},
-                       {"y", msg.anchor_point.y},
-                       {"z", msg.anchor_point.z}};
-  j["image_paths"] = msg.image_paths;
-  j["room_mask"] = {{"width", msg.room_mask.width},
-                    {"height", msg.room_mask.height},
-                    {"encoding", msg.room_mask.encoding}};
-
-  std::ofstream ofs((dir / (base + ".json")).string());
-  if (ofs)
-  {
-    ofs << j.dump(2) << std::endl;
-  }
-  else
-  {
-    RCLCPP_WARN(this->get_logger(),
-                "[room_type_log] could not write %s.json", base.c_str());
-  }
-
-  room_type_query_log_seq_++;
-}
-
-void SensorCoveragePlanner3D::LogRoomTypeAnswer(
-    const tare_planner::msg::RoomType &msg, int room_id,
-    const std::string &previous_label, const std::string &current_label)
-{
-  if (!room_type_query_log_enabled_ || room_type_query_log_dir_.empty())
-  {
-    return;
-  }
-
-  std::string seq_str = std::to_string(room_type_answer_log_seq_);
-  seq_str = std::string(6 - std::min<size_t>(6, seq_str.size()), '0') + seq_str;
-  std::string base = "answer_" + seq_str + "_room" + std::to_string(room_id);
-  std::filesystem::path dir(room_type_query_log_dir_);
-
-  json j;
-  j["seq"] = room_type_answer_log_seq_;
-  j["room_id"] = room_id;
-  j["answer"] = msg.room_type;       // the VLM's returned label for this query
-  j["vote_weight"] = msg.voxel_num;  // weight this answer added to the histogram
-  j["in_room"] = msg.in_room;
-  j["anchor_point"] = {{"x", msg.anchor_point.x},
-                       {"y", msg.anchor_point.y},
-                       {"z", msg.anchor_point.z}};
-  j["previous_label"] = previous_label;  // running argmax before this vote
-  j["current_label"] = current_label;    // running argmax after this vote
-  j["label_flipped"] = (previous_label != current_label);
-
-  // The full running vote histogram after applying this answer.
-  json votes = json::object();
-  if (representation_->HasRoomNode(room_id))
-  {
-    for (const auto &kv : representation_->GetRoomNode(room_id).GetLabels())
-    {
-      votes[kv.first] = kv.second;
-    }
-  }
-  j["votes"] = votes;
-
-  std::ofstream ofs((dir / (base + ".json")).string());
-  if (ofs)
-  {
-    ofs << j.dump(2) << std::endl;
-  }
-  else
-  {
-    RCLCPP_WARN(this->get_logger(),
-                "[room_type_log] could not write %s.json", base.c_str());
-  }
-
-  room_type_answer_log_seq_++;
-}
-
 void SensorCoveragePlanner3D::GetPoseAtTime(double imageTime, float &lidarX, float &lidarY, float &lidarZ, float &lidarRoll, float &lidarPitch, float &lidarYaw)
 {
   while (odomFrontIDPointer != odomLastIDPointer)
@@ -2564,47 +1810,192 @@ void SensorCoveragePlanner3D::GetPoseAtTime(double imageTime, float &lidarX, flo
 // instant (and in any order). Clamps to the buffer's [oldest, newest] range and
 // stops at the first non-monotonic slot (guards against uninitialized entries
 // before the ring has filled).
-double SensorCoveragePlanner3D::GetYawAtTime(double queryTime)
+void SensorCoveragePlanner3D::UpdateRoomLabel()
 {
-  if (odomLastIDPointer < 0)
+  // sysnav room typing (ported from rsb, navigation early-stop hooks removed):
+  // bin the covered cloud into rooms via room_mask_; on first coverage, or when
+  // coverage grew by >20 voxels / area by >5 m^2 since the last query, crop the
+  // panorama around the room's covered points and ask the VLM.
+  if (room_mask_.empty())
   {
-    return 0.0;
+    return;
   }
-  int newer = odomLastIDPointer;
-  if (queryTime >= odomTimeStack[newer])
+  pcl::PointCloud<pcl::PointXYZI>::Ptr covered_cloud = planning_env_->GetUpdatedCloudInRange();
+  std::unordered_map<int, int> room_counts;
+  std::unordered_map<int, pcl::PointCloud<pcl::PointXYZI>> room_cloud_in_range;
+  std::unordered_map<int, Eigen::Vector3f> room_centers;
+  for (auto &id_to_room_node : representation_->GetRoomNodesMapMutable())
   {
-    return lidarYawStack[newer];  // at/after newest: clamp
+    int room_id = id_to_room_node.first;
+    room_counts[room_id] = 0;
+    room_cloud_in_range[room_id] = pcl::PointCloud<pcl::PointXYZI>();
+    room_centers[room_id] = Eigen::Vector3f(0.0, 0.0, 0.0);
   }
-  for (int step = 0; step < kOdomStackSize - 1; ++step)
+  for (const auto &point : covered_cloud->points)
   {
-    int older = (newer - 1 + kOdomStackSize) % kOdomStackSize;
-    if (older == odomLastIDPointer)
+    Eigen::Vector3f point_pos(point.x, point.y, point.z);
+    Eigen::Vector3i point_voxel_ind = misc_utils_ns::point_to_voxel(point_pos, shift_, 1.0 / room_resolution_);
+    if (point_voxel_ind.x() < 0 || point_voxel_ind.x() >= room_mask_.rows ||
+        point_voxel_ind.y() < 0 || point_voxel_ind.y() >= room_mask_.cols)
     {
-      break;  // wrapped a full lap
+      continue;
     }
-    if (odomTimeStack[older] >= odomTimeStack[newer])
+    int room_id = room_mask_.at<int>(point_voxel_ind.x(), point_voxel_ind.y());
+    if (representation_->HasRoomNode(room_id))
     {
-      break;  // non-monotonic: hit an unwritten slot, stop here
+      room_counts[room_id]++;
+      room_cloud_in_range[room_id].points.push_back(point);
+      room_centers[room_id] += Eigen::Vector3f(point.x, point.y, point.z);
     }
-    if (odomTimeStack[older] <= queryTime)
-    {
-      // queryTime lies in [older, newer]: linear interpolate with wrap fix.
-      double ratioNewer =
-          (queryTime - odomTimeStack[older]) /
-          (odomTimeStack[newer] - odomTimeStack[older]);
-      double yawOlder = lidarYawStack[older];
-      double yawNewer = lidarYawStack[newer];
-      double d = yawNewer - yawOlder;
-      if (d > M_PI) yawOlder += 2 * M_PI;
-      else if (d < -M_PI) yawOlder -= 2 * M_PI;
-      return yawOlder * (1.0 - ratioNewer) + yawNewer * ratioNewer;
-    }
-    newer = older;
   }
-  return lidarYawStack[newer];  // older than everything retained: clamp to oldest
+  std::vector<int> labled_rooms = {};
+  for (auto &id_to_room_node : representation_->GetRoomNodesMapMutable())
+  {
+    int room_id = id_to_room_node.first;
+    auto &room_node = id_to_room_node.second;
+    // First deal with the unlabeled rooms
+    if (room_counts[room_id] == 0)
+    {
+      continue;
+    }
+    else if (representation_->GetRoomNode(room_id).IsLabeled())
+    {
+      labled_rooms.push_back(room_id);
+      continue;
+    }
+    else
+    {
+      room_centers[room_id] /= room_counts[room_id];
+      representation_->GetRoomNode(room_id).SetVoxelNum(room_counts[room_id]);
+      representation_->GetRoomNode(room_id).SetIsLabeled(true);
+
+      pcl::PointCloud<pcl::PointXYZI>::Ptr room_cloud_tmp(new pcl::PointCloud<pcl::PointXYZI>());
+      pcl::PointXYZI room_center;
+      room_center.x = room_centers[room_id].x();
+      room_center.y = room_centers[room_id].y();
+      room_center.z = robot_position_.z; // use the robot z position as the room center z
+      room_center.intensity = 10.0;
+      pcl::copyPointCloud((room_cloud_in_range[room_id]), *room_cloud_tmp);
+      room_cloud_tmp->push_back(room_center);
+
+      // publish it with room_cloud_pub_
+      sensor_msgs::msg::PointCloud2 room_cloud_msg;
+      pcl::toROSMsg(*room_cloud_tmp, room_cloud_msg);
+      room_cloud_msg.header.frame_id = kWorldFrameID;
+      room_cloud_msg.header.stamp = this->now();
+      room_cloud_pub_->publish(room_cloud_msg);
+
+      float lidarRoll = 0, lidarPitch = 0, lidarYaw = 0;
+      float lidarX = 0, lidarY = 0, lidarZ = 0;
+      GetPoseAtTime(imageTime, lidarX, lidarY, lidarZ, lidarRoll, lidarPitch, lidarYaw);
+      cv::Mat camera_image_tmp = camera_image_.clone();
+      cv::Mat cropped_img = project_pcl_to_image(room_cloud_tmp, lidarX, lidarY, lidarZ,
+                                          lidarRoll, lidarPitch, lidarYaw,
+                                          camera_image_tmp, room_center, room_id);
+      room_node.SetImage(cropped_img);
+
+      geometry_msgs::msg::Point anchor_point;
+      anchor_point.x = room_center.x;
+      anchor_point.y = room_center.y;
+      anchor_point.z = robot_position_.z; // use the robot z position as the anchor point z
+      room_node.SetAnchorPoint(anchor_point);
+      room_node.SetLastArea(room_node.area_);
+
+      tare_planner::msg::RoomType room_type_msg;
+      room_type_msg.header.frame_id = kWorldFrameID;
+      room_type_msg.header.stamp = this->now();
+      room_type_msg.anchor_point = anchor_point;
+      room_type_msg.room_id = room_id;
+      room_type_msg.in_room = (room_id == current_room_id_);
+      auto img_msg = cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", cropped_img).toImageMsg();
+      auto room_mask_msg = cv_bridge::CvImage(std_msgs::msg::Header(), "mono8", room_node.room_mask_).toImageMsg();
+      room_type_msg.image = *img_msg;
+      room_type_msg.room_mask = *room_mask_msg;
+      room_type_msg.room_type = "";
+      room_type_msg.voxel_num = room_counts[room_id];
+
+      room_type_pub_->publish(room_type_msg);
+      ROOM_DBG("[room_dbg] QUERY_PUB id=%d first=1 voxels=%d anchor=(%.2f,%.2f) in_room=%d",
+               room_id, room_counts[room_id], anchor_point.x, anchor_point.y, room_type_msg.in_room ? 1 : 0);
+    }
+  }
+  for(int room_id : labled_rooms)
+  {
+    if (!representation_->HasRoomNode(room_id)) {
+      RCLCPP_WARN(this->get_logger(), "Room with id %d does not exist in representation, skip", room_id);
+      continue;
+    }
+    auto &room_node = representation_->GetRoomNode(room_id);
+    if (room_counts[room_id] - representation_->GetRoomNode(room_id).GetVoxelNum() > 20 ||
+        room_node.area_ - room_node.last_area_ > 5.0)
+    {
+      bool flag1 = (room_counts[room_id] - representation_->GetRoomNode(room_id).GetVoxelNum() > 20);
+
+      room_centers[room_id] /= room_counts[room_id];
+      representation_->GetRoomNode(room_id).SetVoxelNum(room_counts[room_id]);
+      representation_->GetRoomNode(room_id).SetIsLabeled(true);
+
+      pcl::PointCloud<pcl::PointXYZI>::Ptr room_cloud_tmp(new pcl::PointCloud<pcl::PointXYZI>());
+      pcl::PointXYZI room_center;
+      room_center.x = room_centers[room_id].x();
+      room_center.y = room_centers[room_id].y();
+      room_center.z = robot_position_.z; // use the robot z position as the room center z
+      room_center.intensity = 10.0;
+      pcl::copyPointCloud((room_cloud_in_range[room_id]), *room_cloud_tmp);
+      room_cloud_tmp->push_back(room_center);
+
+      // publish it with room_cloud_pub_
+      sensor_msgs::msg::PointCloud2 room_cloud_msg;
+      pcl::toROSMsg(*room_cloud_tmp, room_cloud_msg);
+      room_cloud_msg.header.frame_id = kWorldFrameID;
+      room_cloud_msg.header.stamp = this->now();
+      room_cloud_pub_->publish(room_cloud_msg);
+
+      cv::Mat cropped_img;
+      geometry_msgs::msg::Point anchor_point;
+      if (flag1)
+      {
+        float lidarRoll = 0, lidarPitch = 0, lidarYaw = 0;
+        float lidarX = 0, lidarY = 0, lidarZ = 0;
+        GetPoseAtTime(imageTime, lidarX, lidarY, lidarZ, lidarRoll, lidarPitch, lidarYaw);
+        cv::Mat camera_image_tmp = camera_image_.clone();
+        cropped_img = project_pcl_to_image(room_cloud_tmp, lidarX, lidarY, lidarZ,
+                                          lidarRoll, lidarPitch, lidarYaw,
+                                          camera_image_tmp, room_center, room_id);
+        room_node.SetImage(cropped_img);
+
+        // choose the first point in the room_cloud_in_range[room_id - 1] as the anchor point
+        anchor_point.x = room_center.x;
+        anchor_point.y = room_center.y;
+        anchor_point.z = robot_position_.z; // use the robot z position as the anchor point z
+        room_node.SetAnchorPoint(anchor_point);
+      }
+      else
+      {
+        cropped_img = room_node.GetImage();
+        anchor_point = room_node.GetAnchorPoint();
+      }
+
+      room_node.SetLastArea(room_node.area_);
+
+      tare_planner::msg::RoomType room_type_msg;
+      room_type_msg.anchor_point = anchor_point;
+      room_type_msg.room_id = room_id;
+      room_type_msg.in_room = (room_id == current_room_id_);
+      auto img_msg = cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", cropped_img).toImageMsg();
+      auto room_mask_msg = cv_bridge::CvImage(std_msgs::msg::Header(), "mono8", room_node.room_mask_).toImageMsg();
+      room_type_msg.image = *img_msg;
+      room_type_msg.room_mask = *room_mask_msg;
+      room_type_msg.room_type = "";
+      room_type_msg.voxel_num = room_counts[room_id];
+
+      room_type_pub_->publish(room_type_msg);
+      ROOM_DBG("[room_dbg] QUERY_PUB id=%d first=0 voxels=%d new_image=%d anchor=(%.2f,%.2f) in_room=%d",
+               room_id, room_counts[room_id], flag1 ? 1 : 0, anchor_point.x, anchor_point.y, room_type_msg.in_room ? 1 : 0);
+    }
+  }
 }
 
-// Publish the room type visualization
 void SensorCoveragePlanner3D::PublishRoomTypeVisualization()
 {
   visualization_msgs::msg::MarkerArray marker_array;
@@ -2629,9 +2020,9 @@ void SensorCoveragePlanner3D::PublishRoomTypeVisualization()
     // Label sits on the canonical interior point (stable, guaranteed inside),
     // not the drifting anchor_point_ (nav's in-range mean) or the centroid
     // (which can land in a wall for a non-convex room).
-    marker.pose.position.x = room_node.interior_point_.x;
-    marker.pose.position.y = room_node.interior_point_.y;
-    marker.pose.position.z = room_node.interior_point_.z;
+    marker.pose.position.x = room_node.centroid_.x();
+    marker.pose.position.y = room_node.centroid_.y();
+    marker.pose.position.z = room_node.centroid_.z();
     marker.pose.orientation.w = 0.65;
     marker.scale.z = 1.0;
     marker.color.a = 1.0;
@@ -2663,6 +2054,17 @@ cv::Mat SensorCoveragePlanner3D::project_pcl_to_image(
   const float camRoll = -1.5707963f, camPitch = 0.0f, camYaw = -1.5707963f;
   const int imageWidth = 1920;
   const int imageHeight = 640;
+  // sysnav's crop assumes the 1920x640 360-degree panorama. On any other camera
+  // (e.g. a pinhole test bag) the cv::Rect slices below would throw and take the
+  // node down, so hand the frame back uncropped instead (logged once).
+  if (image.cols != imageWidth || image.rows != imageHeight)
+  {
+    RCLCPP_WARN_ONCE(this->get_logger(),
+                     "[project_pcl_to_image] camera image is %dx%d, not the %dx%d "
+                     "panorama; sending the uncropped frame",
+                     image.cols, image.rows, imageWidth, imageHeight);
+    return image.clone();
+  }
   const float minRange = 0.5f, maxRange = 10.0f;
 
   int imagePixelNum = imageWidth * imageHeight;

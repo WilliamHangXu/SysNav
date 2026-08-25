@@ -132,19 +132,8 @@ public:
   rclcpp::Time timestamp_; // Timestamp of the viewpoint
 };
 
-// A single camera observation kept as visual evidence for a room's type.
-// Images live on disk; we keep only the path + capture pose + coverage score.
-struct RoomView
-{
-  std::string image_path;                                // jpg under the run folder
-  Eigen::Vector3f camera_pos = Eigen::Vector3f::Zero();  // world pose the frame was taken from
-  float camera_yaw = 0.0f;                               // world yaw, for pose-diversity admission
-  Eigen::Vector2f anchor_xy = Eigen::Vector2f::Zero();   // world (x,y), mean of covered room cells
-  float coverage_m2 = 0.0f;                              // quality: room area visible in FOV+range
-};
-
 // Define the room node class.
-class RoomNodeRep
+class RoomNodeRep 
 {
 public:
   // explicit RoomNodeRep(const int id, const cv::Mat &room_mask, const geometry_msgs::msg::PolygonStamped &polygon);
@@ -185,18 +174,6 @@ public:
   const geometry_msgs::msg::Point & GetAnchorPoint() const
   {
     return anchor_point_;
-  }
-  // Canonical interior point (pole of inaccessibility): a guaranteed-inside,
-  // deepest-clearance cell of the room mask. Geometric property refreshed every
-  // segmentation update (like centroid_), NOT label evidence, so it is not reset
-  // by ClearRoomLabels.
-  void SetInteriorPoint(const geometry_msgs::msg::Point &interior_point)
-  {
-    interior_point_ = interior_point;
-  }
-  const geometry_msgs::msg::Point & GetInteriorPoint() const
-  {
-    return interior_point_;
   }
   void SetImage(const cv::Mat &image)
   {
@@ -275,11 +252,6 @@ public:
     voxel_num_ = 0;
     anchor_point_ = geometry_msgs::msg::Point();
     image_ = cv::Mat();
-    // The room changed identity: drop its visual evidence and re-query state.
-    best_views_.clear();
-    views_dirty_ = false;
-    last_query_time_ = 0.0;
-    objects_at_last_query_ = -1;
   }
 
   // Getters and setters for private members
@@ -291,10 +263,7 @@ public:
   
   const std::set<int>& GetObjectIndices() const { return object_indices_; }
   std::set<int>& GetObjectIndicesMutable() { return object_indices_; }
-
-  const std::vector<RoomView>& GetBestViews() const { return best_views_; }
-  std::vector<RoomView>& GetBestViewsMutable() { return best_views_; }
-
+  
   bool IsVisited() const { return is_visited_; }
   void SetIsVisited(bool is_visited) { is_visited_ = is_visited; }
   
@@ -340,12 +309,7 @@ public:
   int voxel_num_; // Number of voxels observed in the room
 
   std::map<std::string, int> labels_; // Map of labels and their counts
-  std::vector<RoomView> best_views_; // Up to 3 best camera observations of the room
-  bool views_dirty_ = false;         // best_views_ changed since last query
-  double last_query_time_ = 0.0;     // wall seconds of last room-type query
-  int objects_at_last_query_ = -1;   // object count at last query (new-object trigger)
   geometry_msgs::msg::Point anchor_point_;
-  geometry_msgs::msg::Point interior_point_; // pole of inaccessibility (see SetInteriorPoint)
   cv::Mat image_; // Image of the room
   cv::Mat room_mask_; // Room mask
   bool is_connected_;

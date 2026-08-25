@@ -25,15 +25,12 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
-#include <sensor_msgs/msg/camera_info.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/float32.hpp>
 #include <std_msgs/msg/int32.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <std_msgs/msg/int32_multi_array.hpp>
 #include <tf2/transform_datatypes.h>
-#include <tf2_ros/buffer.h>
-#include <tf2_ros/transform_listener.h>
 // PCL
 #include <pcl/PointIndices.h>
 #include <pcl/filters/extract_indices.h>
@@ -196,6 +193,7 @@ private:
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr viewpoint_room_id_marker_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr viewpoint_visibility_pub_;
   rclcpp::Publisher<tare_planner::msg::RoomType>::SharedPtr room_type_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr room_cloud_pub_;
   rclcpp::Publisher<tare_planner::msg::ViewpointRep>::SharedPtr viewpoint_rep_pub_;
 
   // ========== VLM-Related Functions ==========
@@ -217,10 +215,6 @@ private:
   std::vector<Eigen::Vector3i> Convert2Voxels(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud);
   void GetPoseAtTime(double imageTime, float &lidarX, float &lidarY, float &lidarZ,
                      float &lidarRoll, float &lidarPitch, float &lidarYaw);
-  // Non-mutating yaw lookup at an arbitrary time (does NOT advance
-  // odomFrontIDPointer, unlike GetPoseAtTime), so it can be sampled on both
-  // sides of a capture time for a centered yaw-rate estimate.
-  double GetYawAtTime(double queryTime);
   cv::Mat project_pcl_to_image(const pcl::PointCloud<pcl::PointXYZI>::Ptr &cloud_w,
                                 float &lidarX, float &lidarY, float &lidarZ,
                                 float &lidarRoll, float &lidarPitch, float &lidarYaw,
@@ -235,27 +229,8 @@ private:
   
   // Room management functions
   void SetCurrentRoomId();
-  // Evaluate the latest camera frame (motion-gated): attribute it to the room
-  // whose floor the current LiDAR sweep observes most within the camera FOV,
-  // and admit it into that room's best-3 by pose diversity.
-  void UpdateRoomViews();
-  // World point -> Go2 front pinhole camera. Returns true iff the point lands
-  // inside the image (in front + within 1280x720 after distortion). depth_out =
-  // forward distance along the optical axis (for the range gate).
-  bool PointToCameraView(const Eigen::Vector3f &p_world,
-                         float lidarX, float lidarY, float lidarZ,
-                         float lidarRoll, float lidarPitch, float lidarYaw,
-                         float &depth_out) const;
-  // Emit a room-type query (best-3 image paths + object inventory) for each
-  // room whose evidence changed since its last query (rate-limited).
-  void PublishRoomTypeQueries();
-  // Debug: dump a room-type query's payload (paths + objects + scalars) as JSON.
-  void LogRoomTypeQuery(const tare_planner::msg::RoomType &msg);
-  // Debug: dump a room-type VLM answer plus the running vote histogram and the
-  // resulting label to the same per-run dir. No-op unless enabled.
-  void LogRoomTypeAnswer(const tare_planner::msg::RoomType &msg, int room_id,
-                         const std::string &previous_label,
-                         const std::string &current_label);
+  // sysnav room typing: coverage-growth trigger -> panorama crop -> /room_type_query
+  void UpdateRoomLabel();
 
   // Object detection and tracking functions
   void UpdateObjectVisibility();
@@ -265,51 +240,6 @@ private:
   // ========== VLM-Related Data Members ==========
   // Representation core
   std::shared_ptr<representation_ns::Representation> representation_;
-
-  // Per-run output folder (<output_root>/run_<stamp>) for room-view images / logs
-  std::string output_root_;
-  std::string run_dir_;
-
-  // Room-type query debug log (off by default; param room_type_query_log.enabled)
-  bool room_type_query_log_enabled_;
-  std::string room_type_query_log_dir_;
-  int room_type_query_log_seq_;
-  int room_type_answer_log_seq_;
-
-  // Per-room best-3 view buffer (stage one). Gated by room_type_query_log.enabled.
-  std::string room_views_dir_;          // <run>/room_views
-  float room_view_max_range_;           // max useful range for coverage (m)
-  float room_view_min_coverage_m2_;     // reject frames seeing less than this
-  float room_view_max_yaw_rate_;        // reject frames captured turning faster (rad/s)
-  double room_view_yaw_rate_window_s_;  // half-window for centered yaw-rate estimate (s)
-  float room_view_object_conf_min_;     // object inventory confidence floor
-  double room_type_query_min_interval_s_;  // per-room re-query rate limit
-  float room_view_pose_dist_thresh_;    // pose-diversity: min position separation (m)
-  float room_view_yaw_thresh_rad_;      // pose-diversity: min heading separation
-  float room_view_motion_dist_thresh_;  // intake gate: min move since last eval (m)
-  float room_view_motion_yaw_thresh_rad_;// intake gate: min turn since last eval
-  bool room_view_have_last_pose_;       // has a previous eval pose been recorded
-  float room_view_last_x_, room_view_last_y_, room_view_last_yaw_;
-
-  // --- Camera calibration for room-view coverage (PointToCameraView) ---
-  // Mirror of semantic_mapping's topic-driven calibration: intrinsics from the
-  // rectified camera_info (P matrix, no distortion) + base->camera-optical
-  // extrinsic from tf. Falls back to the legacy hardcoded raw model when not
-  // calibrated (e.g. empty robot_namespace).
-  bool uses_topic_calib_ = false;
-  bool camera_calibrated_ = false;
-  std::string camera_info_topic_;
-  std::string base_frame_;  // <ns>/base, source frame for the camera tf lookup
-  rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_sub_;
-  sensor_msgs::msg::CameraInfo::SharedPtr latest_camera_info_;
-  std::shared_ptr<tf2_ros::Buffer> camera_tf_buffer_;
-  std::shared_ptr<tf2_ros::TransformListener> camera_tf_listener_;
-  Eigen::Matrix3f cam_R_l2c_ = Eigen::Matrix3f::Identity();
-  Eigen::Vector3f cam_t_l2c_ = Eigen::Vector3f::Zero();
-  float cam_fx_ = 0.f, cam_fy_ = 0.f, cam_cx_ = 0.f, cam_cy_ = 0.f;
-  int cam_img_w_ = 0, cam_img_h_ = 0;
-  void CameraInfoCallback(const sensor_msgs::msg::CameraInfo::SharedPtr msg);
-  bool TryCalibrateCamera();
 
   // Viewpoint representation parameters
   double rep_threshold_;
