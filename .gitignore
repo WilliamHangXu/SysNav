@@ -57,3 +57,4 @@ runlogs/
 
 # Project-specific
 src/exploration_planner/tare_planner/rviz/
+src/base_autonomy/vehicle_simulator/mesh/
