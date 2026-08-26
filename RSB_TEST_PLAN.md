@@ -187,7 +187,7 @@ panorama crops reach the VLM, labels land, viewpoints drop.
 `launch/scene_graph_sim.launch` includes `vehicle_simulator/system_simulation.launch`
 unchanged (teleop base) + the scene-graph nodes (args `objects` default true,
 `rviz`, `keyboard`, and the sim pose args); `system_simulation_teleop.sh`;
-`tare_planner_sim.rviz` = `rsb`'s sim config minus 14 TARE-only displays, with
+`tare_planner_teleop.rviz` (shared with the real-robot launch) = `rsb`'s sim config minus 14 TARE-only displays, with
 `WaypointTool` instead of `GoalpointTool`. `explore.launch` is used directly
 (`explore_world_sim.launch`'s only extra was TARE's `navigationBoundary`).
 Verified by a 5-min unattended run driven through `/way_point` (waypoint-tool
@@ -242,6 +242,43 @@ room_segmentation / semantic_mapping already assume (`kWorldFrameID = "map"`).
 `/state_estimation` ~50 Hz and `/registered_scan` ~10 Hz in frame `map`,
 `/state_estimation_health` OK, TF `map → sensor` present; then the scene-graph
 nodes see the same pair as in sim.
+
+**Status (2026-08-26): done.** `src/slam` restored verbatim from `rsb`
+(5799 files) plus the ARISE README from `fb6ee81^` (one note added: the
+driver launch remaps the livox topics to `/lidar/scan` / `/imu/data`). The
+build took 54 s, not tens of minutes: GTSAM 4.3 / Ceres 2.2 / Sophus are
+already installed in `/usr/local` by `rsb`'s README step 3 (`make install`;
+the 1 GB of `src/slam/dependency/*/build` dirs are that build's gitignored
+residue), and colcon does not even list the vendored `dependency/` packages,
+so `--packages-up-to arise_slam_mid360` = msgs + ARISE + livox driver.
+New: `scene_graph_real_robot.launch` (= `system_real_robot.launch` verbatim +
+the scene-graph nodes with `matterport_real` / `semantic_mapping_real`;
+`bagfile:=true` swaps in `system_bagfile.launch` + `matterport_bagfile` /
+`semantic_mapping_bagfile` — i.e. sysnav's two `*_with_exploration_planner`
+launches minus TARE), `system_real_robot_teleop.sh`, and
+`tare_planner_sim.rviz` renamed to `tare_planner_teleop.rviz` (shared by both
+launches). `explore.launch` is used as in sim: `rsb_test` has no
+`navigationBoundary` executable and sysnav's `boundary.ply` is a ±1000 m
+square anyway. The camera driver (`receive_theta`) is not part of the launch,
+as in sysnav. Verified on raw-Livox bags (no robot at hand; the bags carry no
+camera, so no objects / labels): (a) 116 s static bag
+(`bags/bag_20260701_072514`), `bagfile:=true`: all 17 processes alive to the
+end, `/state_estimation` 50 Hz `map→sensor`, `/registered_scan`,
+`/aft_mapped_to_init_incremental`, `/state_estimation_at_scan` 10 Hz in
+`map`, `/state_estimation_health` 0/22594 bad, TF `map→sensor` present, rooms
++ keypose graph flowing; (b) 55 s moving mecanum bag
+(`~/autonomy_stack_mecanum_wheel_platform/20260805_065250_as`, which also
+carries ARISE's own live output as reference), `bagfile:=true`: fresh
+`/state_estimation` vs recorded — 2169/2211 stamps matched, position error
+mean 2.8 cm / p95 5.8 cm / max 15.5 cm, path 7.84 vs 7.78 m, final pose within
+3 cm; the mecanum stack's own newer ARISE scores the same on that bag (mean
+2.3 cm). (c) real mode (`bagfile:=false`: `matterport_real`, platform `mecanum`, livox
+driver idle without a lidar) fed by the same bag's `/lidar/scan` + `/imu/data`:
+all 4 scene-graph nodes alive, ARISE identical (mean 2.7 cm), rooms / keypose
+graph / object markers flowing. Logs: `output/phase_logs/phase4b_*`.
+Config: keep the launch default `livox_mid360_2.yaml` (what sysnav's real
+robot ran); `livox_mid360_real.yaml` lacks keys this code reads —
+`feature_extraction_node` dies at startup with it.
 
 ## Phase 5 — Identity check against sysnav (1 day)
 
@@ -334,3 +371,21 @@ nodes see the same pair as in sim.
 - The Unity binary needs a real X display + GPU (it renders the panorama);
   `ros_tcp_endpoint` logs `Exception: No more data available` / `Bad file
   descriptor` once at Unity connect time — harmless.
+- The three ARISE nodes ignore SIGINT: after Ctrl-C `ros2 launch` hangs on
+  them, and a re-launch then runs against the stale SLAM publishers (symptom:
+  `/registered_scan` at 2× rate, `/state_estimation` dead, km-long paths). They
+  exit on SIGTERM; `system_real_robot_teleop.sh` traps INT/TERM/EXIT and TERMs
+  them. When launching by hand: `pkill -TERM -f arise_slam_mid360/lib`.
+- `bagfile:=true`: play the bag **without** `--clock` (ARISE pins
+  `use_sim_time=false`), and with `--topics /lidar/scan /imu/data
+  [/camera/image]` if the bag also recorded SLAM outputs.
+- Without a camera the planner logs `[project_pcl_to_image] ... No valid
+  horizontal coordinates` about once a second (the room-label crop with no
+  image) — harmless, absent in the sim run. `visualization_tools` looks for
+  `mesh/real_world/map.ply` (not found, harmless, rsb same); `joy_node`
+  without `/dev/input/js0` just retries.
+- `matterport_real.yaml` has `kDoorCollisionCheckPointNumThr : 1na` (typo;
+  `matterport_bagfile` says `1`). Harmless: the planner reads that key with
+  `get_parameter` and never declares it, so `ros2 param get` reports "not
+  set" under both scenarios and the header default is used either way.
+

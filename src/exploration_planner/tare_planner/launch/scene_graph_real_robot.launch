@@ -1,0 +1,123 @@
+import os
+from ament_index_python.packages import get_package_share_directory
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
+from launch.conditions import IfCondition
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
+
+# Real-robot bringup for the teleoperated scene-graph pipeline (no exploration
+# planner). It is sysnav's system_real_robot_with_exploration_planner.launch
+# (bagfile:=true: system_bagfile_with_exploration_planner.launch) with TARE's
+# steering removed:
+#   base autonomy  = vehicle_simulator/system_real_robot.launch verbatim
+#                    (livox_ros_driver2 -> /lidar/scan + /imu/data; ARISE SLAM ->
+#                    /state_estimation, /registered_scan, /aft_mapped_to_init_incremental,
+#                    tf map->sensor; sensor_scan_generation; terrain_analysis(+ext);
+#                    local_planner in teleop mode [realRobot=true, autonomyMode=false];
+#                    joy on /dev/input/js0; visualization_tools)
+#                    bagfile:=true -> system_bagfile.launch = the same without the
+#                    livox driver: play a raw-Livox bag (/lidar/scan CustomMsg +
+#                    /imu/data [+ /camera/image]) WITHOUT --clock (ARISE pins
+#                    use_sim_time=false, as in sysnav).
+#   scene graph    = detection_node + semantic_mapping (platform mecanum |
+#                    mecanum_bagfile), room_segmentation, vlm_node and the
+#                    scene-graph node (tare_planner_node, scenario matterport_real |
+#                    matterport_bagfile: it reads /aft_mapped_to_init_incremental +
+#                    /registered_scan + /camera/image and never publishes /way_point).
+# The 360 camera driver is not started here (sysnav did not either): run
+#   ros2 launch receive_theta receive_theta_ai_computer.launch   (or _sensorpod)
+# on the computer the Theta Z1 is plugged into; it publishes /camera/image.
+# Driving: RViz teleop panel or the joystick -> /joy -> local_planner -> /cmd_vel;
+# RViz waypoint tool -> /way_point (+ its /joy) -> local_planner.
+MODES = {  # bagfile -> (base launch, scene-graph scenario, semantic_mapping launch)
+    False: ('system_real_robot.launch', 'matterport_real', 'semantic_mapping_real.launch'),
+    True: ('system_bagfile.launch', 'matterport_bagfile', 'semantic_mapping_bagfile.launch'),
+}
+VLM_CONFIG = 'vlm_config'
+
+BASE_ARGS = {  # system_real_robot.launch / system_bagfile.launch arguments (sysnav defaults)
+    'world_name': 'real_world', 'sensorOffsetX': '0.05', 'sensorOffsetY': '0.0',
+    'cameraOffsetZ': '0.25', 'vehicleX': '0.0', 'vehicleY': '0.0',
+    'checkTerrainConn': 'true'}
+
+
+def _launch(context):
+    use_sim_time = LaunchConfiguration('use_sim_time')
+    rviz = LaunchConfiguration('rviz')
+    objects = LaunchConfiguration('objects')
+    keyboard = LaunchConfiguration('keyboard')
+    bagfile = LaunchConfiguration('bagfile').perform(context).strip().lower()
+    if bagfile not in ('true', 'false'):
+        raise RuntimeError(f"bagfile must be true or false, got '{bagfile}'")
+    base_launch, scenario, sem_launch = MODES[bagfile == 'true']
+
+    tare_share = get_package_share_directory('tare_planner')
+    sem_share = get_package_share_directory('semantic_mapping')
+    vlm_share = get_package_share_directory('vlm_node')
+    sim_share = get_package_share_directory('vehicle_simulator')
+
+    # Package-root rviz config, shared with scene_graph_sim.launch (the rviz/
+    # dir is gitignored). The installed launch is a symlink back to src, so
+    # realpath(__file__) resolves there.
+    rviz_config = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
+        'tare_planner_teleop.rviz')
+
+    def include(path, extra=None, condition=None):
+        args = {'use_sim_time': use_sim_time}
+        if extra:
+            args.update(extra)
+        return IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(path), launch_arguments=args.items(),
+            condition=condition)
+
+    return [
+        # --- base autonomy: sysnav's real-robot / bagfile launch, unchanged ---
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                os.path.join(sim_share, 'launch', base_launch)),
+            launch_arguments={a: LaunchConfiguration(a) for a in BASE_ARGS}.items()),
+        # --- scene graph ------------------------------------------------------
+        include(os.path.join(vlm_share, 'keyboard_input.launch'),
+                condition=IfCondition(keyboard)),
+        # sysnav object branch (detection_node.launch loads the *_sim yaml; only
+        # the semantic_mapping launch differs per platform, as in sysnav)
+        include(os.path.join(sem_share, 'detection_node.launch'),
+                condition=IfCondition(objects)),
+        include(os.path.join(sem_share, sem_launch),
+                condition=IfCondition(objects)),
+        include(os.path.join(tare_share, 'room_segmentation.launch'),
+                {'scenario': scenario}),
+        include(os.path.join(vlm_share, 'vlm_node.launch'),
+                {'config': VLM_CONFIG}),
+        include(os.path.join(tare_share, 'explore.launch'),
+                {'scenario': scenario}),
+        Node(package='rviz2', executable='rviz2', name='rviz2',
+             arguments=['-d', rviz_config],
+             parameters=[{'use_sim_time': use_sim_time}],
+             condition=IfCondition(rviz), output='screen'),
+    ]
+
+
+def generate_launch_description():
+    entries = [
+        DeclareLaunchArgument('use_sim_time', default_value='false',
+                              description='Wall clock (ARISE pins use_sim_time=false)'),
+        DeclareLaunchArgument('rviz', default_value='true',
+                              description='Launch RViz (teleop panel + waypoint tool)'),
+        DeclareLaunchArgument('objects', default_value='true',
+                              description='Run the object branch (detection_node + '
+                                          'semantic_mapping_node)'),
+        DeclareLaunchArgument('keyboard', default_value='false',
+                              description='Open sysnav\'s keyboard_input terminal '
+                                          '(only "demo"/"resume" still have an effect: '
+                                          'freeze/resume the object mapper)'),
+        DeclareLaunchArgument('bagfile', default_value='false',
+                              description='true: no livox driver, scenario matterport_bagfile '
+                                          '+ platform mecanum_bagfile; play a raw-Livox bag '
+                                          '(/lidar/scan + /imu/data) without --clock'),
+    ] + [DeclareLaunchArgument(a, default_value=d) for a, d in BASE_ARGS.items()]
+    entries.append(OpaqueFunction(function=_launch))
+    return LaunchDescription(entries)

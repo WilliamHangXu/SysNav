@@ -38,10 +38,10 @@ def generate_launch_description():
 
     # Package-root rviz config (the rviz/ dir is gitignored). The installed
     # launch is a symlink back to src, so realpath(__file__) resolves there:
-    #   <pkg>/launch/scene_graph_sim.launch -> <pkg>/tare_planner_sim.rviz
+    #   <pkg>/launch/scene_graph_sim.launch -> <pkg>/tare_planner_teleop.rviz (shared with the real-robot launch)
     rviz_config = os.path.join(
         os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
-        'tare_planner_sim.rviz')
+        'tare_planner_teleop.rviz')
 
     def include(path, extra=None, condition=None):
         args = {'use_sim_time': use_sim_time}
