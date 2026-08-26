@@ -45,6 +45,7 @@ bagfile_*/
 # clone launches RViz with no displays and every user re-adds topics by hand.
 # (Personal/scratch .rviz files stay ignored by the *.rviz rule above.)
 !src/exploration_planner/tare_planner/tare_planner_ground.rviz
+!src/exploration_planner/tare_planner/tare_planner_sim.rviz
 
 # Simulation & runtime output
 sim_benchmark_results/

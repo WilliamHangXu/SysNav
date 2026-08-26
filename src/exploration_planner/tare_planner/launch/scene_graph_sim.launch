@@ -1,0 +1,103 @@
+import os
+from ament_index_python.packages import get_package_share_directory
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.conditions import IfCondition
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
+
+# Unity-sim bringup for the teleoperated scene-graph pipeline (no exploration
+# planner). It is sysnav's system_simulation_with_exploration_planner.launch
+# with TARE's steering removed:
+#   base autonomy  = vehicle_simulator/system_simulation.launch verbatim
+#                    (vehicleSimulator, sim_image_repub, sensor_scan_generation,
+#                    terrain_analysis(+ext), local_planner in teleop mode
+#                    [autonomyMode=false], joy, ros_tcp_endpoint, visualization_tools)
+#   scene graph    = detection_node + semantic_mapping (platform mecanum_sim),
+#                    room_segmentation, vlm_node, and the scene-graph node
+#                    (tare_planner_node, scenario matterport_sim: it reads
+#                    /state_estimation_at_scan + /registered_scan + /camera/image
+#                    and never publishes /way_point).
+# Driving: RViz teleop panel or a joystick -> /joy -> local_planner -> /cmd_vel;
+# RViz goalpoint tool (or a future waypoint node) -> /way_point -> local_planner.
+SCENARIO = 'matterport_sim'
+VLM_CONFIG = 'vlm_config'
+
+
+def generate_launch_description():
+    use_sim_time = LaunchConfiguration('use_sim_time')
+    rviz = LaunchConfiguration('rviz')
+    objects = LaunchConfiguration('objects')
+    keyboard = LaunchConfiguration('keyboard')
+
+    tare_share = get_package_share_directory('tare_planner')
+    sem_share = get_package_share_directory('semantic_mapping')
+    vlm_share = get_package_share_directory('vlm_node')
+    sim_share = get_package_share_directory('vehicle_simulator')
+
+    # Package-root rviz config (the rviz/ dir is gitignored). The installed
+    # launch is a symlink back to src, so realpath(__file__) resolves there:
+    #   <pkg>/launch/scene_graph_sim.launch -> <pkg>/tare_planner_sim.rviz
+    rviz_config = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
+        'tare_planner_sim.rviz')
+
+    def include(path, extra=None, condition=None):
+        args = {'use_sim_time': use_sim_time}
+        if extra:
+            args.update(extra)
+        return IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(path), launch_arguments=args.items(),
+            condition=condition)
+
+    sim_args = ['world_name', 'vehicleHeight', 'cameraOffsetZ', 'vehicleX',
+                'vehicleY', 'terrainZ', 'vehicleYaw', 'checkTerrainConn']
+    sim_defaults = {'world_name': 'unity', 'vehicleHeight': '0.75',
+                    'cameraOffsetZ': '0.1', 'vehicleX': '0.0', 'vehicleY': '0.0',
+                    'terrainZ': '0.0', 'vehicleYaw': '0.0',
+                    'checkTerrainConn': 'true'}
+
+    entries = [
+        DeclareLaunchArgument('use_sim_time', default_value='false',
+                              description='The Unity sim runs on wall clock'),
+        DeclareLaunchArgument('rviz', default_value='true',
+                              description='Launch RViz (teleop panel + goalpoint tool)'),
+        DeclareLaunchArgument('objects', default_value='true',
+                              description='Run the object branch (detection_node + '
+                                          'semantic_mapping_node)'),
+        DeclareLaunchArgument('keyboard', default_value='false',
+                              description='Open sysnav\'s keyboard_input terminal '
+                                          '(only "demo"/"resume" still have an effect: '
+                                          'freeze/resume the object mapper)'),
+    ] + [DeclareLaunchArgument(a, default_value=sim_defaults[a]) for a in sim_args]
+
+    # --- base autonomy: sysnav's teleop sim launch, unchanged -----------------
+    entries.append(IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(sim_share, 'launch', 'system_simulation.launch')),
+        launch_arguments={a: LaunchConfiguration(a) for a in sim_args}.items()))
+
+    # --- scene graph ---------------------------------------------------------
+    entries += [
+        include(os.path.join(vlm_share, 'keyboard_input.launch'),
+                condition=IfCondition(keyboard)),
+        # sysnav object branch; both launches load mapping_mecanum_sim.yaml
+        # (platform mecanum_sim = the Unity 1920x640 panorama on /camera/image).
+        include(os.path.join(sem_share, 'detection_node.launch'),
+                condition=IfCondition(objects)),
+        include(os.path.join(sem_share, 'semantic_mapping_sim.launch'),
+                condition=IfCondition(objects)),
+        include(os.path.join(tare_share, 'room_segmentation.launch'),
+                {'scenario': SCENARIO}),
+        include(os.path.join(vlm_share, 'vlm_node.launch'),
+                {'config': VLM_CONFIG}),
+        include(os.path.join(tare_share, 'explore.launch'),
+                {'scenario': SCENARIO}),
+        Node(package='rviz2', executable='rviz2', name='rviz2',
+             arguments=['-d', rviz_config],
+             parameters=[{'use_sim_time': use_sim_time}],
+             condition=IfCondition(rviz), output='screen'),
+    ]
+
+    return LaunchDescription(entries)

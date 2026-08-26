@@ -183,6 +183,22 @@ is empty except the optional gate.
 **Verify:** teleop around the Unity office: rooms segment, objects appear,
 panorama crops reach the VLM, labels land, viewpoints drop.
 
+**Status (2026-08-25): done.** `src/base_autonomy` restored verbatim from `rsb`;
+`launch/scene_graph_sim.launch` includes `vehicle_simulator/system_simulation.launch`
+unchanged (teleop base) + the scene-graph nodes (args `objects` default true,
+`rviz`, `keyboard`, and the sim pose args); `system_simulation_teleop.sh`;
+`tare_planner_sim.rviz` = `rsb`'s sim config minus 14 TARE-only displays, with
+`WaypointTool` instead of `GoalpointTool`. `explore.launch` is used directly
+(`explore_world_sim.launch`'s only extra was TARE's `navigationBoundary`).
+Verified by a 5-min unattended run driven through `/way_point` (waypoint-tool
+`/joy` mimic, 37 goals / 32 reached): camera 1920×640 panorama, rooms 1 Hz
+(7 rooms at end, ids/areas stable, doors 0.85 Hz), keypose + viewpoint clouds
+1 Hz, 74 `/room_type_query` (mask-cropped panorama, e.g. 1497×640) → 74 answers
+(student lounge / office room / restroom / storage room), 25 object instances
+(chairs, desks) tracked + merged, all nodes alive to the end. Logs in
+`output/phase_logs/phase4_sim_*`. Note `/object_nodes_list` carries only
+*updated* nodes per message (batch size 1–4), not the inventory.
+
 ## Phase 4b — SLAM back + real-robot teleop bringup (1 day + build time)
 
 The sim needs no SLAM (`vehicleSimulator` publishes ground-truth
@@ -304,3 +320,17 @@ nodes see the same pair as in sim.
 - Do not run ARISE on a bag that already carries its own LIO (go2w bags):
   two independent estimators = two drifting `map` frames. Use ARISE only for
   raw-Livox inputs (real robot, raw-Livox bags).
+- Teleop sim: `local_planner` runs with `autonomyMode=false`, so a bare
+  `/way_point` does **not** move the robot (`joySpeed` stays 0). The RViz
+  waypoint tool works because it also publishes a `/joy` message with
+  `axes[2] = -1` (autonomy on) and `axes[4] = 1` (full speed); the joystick /
+  teleop panel takes control back with any `/joy` whose `axes[2] > -0.1`. The
+  future waypoint node must send the same `/joy` (or the launch must set
+  `autonomyMode:=true`).
+- `goalpoint_rviz_plugin` publishes `/goal_point` (TARE's object-goal input,
+  no consumer now); the sim RViz config uses `waypoint_rviz_plugin/WaypointTool`
+  (`/way_point`) instead. `keyboard_input` is optional (`keyboard:=true`): its
+  only remaining effect is `demo` / `resume` freezing the object mapper.
+- The Unity binary needs a real X display + GPU (it renders the panorama);
+  `ros_tcp_endpoint` logs `Exception: No more data available` / `Bad file
+  descriptor` once at Unity connect time — harmless.
