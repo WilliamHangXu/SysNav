@@ -65,9 +65,9 @@ class DetectNode(Node):
         self.text_prompt_list = np.array(self.text_prompt_list)
         print(f"Text prompt: {self.text_prompt}")
 
-        self.grounding_model = YOLO(self.CONFIG_DIR / "external/yolov8x-worldv2_cus.engine", task='detect')
+        # self.grounding_model = YOLO(self.CONFIG_DIR / "external/yolov8x-worldv2_cus.engine", task='detect')
         # self.grounding_model = YOLOE(self.CONFIG_DIR / "external/yoloe-11l-seg.engine", task="segment")
-        # self.grounding_model = YOLOE(self.CONFIG_DIR / "external/yoloe-26x-seg.engine", task="segment")
+        self.grounding_model = YOLOE(self.CONFIG_DIR / "external/yoloe-26x-seg.engine", task="segment")
 
         self.device = device
 
