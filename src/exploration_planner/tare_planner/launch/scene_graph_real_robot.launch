@@ -48,6 +48,7 @@ def _launch(context):
     rviz = LaunchConfiguration('rviz')
     objects = LaunchConfiguration('objects')
     keyboard = LaunchConfiguration('keyboard')
+    bev = LaunchConfiguration('bev')
     bagfile = LaunchConfiguration('bagfile').perform(context).strip().lower()
     if bagfile not in ('true', 'false'):
         raise RuntimeError(f"bagfile must be true or false, got '{bagfile}'")
@@ -57,6 +58,7 @@ def _launch(context):
     sem_share = get_package_share_directory('semantic_mapping')
     vlm_share = get_package_share_directory('vlm_node')
     sim_share = get_package_share_directory('vehicle_simulator')
+    bev_share = get_package_share_directory('bev_mapper')
 
     # Package-root rviz config, shared with scene_graph_sim.launch (the rviz/
     # dir is gitignored). The installed launch is a symlink back to src, so
@@ -94,6 +96,8 @@ def _launch(context):
                 {'config': VLM_CONFIG}),
         include(os.path.join(tare_share, 'explore.launch'),
                 {'scenario': scenario}),
+        include(os.path.join(bev_share, 'launch', 'bev_mapper.launch.py'),
+                condition=IfCondition(bev)),
         Node(package='rviz2', executable='rviz2', name='rviz2',
              arguments=['-d', rviz_config],
              parameters=[{'use_sim_time': use_sim_time}],
@@ -118,6 +122,9 @@ def generate_launch_description():
                               description='true: no livox driver, scenario matterport_bagfile '
                                           '+ platform mecanum_bagfile; play a raw-Livox bag '
                                           '(/lidar/scan + /imu/data) without --clock'),
+        DeclareLaunchArgument('bev', default_value='true',
+                              description='Run bev_mapper (BEV occupancy grid + local '
+                                          'BEV image from /registered_scan + /state_estimation)'),
     ] + [DeclareLaunchArgument(a, default_value=d) for a, d in BASE_ARGS.items()]
     entries.append(OpaqueFunction(function=_launch))
     return LaunchDescription(entries)

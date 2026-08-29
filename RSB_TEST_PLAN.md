@@ -280,6 +280,46 @@ Config: keep the launch default `livox_mid360_2.yaml` (what sysnav's real
 robot ran); `livox_mid360_real.yaml` lacks keys this code reads —
 `feature_extraction_node` dies at startup with it.
 
+## Phase 4c — BEV occupancy map (`bev_mapper`) — done 2026-08-29
+
+Goal: the bird's-eye-view map that `Navigation-Physical-Experiment/src/vlm_nav_bridge`
+builds for its VLM navigator, as a product of our pipeline, without the navigator.
+
+- New package `src/bev_mapper` (ament_python). `lidar_bev_mapper.py`,
+  `coord_utils.py`, `frontier_detector.py` are **verbatim copies** of
+  `vlm_nav_bridge` (commit `e033998`); `bev_mapper_node.py` is the only new
+  code — that package's scan/pose plumbing (`_pose_callback`,
+  `_lookup_pose_at`, `_scan_callback`, `_parse_pointcloud2`) minus the VLM,
+  camera, target-detection and `/way_point` parts. Inputs `/registered_scan` +
+  `/state_estimation` (the ARISE contract, also present in the Unity sim);
+  outputs `/bev_map/grid` (OccupancyGrid, map frame), `/bev_map/local`
+  (448×448 rgb8, robot-centred, north up, VLN rendering), `/bev_map/frontiers`
+  (PointCloud2). It publishes nothing the planner/base listen to.
+- Wired into `scene_graph_sim.launch` and `scene_graph_real_robot.launch` as
+  `bev:=true|false` (default true); `tare_planner_teleop.rviz` got BEV Grid /
+  BEV Frontiers / BEV Local displays.
+- Config vs the source package: `hfov_deg 79→360` (the source kept a forward
+  wedge to mimic its training camera), `obstacle_height_min -1.0→-0.4`
+  (relative to the lidar; local_planner's minRelZ), plus two node-side knobs:
+  `self_exclusion_radius 0.8 m` (mount hardware 0.3–0.7 m from the lidar sits
+  in the obstacle band) and `clear_footprint_radius 0.4 m`.
+- Verified on the mecanum bag (`~/autonomy_stack_mecanum_wheel_platform/
+  20260805_065250_as`): standalone on the recorded SLAM topics 431/433 scans,
+  update 25–33 ms mean / 45 ms max; end-to-end via
+  `system_real_robot_teleop.sh bagfile:=true rviz:=false` with ARISE live:
+  442 scans, 30–38 ms mean / 69 ms max with the whole stack running, all
+  processes alive, clean teardown. OccupancyGrid layout checked by overlaying
+  the bag's trajectory (0 of 2213 poses on unknown cells). Logs:
+  `output/phase_logs/phase4c_*`.
+- **Open limitation (decision pending):** the mapper only ever *sets*
+  occupancy, never clears it. On this bag ~55 % of the path cells end up
+  occupied: the marking returns are at torso height (0.85–1.35 m above the
+  floor), 0.8–3 m from the lidar, arrive mostly *after* the robot has passed,
+  and nothing in the body frame is persistent — someone walking with the
+  robot. Our wired-laptop teleop will produce the same. `clear_footprint_radius`
+  cannot fix it (marks come later); the fix is node-side ray clearing
+  (hit/miss log-odds over the mapper's occupancy channel), not done.
+
 ## Phase 5 — Identity check against sysnav (1 day)
 
 1. Record one sim teleop session as a ROS 2 bag: `/state_estimation`,
@@ -388,4 +428,7 @@ robot ran); `livox_mid360_real.yaml` lacks keys this code reads —
   `matterport_bagfile` says `1`). Harmless: the planner reads that key with
   `get_parameter` and never declares it, so `ros2 param get` reports "not
   set" under both scenarios and the header default is used either way.
-
+- The mecanum-platform bag's lidar returns nothing above ~+0.4 m relative to
+  the sensor (floor at −1.25 m): mount specific. `bev_mapper`'s
+  `obstacle_height_min/max` are relative to the lidar and must be re-tuned per
+  robot; check with a z-histogram of `/registered_scan` minus the pose z.

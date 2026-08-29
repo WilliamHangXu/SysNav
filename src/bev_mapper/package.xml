@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>bev_mapper</name>
+  <version>0.1.0</version>
+  <description>
+    Bird's-eye-view occupancy map from SLAM-registered Livox scans
+    (/registered_scan + /state_estimation). The map/frontier code is copied
+    verbatim from Navigation-Physical-Experiment/src/vlm_nav_bridge; only the
+    thin ROS wrapper (bev_mapper_node.py) is new. Publishes an OccupancyGrid,
+    a robot-centred BEV image and frontier centres; never steers the robot.
+  </description>
+  <maintainer email="willxh.68209@gmail.com">William Xu</maintainer>
+  <license>MIT</license>
+
+  <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>sensor_msgs_py</depend>
+  <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>python3-numpy</depend>
+  <depend>python3-opencv</depend>
+
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

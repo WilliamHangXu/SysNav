@@ -1,0 +1,58 @@
+bev_mapper:
+  ros__parameters:
+    # ---- inputs / outputs ---------------------------------------------------
+    scan_topic: "/registered_scan"      # PointCloud2 in the SLAM map frame
+    odom_topic: "/state_estimation"     # Odometry (map -> sensor)
+    grid_frame: ""                      # "" = frame_id of the odometry messages (map)
+    grid_z_offset: -0.5                 # OccupancyGrid z = start pose z + this (display only)
+    local_rate: 5.0                     # Hz  /bev_map/local image (+ frontier extraction)
+    grid_rate: 1.0                      # Hz  /bev_map/grid + /bev_map/frontiers
+    pose_update_rate: 10.0              # Hz cap for pose-only updates of the agent/trail channels
+    max_sensor_skew_sec: 0.5            # count scans whose interpolated pose is older than this
+    # Returns closer than this (2-D, metres) to the sensor are dropped before
+    # mapping: the platform's own mount/chair/rider shows up in the obstacle
+    # band at 0.3-0.7 m on the mecanum bag and would paint the robot's path
+    # black. The mapper's built-in guard is only 0.1 m (Go2/G1 bodies sit below
+    # the lidar). Shrink if the robot must map obstacles closer than this.
+    self_exclusion_radius: 0.8
+    # Cells within this radius (metres) of the robot pose are forced free on
+    # every update ("the robot is here, so it is free"). NOTE: the mapper only
+    # ever sets occupancy and never clears it, so anything seen later at a
+    # spot the robot drove through stays painted (a person walking with the
+    # robot is in the obstacle band at torso height: on the mecanum bag ~57%
+    # of the path cells end up occupied, and this knob does not fix that
+    # because the marks arrive after the robot has passed). 0 disables.
+    clear_footprint_radius: 0.4
+    publish_frontiers: true
+
+    # ---- BEV map (LidarBEVMapper, values from vlm_nav_bridge unless noted) --
+    map_resolution: 0.05                # m / cell
+    map_size: 67.2                      # m; centred on the start pose (+-33.6 m), 1344x1344 cells
+    vision_range: 100                   # cells; explored ray-cast radius (5 m)
+    # Obstacle band relative to the sensor z (/state_estimation z). Floor
+    # returns must fall below obstacle_height_min. -0.4 = local_planner's
+    # minRelZ for the mecanum platform; re-tune if the lidar is mounted
+    # higher/lower (vlm_nav_bridge used -1.0 for a G1 with the lidar ~1 m up).
+    obstacle_height_min: -0.4
+    obstacle_height_max: 1.0
+    map_pred_threshold: 1.0             # hits to mark a cell occupied
+    exp_pred_threshold: 1.0             # sweeps to mark a cell explored
+    explored_max_rays_per_scan: 512     # ray-cast budget per scan
+    scan_denoise_enable: true           # keep points whose 0.1 m XY voxel has >= 2 points
+    scan_denoise_voxel_size: 0.10
+    scan_denoise_min_points: 2
+    obstacle_render_dilate_ksize: 3     # image only: thicken sparse wall returns
+    output_size: 448                    # local crop size in cells (= pixels): 22.4 m x 22.4 m
+    # Angular gate on the scan around the robot heading. vlm_nav_bridge used
+    # 79 deg to mimic its forward training camera; with the 360 deg lidar +
+    # Theta panorama every return is usable, and no FOV wedge is drawn.
+    hfov_deg: 360.0
+
+    # ---- frontiers (FrontierDetector) --------------------------------------
+    frontier_exp_threshold: 0.1
+    frontier_dilate_wall_ksize: 1
+    frontier_close_explore_ksize: 1
+    frontier_min_area: 4                # cells
+    frontier_clear_border_px: 2         # ignore frontiers this close to the local crop edge
+    frontier_min_distance_m: 0.7        # drop frontiers closer than this to the robot
+    frontier_top_k: 32                  # nearest-first cap

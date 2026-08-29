@@ -30,11 +30,13 @@ def generate_launch_description():
     rviz = LaunchConfiguration('rviz')
     objects = LaunchConfiguration('objects')
     keyboard = LaunchConfiguration('keyboard')
+    bev = LaunchConfiguration('bev')
 
     tare_share = get_package_share_directory('tare_planner')
     sem_share = get_package_share_directory('semantic_mapping')
     vlm_share = get_package_share_directory('vlm_node')
     sim_share = get_package_share_directory('vehicle_simulator')
+    bev_share = get_package_share_directory('bev_mapper')
 
     # Package-root rviz config (the rviz/ dir is gitignored). The installed
     # launch is a symlink back to src, so realpath(__file__) resolves there:
@@ -70,6 +72,9 @@ def generate_launch_description():
                               description='Open sysnav\'s keyboard_input terminal '
                                           '(only "demo"/"resume" still have an effect: '
                                           'freeze/resume the object mapper)'),
+        DeclareLaunchArgument('bev', default_value='true',
+                              description='Run bev_mapper (BEV occupancy grid + local '
+                                          'BEV image from /registered_scan + /state_estimation)'),
     ] + [DeclareLaunchArgument(a, default_value=sim_defaults[a]) for a in sim_args]
 
     # --- base autonomy: sysnav's teleop sim launch, unchanged -----------------
@@ -94,6 +99,8 @@ def generate_launch_description():
                 {'config': VLM_CONFIG}),
         include(os.path.join(tare_share, 'explore.launch'),
                 {'scenario': SCENARIO}),
+        include(os.path.join(bev_share, 'launch', 'bev_mapper.launch.py'),
+                condition=IfCondition(bev)),
         Node(package='rviz2', executable='rviz2', name='rviz2',
              arguments=['-d', rviz_config],
              parameters=[{'use_sim_time': use_sim_time}],
