@@ -335,6 +335,22 @@ builds for its VLM navigator, as a product of our pipeline, without the navigato
 
 ## Phase 6 — Tidy (½ day, optional)
 
+**Docs pass done (2026-08-29).** Every doc inherited from `deepclean` was
+audited claim-by-claim against `rsb_test` @ `e9504a4` and corrected in place:
+`ARCHITECTURE.md` rewritten as the `rsb_test` guide (bringup, input contract,
+data model, producers, RViz inspection, leftovers); `ROOM_LABELING.md`
+rewritten for sysnav's restored labeling (vote semantics, `is_labeled_` =
+"asked", STRIP, panorama-only crop); `room_segmentation/README.md` (freshness
+gate, `robot_config`, labeling section → pointer), `keypose_graph/README.md`
+(leaf status, real callers, param defaults), `representation/README.md`
+(labeling fields + writers, cycle order), `semantic_mapping/README.md` (YOLOE,
+hardcoded `/camera/image`, cwd-relative weights, two inert upstream guards
+documented as-is). Each carries a "Verified against `rsb_test` @ e9504a4" note.
+`EXTRACTION_AUDIT.md` kept as deepclean-era history. The docs for removed
+components (navgraph / quadrant_manager / scene_graph_exporter / docker) were
+not brought over. Remaining Phase 6 items below are still open.
+
+
 - Rename `SensorCoveragePlanner3D` → `SceneGraphNode` (executable
   `tare_planner_node` → `scene_graph_node`).
 - Drop dead params (`kAutoStart`, `kRushHome`, `pub_waypoint_topic_`,

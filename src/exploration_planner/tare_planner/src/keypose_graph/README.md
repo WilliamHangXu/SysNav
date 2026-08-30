@@ -1,5 +1,8 @@
 # Keypose Graph
 
+> Verified against `rsb_test` @ e9504a4 (2026-08-29). Line numbers below refer to
+> that revision.
+
 The keypose graph is the planner's **global topological roadmap**: an undirected
 graph of waypoints laid over the explored free space, where an edge means *"the
 robot can travel between these two points in a straight line without hitting a
@@ -14,15 +17,18 @@ Mental model: it is the *skeleton of the walkable world*. Nodes ≈ breadcrumbs 
 robot drops along its trajectory, plus extra connector waypoints; edges ≈
 collision-free straight segments between nearby, mutually-visible breadcrumbs.
 
-> **Not part of the scene graph — but the NavGraph contracts it.** Semantic
-> mapping and room segmentation never touch this structure, and its own
-> nodes/edges never enter the `Representation`. Couplings to the scene-graph side:
-> the planner calls `GetShortestPath(robot, object)` for a *walking* distance to a
-> found target/anchor object; the per-keypose accumulated scan (`keypose_cloud_`)
-> is reused when sampling viewpoint reps; and the **[NavGraph](../navgraph/README.md)**
-> reads this graph each cycle (connected component + `GetNodeNeighbors` adjacency +
-> `GetShortestPath`) to build the sparse waypoint graph that *is* exported. The
-> NavGraph is the only consumer that turns this roadmap into scene-graph output.
+> **Not part of the scene graph — and on this branch a leaf.** Semantic mapping
+> and room segmentation never touch this structure, and its own nodes/edges never
+> enter the `Representation`. The only coupling to the scene-graph side is
+> indirect: the per-keypose accumulated scan (`keypose_cloud_`, minted in the same
+> callback) is what `AddViewPointRep` consumes
+> (sensor_coverage_planner_ground.cpp:1738). Nothing reads the graph's
+> nodes/edges to produce scene-graph output — there is no NavGraph, no exporter,
+> and no `GetShortestPath(robot, object)` call in this tree. The graph is built and
+> healed every cycle and consumed only by `grid_world` (cell bookkeeping) and RViz;
+> it is kept deliberately as the roadmap for a future waypoint/navigation layer
+> (`RSB_TEST_PLAN.md`, decision D4). See *Querying / consumption* for the exact
+> call sites.
 
 ---
 
@@ -65,11 +71,16 @@ generic A\* in `src/utils/misc_utils.cpp` (`AStarSearch`,
                                          │
                   ┌──────────────────────┼───────────────────────────┐
                   ▼                      ▼                            ▼
-         GetShortestPath()      IsPositionReachable()      GetClosest*Node*()
-        (grid-world TSP,        (reject unreachable        (bind robot / objects
-         return-home, object     goals)                     to graph nodes)
-         distance)
+   GetClosestNodeInd/Position   GetConnectedGraphNodeIndices   GetShortestPathWithMaxLength
+   (planner → grid_world        (grid_world bins connected     (grid_world verifies a
+    SetCurKeyposeGraphNodeInd)   nodes into EXPLORING cells)    just-added inter-cell path)
+                                         │
+                                         ▼
+                        RViz only (edge marker + keypose_graph_cloud)
 ```
+
+Nothing downstream of `grid_world` reads the result on this branch (TSP / steering
+removed); the graph is a maintained leaf.
 
 ---
 
@@ -140,18 +151,19 @@ mechanisms and deduplicated against different radii:
 
 There is **no external SLAM "keypose" topic** in this stack. The planner mints
 keyposes itself inside `RegisteredScanCallback`
-(sensor_coverage_planner_ground.cpp:918):
+(sensor_coverage_planner_ground.cpp:483):
 
 - Registered scans are accumulated; on **every 5th scan**
-  (`registered_cloud_count_ == 0`, line 943) the planner:
+  (`registered_cloud_count_ = (registered_cloud_count_ + 1) % 5`, line 496;
+  `== 0` test at line 516) the planner:
   1. takes the robot's current position as a candidate keypose
-     (`keypose_.pose.pose.position = robot_position_`, line 945),
+     (`keypose_.pose.pose.position = robot_position_`, line 518),
   2. stamps it with a monotonic id —
-     `keypose_.pose.covariance[0] = keypose_count_++` (line 946). The id is hacked
+     `keypose_.pose.covariance[0] = keypose_count_++` (line 519). The id is hacked
      through the unused covariance field of the `Odometry` message.
-  3. calls `keypose_graph_->AddKeyposeNode(keypose_, *planning_env_)` (line 948),
+  3. calls `keypose_graph_->AddKeyposeNode(keypose_, *planning_env_)` (line 521),
   4. snapshots the accumulated downsampled scan into `keypose_cloud_` and raises
-     `keypose_cloud_update_`.
+     `keypose_cloud_update_` (line 532).
 
 **`AddKeyposeNode` (keypose_graph.cpp:514)** is the heart of construction:
 
@@ -181,16 +193,26 @@ keyposes itself inside `RegisteredScanCallback`
    of the path that are mutually visible, giving A\* real shortcuts.
 
 > `allow_vertical_edge_` is set `false` by the planner
-> (sensor_coverage_planner_ground.cpp:602), so nodes more than
+> (sensor_coverage_planner_ground.cpp:357), so nodes more than
 > `kAddEdgeVerticalThreshold` apart in z are never linked — different floors stay
 > topologically separate.
 
 ### 2. Connector nodes — from grid-world roadmap paths
 
-During `GlobalPlanning`, `grid_world_->AddPathsInBetweenCells(...)`
-(sensor_coverage_planner_ground.cpp:2934) computes candidate paths between
-explored subspace cells and injects each into the graph via
-`keypose_graph_->AddPath(path)` (grid_world.cpp:1404).
+During `GlobalPlanning` (sensor_coverage_planner_ground.cpp:1594, run from
+`execute()` at line 1680 only when there are candidate viewpoints),
+`grid_world_->AddPathsInBetweenCells(viewpoint_manager_, keypose_graph_)`
+(line 1597 → grid_world.cpp:770) connects neighbouring explored subspace cells.
+The keypose graph does **not** compute the inter-cell path: for each cell pair
+the path comes from `viewpoint_manager->GetViewPointShortestPath(...)`
+(grid_world.cpp:889); if `PathValid`, it is simplified and injected via
+`keypose_graph->AddPath(path_in_between)` (grid_world.cpp:902). Only *then* is
+the graph queried — `HasDirectKeyposeGraphConnection` (grid_world.cpp:945) runs
+`GetShortestPathWithMaxLength` with `max_path_length = kCellSize * 2`
+(grid_world.cpp:965–968) to verify the two connection points are now linked; on
+failure both cells' roadmap connection points are reset
+(`SetRoadmapConnectionPointSet(false)`, grid_world.cpp:909–910) and the pair is
+retried in a later cycle.
 
 **`AddPath` (keypose_graph.cpp:188)** walks the polyline:
 
@@ -210,9 +232,10 @@ another.
 
 ## Maintenance — once per planning cycle
 
-`UpdateKeyposeGraph()` (sensor_coverage_planner_ground.cpp:2229, called at
-line 3761 inside `execute()`) refreshes markers and then **prunes and re-labels**
-the graph:
+`UpdateKeyposeGraph()` (sensor_coverage_planner_ground.cpp:916, called at
+line 1668 inside `execute()` — unconditionally, even in cycles with zero
+candidate viewpoints) refreshes markers and then **prunes and re-labels** the
+graph:
 
 ### `CheckLocalCollision(robot_position, viewpoint_manager)` (keypose_graph.cpp:333)
 
@@ -240,10 +263,12 @@ used to pass through now-known walls get removed.
 - Rebuilds `connected_nodes_cloud_` + `kdtree_connected_nodes_` from the connected
   set.
 
-Everything that needs *reachable* answers
-(`IsPositionReachable`, `GetClosestConnectedNodeIndAndDistance`,
-`GetShortestPath(..., use_connected_nodes=true)`) consults the connected kdtree,
-so the planner never routes to an island it cannot actually reach.
+The reachability-aware queries (`IsPositionReachable`,
+`GetClosestConnectedNodeIndAndDistance`,
+`GetShortestPath(..., use_connected_nodes=true)`) consult the connected kdtree.
+On this branch the only thing that actually reads the connected set is
+`grid_world` via `GetConnectedGraphNodeIndices()` (grid_world.cpp:269); the
+reachability queries themselves have no callers (see next section).
 
 ---
 
@@ -272,16 +297,31 @@ Returned path poses carry extra metadata: `orientation.w = keypose_id`,
 `orientation.x = node_ind` (lines 974–976), so callers can recover which
 keypose/graph node each waypoint maps to.
 
-**Who consumes it (grid_world.cpp & planner):**
+**Who actually calls it on this branch** (every external caller, from a grep of
+`src/` + `include/`):
 
-- `UpdateCellKeyposeGraphNodes` (grid_world.cpp) bins connected graph nodes
-  into EXPLORING cells, giving each cell its graph "ports."
-- `AddPathsInBetweenCells` calls `GetShortestPath` /
-  `GetShortestPathWithMaxLength` to get **traversable** inter-cell distances and
-  injects the resulting connector (non-keypose) nodes back into the graph.
-- The **NavGraph** (`src/navgraph/`) contracts the connected component into the
-  exported waypoints + edges — since the steering code was removed, this is the
-  graph's sole downstream consumer.
+- Planner (sensor_coverage_planner_ground.cpp:1559–1563): `GetClosestNodeInd` /
+  `GetClosestNodePosition(robot_position_)` → handed to
+  `grid_world_->SetCurKeyposeGraphNodeInd` / `SetCurKeyposeGraphNodePosition`.
+- `GridWorld::UpdateCellKeyposeGraphNodes` (grid_world.cpp:267): reads
+  `GetConnectedGraphNodeIndices()` + `GetNodePosition(ind)` (lines 269, 280) and
+  bins connected nodes into EXPLORING cells.
+- `GridWorld::AddPathsInBetweenCells` (grid_world.cpp:770): `AddPath` (line 902)
+  and, via `HasDirectKeyposeGraphConnection`, `GetShortestPathWithMaxLength`
+  (line 968). This is the **only** routing call left in the tree.
+- RViz: `UpdateKeyposeGraph` publishes the edge marker and `keypose_graph_cloud`.
+
+That is the whole list. `GetShortestPath`, `IsPositionReachable`,
+`GetFirstKeyposePosition`, `GetClosestConnectedNodeIndAndDistance` and
+`GetClosestKeyposeID` are exposed but have **zero callers** — the TSP /
+return-home / object-distance users went with the steering code, and the
+NavGraph that contracted this graph into exported waypoints is not on this
+branch. `keypose_graph.h:124–138` still carries `GetNodeNeighbors` /
+`GetNeighborDistances` with a comment saying "Used by NavGraph"; they are orphan
+accessors (no callers) and the comment is stale. Net: the keypose graph is a
+**leaf** here — maintained every cycle, kept deliberately as the roadmap for a
+future waypoint/navigation node (`RSB_TEST_PLAN.md`, decision D4), and nothing
+turns it into scene-graph output.
 
 ---
 
@@ -291,14 +331,14 @@ Built by two helpers and published from `UpdateKeyposeGraph`:
 
 | Helper | Produces | Topic | Style |
 |---|---|---|---|
-| `GetMarker(node_marker, edge_marker)` (keypose_graph.cpp:229) | a `POINTS` marker of all node positions and a `LINE_LIST` marker of all unique edges | node → `keypose_graph_node_marker`, edge → `keypose_graph_edge_marker` | nodes red `POINTS` 0.4; edges yellow `LINE_LIST` 0.05 (set at sensor_coverage_planner_ground.cpp:406–416) |
+| `GetMarker(node_marker, edge_marker)` (keypose_graph.cpp:229) | a `POINTS` marker of all node positions and a `LINE_LIST` marker of all unique edges | node → `keypose_graph_node_marker`, edge → `keypose_graph_edge_marker` | nodes red `POINTS` 0.4; edges yellow `LINE_LIST` 0.05 (set at sensor_coverage_planner_ground.cpp:236–246) |
 | `GetVisualizationCloud(cloud)` (keypose_graph.cpp:271) | a `PointXYZI` cloud of all nodes, intensity `10` if connected, `-1` if not | `keypose_graph_cloud` | colour-codes connectivity |
 
-Wiring in `UpdateKeyposeGraph` (sensor_coverage_planner_ground.cpp:2233–2241):
+Wiring in `UpdateKeyposeGraph` (sensor_coverage_planner_ground.cpp:920–928):
 
-- The **edge marker is published** (line 2236) → the yellow edge mesh you see in
+- The **edge marker is published** (line 923) → the yellow edge mesh you see in
   RViz.
-- The **node marker is built but *not* published** (line 2235 is commented out).
+- The **node marker is built but *not* published** (line 922 is commented out).
   Nodes are instead visualized through the `keypose_graph_cloud` point cloud, so
   you can tell connected (bright) from disconnected (dim) nodes.
 - `GetMarker` is called *before* the collision/connectivity prune, while the vis
@@ -310,21 +350,25 @@ Wiring in `UpdateKeyposeGraph` (sensor_coverage_planner_ground.cpp:2233–2241):
 
 ## Parameters (`keypose_graph/...`)
 
-Declared in the planner (sensor_coverage_planner_ground.cpp:101–114), read by
+Declared in the planner (sensor_coverage_planner_ground.cpp:68–81), read by
 `KeyposeGraph::ReadParameters` (keypose_graph.cpp:46). The hardcoded constructor
-defaults (lines 31–37) are immediately overwritten by `ReadParameters`, so the
-declared/yaml values are what actually take effect.
+defaults (lines 31–37; note they initialise only 7 of the 8 —
+`kAddNonKeyposeNodeMinDist` is left uninitialised until `ReadParameters`) are
+immediately overwritten by `ReadParameters`, so the declared/yaml values are what
+actually take effect. Every one of the 8 has an explicit declared default; the
+scenario yaml (`config/<scenario>.yaml`) overrides all 8 and comes in two
+families:
 
-| Param | Role | Declared default |
-|---|---|---|
-| `kAddNodeMinDist` | min spacing between keypose nodes (dedup) | 0.5 |
-| `kAddNonKeyposeNodeMinDist` | min spacing for connector nodes; also the reachability radius | (yaml) |
-| `kAddEdgeConnectDistThr` | max distance to *attempt* a cross-link edge | 0.5 |
-| `kAddEdgeToLastKeyposeDistThr` | prefer first edge to last keypose if within this | (yaml) |
-| `kAddEdgeVerticalThreshold` | max z-gap for any edge (floor separation) | 1.0 |
-| `kAddEdgeCollisionCheckResolution` | ray-march step for edge collision tests | 0.5 |
-| `kAddEdgeCollisionCheckRadius` | collision-check radius | (yaml) |
-| `kAddEdgeCollisionCheckPointNumThr` | point-count threshold for a segment to count as in-collision | 1 |
+| Param | Role | Declared default | matterport_sim/real/bagfile, go2w_bag_direct | indoor / outdoor / tunnel |
+|---|---|---|---|---|
+| `kAddNodeMinDist` | min spacing between keypose nodes (dedup) | 0.5 | 0.3 | 1.0 |
+| `kAddNonKeyposeNodeMinDist` | min spacing for connector nodes; also the reachability radius | 0.5 | 0.3 | 0.5 |
+| `kAddEdgeConnectDistThr` | max distance to *attempt* a cross-link edge | 0.5 | 0.5 | 3.0 |
+| `kAddEdgeToLastKeyposeDistThr` | prefer first edge to last keypose if within this | 0.5 | 0.5 | 3.0 |
+| `kAddEdgeVerticalThreshold` | max z-gap for any edge (floor separation) | 0.5 | 0.5 | 1.0 |
+| `kAddEdgeCollisionCheckResolution` | ray-march step for edge collision tests | 0.5 | 0.1 | 0.4 |
+| `kAddEdgeCollisionCheckRadius` | collision-check radius | 0.5 | 0.2 | 0.4 |
+| `kAddEdgeCollisionCheckPointNumThr` | point-count threshold for a segment to count as in-collision | 1 | 1 | 1 |
 
 ---
 

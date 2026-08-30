@@ -1,8 +1,10 @@
 # representation
 
-The **canonical in-memory scene graph** of the SysNav planner. `representation_ns::Representation` is a single object owned by `SensorCoveragePlanner3D` (`sensor_coverage_planner_ground.cpp:384`) that fuses three asynchronous data streams — semantic-mapping object updates, room-segmentation room updates, and the planner's own keypose-driven viewpoint samples — into one coherent graph of **viewpoints ↔ rooms ↔ objects**. Every higher-level planning decision (which room to enter next, which viewpoint to ask a VLM about, whether the target object has been seen) reads from this object.
+The **canonical in-memory scene graph** of the SysNav planner. `representation_ns::Representation` is a single object owned by `SensorCoveragePlanner3D` (`sensor_coverage_planner_ground.cpp:266`) that fuses three asynchronous data streams — semantic-mapping object updates, room-segmentation room updates, and the planner's own keypose-driven viewpoint samples — into one coherent graph of **viewpoints ↔ rooms ↔ objects**. Every higher-level planning decision (which room to enter next, which viewpoint to ask a VLM about, whether the target object has been seen) reads from this object.
 
 There is no ROS interface here — `Representation` is a pure data structure. All I/O happens in `SensorCoveragePlanner3D` callbacks and timers, which write to `Representation` after deserializing inbound messages.
+
+> Verified against `rsb_test` @ e9504a4 (2026-08-29). Planner line numbers below refer to `src/sensor_coverage_planner/sensor_coverage_planner_ground.cpp` on that commit.
 
 | File | Purpose |
 | --- | --- |
@@ -44,7 +46,7 @@ There is no ROS interface here — `Representation` is a pure data structure. Al
 | `timestamp_` | `rclcpp::Time` | Stamp the viewpoint was added (taken from `viewpoint_rep_msg_.header.stamp`). |
 | `room_id_` | `int` | Room this viewpoint sits in. Written at creation, then re-resolved every `RoomMaskCallback` (see "Relations" below). `-1` if off-map. |
 | `object_indices_` | `set<int>` | All objects geometrically visible from this viewpoint (via occupancy-grid ray-cast in `UpdateObjectVisibility` / `UpdateViewpointObjectVisibility`). Superset of `direct_object_indices_`. |
-| `direct_object_indices_` | `set<int>` | Objects whose detection frame was aligned to this viewpoint by `semantic_mapping_node` — i.e. the camera actually saw them here. Populated by `UpdateObjectNode` when `msg->viewpoint_id` matches. |
+| `direct_object_indices_` | `set<int>` | Objects whose detection frame was aligned to this viewpoint by `semantic_mapping_node` — i.e. the camera actually saw them here. Populated by `UpdateObjectNode` when `msg->viewpoint_id >= 0` (`representation.cpp:227`) and by the prior-link branch of `UpdateObjectVisibility` (planner `:1059-1063`). No reader in the planner on this branch. |
 
 There are **no setters that delete** — viewpoints append-only forever. `id_ == index` is an implicit invariant; nothing erases or inserts mid-vector.
 
@@ -65,22 +67,18 @@ Fields split by who writes them:
 | `is_connected_` | `bool` | Reachable from the room currently containing the robot. |
 | `alive` | `bool` | Lifecycle flag set to `true` on update, set `false` by the planner before re-ingest (see `RoomNodeListCallback`). |
 
-**Written by the planner (VLM / room-typing pipeline):** see the room_segmentation README's [Room labeling](../room_segmentation/README.md#room-labeling--the-semantic-room-type) section for the full mechanism.
+**Written by the planner (room-typing query/answer cycle):** the mechanism is documented in [`ROOM_LABELING.md`](../sensor_coverage_planner/ROOM_LABELING.md); only the fields are listed here. Query side = `UpdateRoomLabel` (`:1813`), answer side = `RoomTypeCallback` (`:764`).
 | Field | Type | Meaning |
 |---|---|---|
-| `labels_` | `map<string, int>` | Room-type label store. **Latest answer wins**: `RoomTypeCallback` sets it to `{answer: 1}` (no vote accumulation), so `GetRoomLabel()` returns the most recent VLM answer. |
-| `best_views_` | `vector<RoomView>` | Up to 3 best camera observations of the room (`{image_path, camera_pos, camera_yaw, anchor_xy, coverage_m2}`); the jpgs live on disk, only paths are held. The query payload. |
-| `views_dirty_` | `bool` | `best_views_` changed since the last query → re-query. |
-| `last_query_time_` | `double` | Wall seconds of the last query (per-room rate limit). |
-| `objects_at_last_query_` | `int` | Object count at the last query (new-object re-query trigger). |
-| `is_labeled_` | `bool` | True once a room has been queried/answered. **Navigation** flag, not "we have a type". |
-| `is_visited_` | `bool` | Set by `UpdateGlobalRepresentation` / `SetIsVisited` when the robot has entered. |
-| `is_covered_` | `bool` | **Legacy** (navigation bookkeeping) — no writer remains since the steering code was deleted. |
-| `is_asked_` | `int` | **Legacy** early-stop counter — no writer remains. |
-| `voxel_num_` | `int` | **Legacy** covered-voxel count — no writer remains (`UpdateRoomLabel` was deleted). |
-| `anchor_point_` | `Point` | **Legacy** navigation anchor — no writer remains; answers re-resolve rooms via `interior_point_` instead. |
-| `image_` | `cv::Mat` | Legacy single-frame crop slot; no longer used by the best-3 pipeline. |
-| `last_area_` | `float` | Area at the moment the room was last (re-)queried (navigation bookkeeping). |
+| `labels_` | `map<string, int>` | Coverage-weighted vote map: `RoomTypeCallback` does `labels_[room_type] += msg->voxel_num` (`:792`); `GetRoomLabel()` returns the argmax (`representation.h:223-240`), empty string until the first answer. |
+| `is_labeled_` | `bool` | "Asked" flag: set `true` by `UpdateRoomLabel` when a query is *sent* (`:1870`, `:1936`) and again by `RoomTypeCallback` on answer (`:793`). Does **not** mean a label exists — test `GetRoomLabel().empty()` for that. Cleared by `ClearRoomLabels()`. |
+| `voxel_num_` | `int` | Covered-voxel count binned into the room at the last query (`SetVoxelNum`, `:1869`, `:1935`); >20 new voxels triggers a re-query (`:1929`). |
+| `last_area_` | `float` | Room area at the last query (`SetLastArea`, `:1902`, `:1979`); >5 m² growth triggers a re-query (`:1930`). |
+| `anchor_point_` | `Point` | Point sent in the query (`SetAnchorPoint`, `:1901`, `:1971`; `RoomType.anchor_point`). The answer re-resolves its room by sampling `room_mask_` at this point (`:769-780`), and `RoomNodeListCallback` clears the room's labels if it no longer samples its own id (`:699-727`). |
+| `image_` | `cv::Mat` | Camera crop sent with the query (`SetImage`, `:1895`, `:1965`; `RoomType.image`). |
+| `is_visited_` | `bool` | Declared; **no writer** in the package (`SetIsVisited` is never called). |
+| `is_covered_` | `bool` | **Legacy** navigation flag — no writer, no reader remains. |
+| `is_asked_` | `int` | **Legacy** early-stop counter — no writer, no reader remains (only reset to 2 by `ClearRoomLabels()`). |
 
 **Written by the planner (graph crosslinks):**
 | Field | Type | Meaning |
@@ -109,7 +107,7 @@ Fields split by who writes them:
 |---|---|---|
 | `room_id_` | `int` | Room containing the object. Maintained by `SetObjectRoomRelation` in `UpdateObjectVisibility`. `-1` until first assignment. |
 | `visible_viewpoint_indices_` | `set<int>` | Viewpoints from which this object is visible (ray-cast or direct). |
-| `is_considered_` / `is_considered_strong_` | `bool` | "Already inspected as a target candidate" flags. Reset to false on new `target_object_instruction`. |
+| `is_considered_` / `is_considered_strong_` | `bool` | "Already inspected as a target candidate" flags. `is_considered_` is reset to `false` by `Representation::UpdateObjectNode` when the message carries `viewpoint_id >= 0` (`representation.cpp:228`), by `ObjectNodeRep::UpdateObjectNode` when the object is not yet VLM-asked and not strong (`representation.cpp:124-127`), and by `RoomTypeCallback` for every object in a room whose label just changed (planner `:803`). `is_considered_strong_` has no writer or reader in the package. |
 | `voxels_` | `vector<Vector3i>` | (declared, not used in the current code path) |
 
 `object_id_[0]` is the primary handle used everywhere — `object_node_rep_map_`'s key, `visible_viewpoint_indices_` entries, etc.
@@ -133,15 +131,13 @@ pcl::PointCloud<pcl::PointXYZI>::Ptr          covered_points_all_;
 ## How the graph gets populated — three feeders
 
 ### Feeder 1: `semantic_mapping_node` → objects
-`/object_nodes_list` → `SensorCoveragePlanner3D::ObjectNodeListCallback` (`sensor_coverage_planner_ground.cpp:946`):
+`/object_nodes_list` → `SensorCoveragePlanner3D::ObjectNodeListCallback` (`sensor_coverage_planner_ground.cpp:545`):
 
 ```cpp
 for (const auto& node : msg->nodes) {
   if (node.status == false) {                     // delete
-    for (auto obj_id : node.object_id) {
-      if (obj_id == found_object_id_) continue;   // never remove the active target
+    for (auto obj_id : node.object_id)
       object_ids_to_remove_.push_back(obj_id);
-    }
     continue;
   }
   if (node.cloud.data.empty()) continue;          // skip empty
@@ -150,12 +146,12 @@ for (const auto& node : msg->nodes) {
 }
 ```
 
-So adds/updates flow directly into `object_node_rep_map_[id]` via `UpdateObjectNode` (which also stitches the viewpoint↔object back-link if `msg->viewpoint_id >= 0`). Deletes are *deferred* into `object_ids_to_remove_` and processed later in the planning loop (around line 4888: `representation_->GetObjectNodeRepMapMutable().erase(obj_id)` after cleaning up the object's links).
+So adds/updates flow directly into `object_node_rep_map_[id]` via `UpdateObjectNode` (which also stitches the viewpoint↔object back-link if `msg->viewpoint_id >= 0`). Deletes are *deferred* into `object_ids_to_remove_` and applied by `ProcessObjectNodes()` (`:2277-2295`), which runs at the **top** of `execute()` (`:1621`) every tick, before any scene-graph update: it erases the id from `object_node_rep_map_` and `latest_object_node_indices_`, then drops it from every viewpoint's `object_indices_`/`direct_object_indices_` and every room's `object_indices_`.
 
 Every entered/updated id also lands in `latest_object_node_indices_` — a per-cycle work queue consumed by `UpdateObjectVisibility`.
 
 ### Feeder 2: `room_segmentation` → rooms
-`/room_nodes_list` → `RoomNodeListCallback` (line 1062). The pattern is "mark all dead, ingest, sweep":
+`/room_nodes_list` → `RoomNodeListCallback` (line 657). The pattern is "mark all dead, ingest, sweep":
 
 ```cpp
 for (auto &kv : representation_->GetRoomNodesMapMutable()) kv.second.SetAlive(false);
@@ -171,15 +167,15 @@ for (auto it = ...; ) {
 }
 ```
 
-So "this room disappeared" is signalled implicitly — by simply not being in the latest list. After the sweep, the planner also validates each labeled room's `anchor_point_` still falls inside the (potentially re-shaped) room mask; if not, the room's VLM labels are cleared (lines 1100-1126).
+So "this room disappeared" is signalled implicitly — by simply not being in the latest list. After the sweep, the planner also validates each labeled room's `anchor_point_` still falls inside the (potentially re-shaped) room mask; if not, the room's VLM labels are cleared via `ClearRoomLabels()` (lines 699-727).
 
-Then `/room_mask` arrives separately and triggers `RoomMaskCallback` (line 1129), which calls `representation_->UpdateViewpointRoomIdsFromMask(room_mask_, shift_, room_resolution_)` — re-binds every viewpoint to its current room. This makes the viewpoint↔room link automatically rebalance when rooms split, merge, or get renumbered.
+Then `/room_mask` arrives separately and triggers `RoomMaskCallback` (line 729), which (once `initialized_`) calls `representation_->UpdateViewpointRoomIdsFromMask(room_mask_, shift_, room_resolution_)` — re-binds every viewpoint to its current room. This makes the viewpoint↔room link automatically rebalance when rooms split, merge, or get renumbered.
 
 ### Feeder 3: planner itself → viewpoints
-`SensorCoveragePlanner3D::UpdateViewpointRep` (line 3726, called every cycle):
+`SensorCoveragePlanner3D::UpdateViewpointRep` (line 1697, called every cycle):
 
 A new viewpoint is added when **either** of these fires:
-- **Coverage drift**: `intersect(current_obs_voxel_inds_, previous_obs_voxel_inds_)` is small both absolutely (`< rep_threshold_voxel_num_`) and as a fraction of the current observation (`< rep_threshold_`, default 0.1).
+- **Coverage drift**: `intersect(current_obs_voxel_inds_, previous_obs_voxel_inds_)` is small both absolutely (`< rep_threshold_voxel_num_`) and as a fraction of the current observation (`< rep_threshold_`). `rep_threshold_` has a code default of 0.1 (`:181`) but every `config/*.yaml` overrides it (0.45–0.75); `rep_threshold_voxel_num_` is derived from it and `kRepSensorRange` (default 5.0, `:183`, read into `rep_sensor_range` at `:270`) at `:271`.
 - **Object pressure**: `obj_score_ > 4.0`, where `obj_score_` is built in `UpdateObjectVisibility` from how many objects are newly-visible from the current robot position (`+1.0` if no viewpoint has seen them, `+0.2` if already-seen).
 
 `AddViewPointRep` also enforces a **2.0 m proximity floor**: if any existing viewpoint is within 2 m, no new node is created and the closest existing index is returned. `/viewpoint_rep_header` is only published when a *fresh* viewpoint actually got added (`prev_size != curr_size`) — that header is the signal to `semantic_mapping_node` to align one mapping cycle to this viewpoint id.
@@ -199,20 +195,20 @@ There are three relation kinds. All are kept bidirectional. Helper functions liv
 Removes the viewpoint id from the old room's `viewpoint_indices_`, sets `viewpoint.room_id_ = new_room_id`, inserts into the new room's `viewpoint_indices_`. Called from `UpdateViewpointRoomIdsFromMask` (one viewpoint at a time, every `/room_mask` message). Idempotent — calling with `old == new` is a no-op.
 
 ### Object ↔ Room (`SetObjectRoomRelation`, line 377)
-Same pattern: drop from old room's `object_indices_`, set `object.room_id_`, insert into new room's `object_indices_`. Called from `UpdateObjectVisibility` (line 2341) for every object touched this cycle. The planner first looks up the object's position in `room_mask_`; if the lookup returns 0 (the object's centroid landed on a border / unmapped pixel), it dilates by 2 voxels and uses the first non-zero room id found. Objects whose dilated lookup is still 0 get `room_id_ = -1`.
+Same pattern: drop from old room's `object_indices_`, set `object.room_id_`, insert into new room's `object_indices_`. Called from `UpdateObjectVisibility` (line 1164) for every object touched this cycle. The planner first looks up the object's position in `room_mask_`; if the lookup returns 0 (the object's centroid landed on a border / unmapped pixel), it dilates by 2 voxels and uses the first non-zero room id found. If the dilated lookup is still 0, `SetObjectRoomRelation(id, 0)` is still called but returns early because room 0 is not in `room_nodes_map_` (`representation.cpp:383-386`), so the object **keeps its previous `room_id_`** (`-1` only if it was never assigned). Objects whose centroid is outside the mask bounds are skipped entirely.
 
 ### Object ↔ Viewpoint
 This is the most complex link, written in three places:
 
 1. **`UpdateObjectNode`** (`representation.cpp:215`). When `semantic_mapping_node` stamps `viewpoint_id` on its `ObjectNode` message, the planner adds the object to `viewpoint.direct_object_indices_` (and to `viewpoint.object_indices_` implicitly via the equivalent visibility check next), and adds the viewpoint id to `object.visible_viewpoint_indices_`. This is the *direct* link — "the camera frame aligned to this viewpoint actually contained this detection".
 
-2. **`UpdateObjectVisibility`** (planner line 2200). For every object in `latest_object_node_indices_`, walk every viewpoint:
+2. **`UpdateObjectVisibility`** (planner line 1027). For every object in `latest_object_node_indices_`, walk every viewpoint:
    - If the viewpoint already lists this object → idempotent re-affirm.
-   - Else if the object's `visible_viewpoint_indices_` already contains this viewpoint → trust the prior link (no ray-cast).
+   - Else if the object's `visible_viewpoint_indices_` already contains this viewpoint → trust the prior link (no ray-cast) and promote it into **both** `object_indices_` and `direct_object_indices_` (`:1059-1063`). This is how a direct detection from `UpdateObjectNode` gets its `object_indices_` half.
    - Else if the viewpoint is within `rep_sensor_range` → run `CheckLineOfSightInOccupancyGrid` against each voxel of the object's cloud; the first that's reachable promotes the pair.
-   Hits go into `viewpoint.object_indices_` only (NOT into `direct_object_indices_`).
+   Ray-cast hits go into `viewpoint.object_indices_` only (NOT into `direct_object_indices_`).
 
-3. **`UpdateViewpointObjectVisibility`** (planner line 2401). Called once at the end of the cycle if a new viewpoint was just added — ray-casts the fresh viewpoint against *every* existing object. Fills in the new viewpoint's `object_indices_`.
+3. **`UpdateViewpointObjectVisibility`** (planner line 1224). Called once at the end of the cycle if a new viewpoint was just added — ray-casts the fresh viewpoint against *every* existing object. Fills in the new viewpoint's `object_indices_`.
 
 After visibility runs, any object id that was paired with at least one viewpoint is erased from `latest_object_node_indices_`. So an object reappears in that set every time semantic mapping publishes a new update for it.
 
@@ -220,18 +216,20 @@ After visibility runs, any object id that was paired with at least one viewpoint
 
 ## The per-cycle update sequence
 
-The orchestration lives in the main planning loop, `execute()`. When `keypose_cloud_update_` fires:
+The orchestration lives in the main planning loop, `execute()` (`:1610`). `ProcessObjectNodes()` (`:1621`) runs first on every tick, applying the deferred object deletes. Then, when `keypose_cloud_update_` fires (`:1630`):
 
 ```
-SetCurrentRoomId()                 // updates current_room_id_ from room_mask_ at the robot pose.
+UpdateRoomLabel()                  // room-typing query side (see ROOM_LABELING.md): bins covered
+                                   // voxels per room, publishes /room_type_query, writes
+                                   // voxel_num_/anchor_point_/image_/last_area_/is_labeled_.
 
-PublishRoomTypeQueries()           // per room: if best-3 views or object set changed (rate-limited),
-                                   // emits /room_type_query (image paths + object inventory + current label).
+SetCurrentRoomId()                 // updates current_room_id_ from room_mask_ at the robot pose.
 
 UpdateObjectVisibility()           // object↔viewpoint ray-casts + obj_room_relation;
                                    // builds obj_score_ for the next step.
 
-UpdateGlobalRepresentation()       // grid_world_ accounting (separate subsystem).
+UpdateGlobalRepresentation()       // grid_world_ / planning_env_ accounting (separate subsystem;
+                                   // touches no room or object fields).
 
 UpdateViewpointRep()               // decides whether to AddViewPointRep this cycle.
 
@@ -240,17 +238,20 @@ PublishViewpointRoomIdMarkers()    // RViz markers from viewpoint_reps_.
 if (add_viewpoint_rep_)
   UpdateViewpointObjectVisibility()  // populates the brand-new viewpoint's object_indices_.
 
-CreateVisibilityMarkers()          // line markers viewpoint → object for each direct/indirect link.
+CreateVisibilityMarkers()          // line markers viewpoint → object for each link.
 
 UpdateViewPoints()                 // viewpoint manager uses
                                    // representation_->GetViewPointReps() implicitly.
 ```
 
+The cycle ends with `PublishRoomTypeVisualization()` / `PublishObjectNodeMarkers()` (`:1692-1693`).
+
 Other callbacks plug in asynchronously:
 - `ObjectNodeListCallback` writes to `object_node_rep_map_` / queues deletes.
 - `RoomNodeListCallback` writes/sweeps `room_nodes_map_`.
 - `RoomMaskCallback` re-binds viewpoints to rooms.
-- `RoomTypeCallback`: **latest answer wins** — `room_node.labels_.clear(); labels_[room_type] = 1`, and it is the **only** writer of `is_labeled_` (set when a real VLM answer lands).
+- `RoomTypeCallback` (`:764`, on `/room_type_answer`): re-resolves the room from the answer's `anchor_point` via `room_mask_`, adds `voxel_num` votes to `labels_[room_type]`, sets `is_labeled_`, and if the argmax label changed resets `is_considered_` on the room's objects.
+- `KeyboardInputCallback` (`:809`): only handles `"reset"` → `tmp_flag_` → `viewpoint_manager_->ResetViewPointCoverage()` (`:1623-1626`). It never touches `Representation`.
 
 ---
 
@@ -261,19 +262,17 @@ A non-exhaustive map of who reads what:
 | Consumer | Reads | For |
 |---|---|---|
 | `viewpoint_manager_` | `viewpoint_reps_` (positions, clouds, covered clouds) | Candidate viewpoint sampling and coverage scoring. |
-| `PublishRoomTypeQueries` | `room_nodes_map_` (best-3 views, `object_indices_`) | Decides which rooms need (re-)typing; publishes `/room_type_query`. |
+| `UpdateRoomLabel` | `room_nodes_map_` (`voxel_num_`, `last_area_`, `room_mask_`, `is_labeled_`) | Decides which rooms need (re-)typing; publishes `/room_type_query`. |
 | `UpdateObjectVisibility` | `object_node_rep_map_`, `viewpoint_reps_`, `room_mask_` | Maintains all three relation types each cycle. |
-| `scene_graph_exporter` | everything | Snapshots the whole `Representation` (+ NavGraph) to JSON. |
-| `KeyboardInputCallback "next"` | `object_node_rep_map_[found_object_id_]` | Marks the current found object as fully considered, freeing the planner to look for the next instance. |
-| `CreateVisibilityMarkers`, `PublishViewpointRoomIdMarkers` | `viewpoint_reps_` (`object_indices_`, `room_id_`) | RViz visualization of the live scene graph. |
+| `PublishRoomTypeVisualization` (`:1999`) | `room_nodes_map_` (`GetRoomLabel()`, `IsLabeled()`) | RViz text marker `"<id> <label>"` per room (`:2036-2038`). |
+| `CreateVisibilityMarkers`, `PublishViewpointRoomIdMarkers`, `PublishObjectNodeMarkers` (`:2243`) | `viewpoint_reps_` (`object_indices_`, `room_id_`), `object_node_rep_map_` | RViz visualization of the live scene graph. |
 | `viewpoint_rep_vis_cloud_`, `covered_points_all_` | (managed by `Representation` itself) | Coverage visualisation. |
 
-Plus reads scattered throughout the planning loop:
-- `representation_->GetRoomNode(id).IsCovered()`, `.IsLabeled()`, `.GetObjectIndices()` — gating logic for room-by-room exploration.
-- `representation_->GetObjectNodeRep(id).IsConsideredStrong()` — skipping objects that were already inspected as candidates.
-- `representation_->GetRoomNode(id).SetIsVisited(true)` — checked off when the robot enters.
+Nothing exports: `ToJSON()` is a stub and no node on this branch serialises `Representation`.
 
-So the planner's high-level loop is essentially: **"look at the graph, decide what to ask the VLM and where to go next, execute, write the result back into the graph."**
+Plus `RoomNodeListCallback` reads `IsLabeled()` / `GetRoomLabel()` for its sweep log and anchor validation (`:690-691`, `:707`). There are **no** readers of `IsCovered()`, `IsVisited()`, `IsConsidered[Strong]()` or `GetIsAsked()` anywhere in the package — the navigation gating that used them was deleted.
+
+So on this branch the loop is essentially: **ingest rooms/objects → bind them to viewpoints → ask the VLM to type rooms → publish markers.** No planning decision reads the graph's flags.
 
 ---
 
@@ -331,7 +330,7 @@ std::string ToJSON() const;   // **STUB** — declared but not implemented (repr
 
 7. **`/viewpoint_rep_header` is only published on a real add**, never on a proximity-dedup hit. If you grep for `viewpoint_rep_pub_->publish` you'll find exactly one site, behind `if (prev_size != curr_size)`. Don't expect a header per `UpdateViewpointRep` call.
 
-8. **`direct_object_indices_` is a strict subset of `object_indices_`.** A direct detection always promotes both; a ray-cast hit promotes only the indirect one. This distinction matters for the VLM pipeline — you generally want to query a viewpoint whose `direct_object_indices_` contains the target, because that's the viewpoint whose camera frame has the best masked crop.
+8. **`direct_object_indices_` is a subset of `object_indices_`** — after the next `UpdateObjectVisibility` pass. `UpdateObjectNode` writes only the direct set (`representation.cpp:227`); the prior-link branch at `:1059-1063` then promotes the pair into both sets. A ray-cast hit promotes only the indirect one. Nothing on this branch reads `direct_object_indices_` (no `GetDirectObjectIndices` call site in the planner).
 
 9. **`ToJSON()` is unimplemented** (`representation.cpp:209-213`). If you want to dump the scene graph for offline analysis, you need to either implement it or iterate the public collections from outside.
 
@@ -343,8 +342,8 @@ std::string ToJSON() const;   // **STUB** — declared but not implemented (repr
 
 ## When something looks wrong
 
-- **Objects without a room (`room_id_ == -1`)** → centroid landed outside `room_mask_` or on a 0-pixel even after dilation. Often because the room mask hasn't been published yet for the area where the object lives — wait a cycle. If persistent, the object centroid is in unmapped territory (free-space gap or off-grid).
+- **Objects without a room (`room_id_ == -1`)** → centroid landed outside `room_mask_` or on a 0-pixel even after dilation, and the object was never bound before (a previously bound object keeps its old `room_id_`, see `SetObjectRoomRelation` early return). Often because the room mask hasn't been published yet for the area where the object lives — wait a cycle. If persistent, the object centroid is in unmapped territory (free-space gap or off-grid).
 - **Viewpoint with stale `room_id_`** → check that `/room_mask` is being delivered; `UpdateViewpointRoomIdsFromMask` is the only place that re-binds them after creation.
 - **Same physical object appears twice** → not a representation bug. `Representation` keys strictly by `object_id_[0]`; duplicates mean semantic mapping's merging didn't fire (see semantic_mapping README §B).
-- **A room never gets typed** → the query gate never fired: the room has no admitted best-3 view **and** no objects (evidence requirement), or queries are being rate-limited (`room_type_query.min_interval_s`), or the VLM answers are failing (check the vlm node log; there is no retry on API errors).
+- **A room never gets typed** → the query gate in `UpdateRoomLabel` never fired: no covered voxels were binned into the room (`room_counts[room_id] == 0`, `:1857`), or it was already asked (`is_labeled_`) and has not grown by >20 voxels / >5 m² since (`:1929-1930`), or no answer came back on `/room_type_answer` (check the vlm node log). Details in [`ROOM_LABELING.md`](../sensor_coverage_planner/ROOM_LABELING.md).
 - **Visibility markers show wrong objects per viewpoint** → that's the live state of `viewpoint.object_indices_`. To debug a specific viewpoint, log its `GetObjectIndices()` and compare against the result of `CheckLineOfSightInOccupancyGrid` for each object — most issues are stale ray-casts after the occupancy grid shifted, not bugs in `Representation` itself.

@@ -1,12 +1,14 @@
 # semantic_mapping
 
-ROS 2 package that builds and maintains a 3D semantic object map from a single RGB camera + a registered LiDAR scan + odometry. Detection (YOLO‑World) and SAM2 segmentation are fused with the cloud to *lift* every detected mask into a per‑instance voxel cloud. A lifecycle manager keeps a persistent list of `SingleObject`s, merging duplicates, growing them with new observations, and deleting stale ones.
+ROS 2 package that builds and maintains a 3D semantic object map from a single RGB camera + a registered LiDAR scan + odometry. Detection (YOLOE, open‑vocabulary) and SAM2 segmentation are fused with the cloud to *lift* every detected mask into a per‑instance voxel cloud. A lifecycle manager keeps a persistent list of `SingleObject`s, merging duplicates, growing them with new observations, and deleting stale ones.
+
+> Verified against `rsb_test` @ e9504a4 (2026-08-29). This package is sysnav's (`rsb`) version restored verbatim in Phase 3; the only source difference vs `rsb` is the YOLOE detector swap (2 lines in `detection_node.py`, see `git diff rsb rsb_test -- src/semantic_mapping`).
 
 Two ROS nodes are shipped:
 
 | Executable | File | Purpose |
 | --- | --- | --- |
-| `detection_node` | `semantic_mapping/detection_node.py` | YOLO‑World + BoT‑SORT 2D detection/tracking. Publishes `DetectionResult` (bboxes + track ids + RGB). |
+| `detection_node` | `semantic_mapping/detection_node.py` | YOLOE + BoT‑SORT 2D detection/tracking. Publishes `DetectionResult` (bboxes + track ids + RGB). |
 | `semantic_mapping_node` | `semantic_mapping/semantic_mapping_node.py` | Time‑syncs detections / odom / cloud, runs SAM2, lifts masks to 3D, and drives the lifecycle (`ObjMapper`). |
 
 ---
@@ -18,7 +20,7 @@ Two ROS nodes are shipped:
                           │
                           ▼
                   ┌───────────────┐
-                  │ detection_node│  YOLOv8‑World (+ BoT‑SORT track ids)
+                  │ detection_node│  YOLOE (+ BoT‑SORT track ids)
                   └───────────────┘
                           │  DetectionResult (track_id, xyxy, label, conf, image)
                           ▼
@@ -44,7 +46,7 @@ Two ROS nodes are shipped:
 
 ```
 semantic_mapping/
-├── detection_node.py         # YOLO‑World + BoT‑SORT, publishes DetectionResult
+├── detection_node.py         # YOLOE + BoT‑SORT, publishes DetectionResult
 ├── semantic_mapping_node.py  # Main node: time sync, SAM2, calls ObjMapper
 ├── semantic_map_new.py       # ObjMapper – manages list of SingleObject, add/update/merge/delete
 ├── single_object_new.py      # SingleObject + VoxelFeatureManager – per‑instance state
@@ -54,14 +56,14 @@ semantic_mapping/
 ├── tools/ros2_bag_utils.py   # Helpers for PointCloud2/Marker/Odom/TF + bag writer
 ├── config/objects.yaml       # Open‑vocabulary class list (text prompts, is_instance flag)
 └── config/botsort.yaml       # Tracker config used by ultralytics
-launch/                       # *.launch files (real / sim / bagfile / go2w)
+launch/                       # *.launch files (real / sim / bagfile)
 config/                       # ros__parameters yamls per platform
 ```
 
-External weights are expected at:
+External weights are loaded through **cwd‑relative** paths (`src/semantic_mapping/semantic_mapping/external/...`, `semantic_mapping_node.py:72`), and every `config/*.yaml` sets `object_file: src/semantic_mapping/semantic_mapping/config/objects.yaml` — the nodes must be launched from the workspace root (the root `system_*_teleop.sh` scripts `cd` there first). Files:
 
 - `semantic_mapping/external/sam2/checkpoints/sam2.1_hiera_base_plus.pt` (config `configs/sam2.1/sam2.1_hiera_b+.yaml`)
-- `semantic_mapping/external/yolov8x-worldv2_cus.engine` (TensorRT engine; substitute the equivalent `.pt` if no engine)
+- `semantic_mapping/external/yoloe-26x-seg.engine` (TensorRT engine, loaded as `YOLOE(..., task="segment")`, `detection_node.py:70`; `.onnx`/`.pt` siblings sit next to it). The older `yolov8x-worldv2_cus.engine` is still in `external/` but its load line is commented out (`detection_node.py:68`).
 
 ---
 
@@ -70,7 +72,7 @@ External weights are expected at:
 ### `detection_node`
 | dir | topic | type | notes |
 |---|---|---|---|
-| sub | `image_topic` (param, e.g. `/camera/image` or `/go2w_006/camera/image_rect_color`) | `sensor_msgs/Image` | BGR8 |
+| sub | `/camera/image` (hardcoded, `detection_node.py:97`; not a parameter) | `sensor_msgs/Image` | BGR8 |
 | pub | `/detection_result` | `tare_planner/DetectionResult` | bboxes + track ids + RGB image |
 | pub | `/annotated_image_detection` | `sensor_msgs/Image` | optional debug |
 
@@ -89,6 +91,7 @@ External weights are expected at:
 | pub | `/object_nodes_list` | `ObjectNodeList` | structured per‑object output. `status=True` = upsert, `status=False` = delete |
 | pub | `/object_type_query` | `ObjectType` | asks a VLM/captioner about a target candidate (sends best image path + id + label history) |
 | pub | `/annotated_image` | `sensor_msgs/Image` | SAM masks + tracker ids overlay |
+| pub | `/cloud_image` | `sensor_msgs/Image` | declared (`semantic_mapping_node.py:269`) but never published to in the current code |
 
 `tare_planner/ObjectNode` carries: `int32[] object_id` (list, because merges concatenate ids), `label`, `position`, `bbox3d[8]`, `cloud`, `status` (alive/deleted), `img_path` (best masked crop on disk), `is_asked_vlm`, `viewpoint_id`.
 
@@ -115,7 +118,7 @@ Locks (`cloud_cbk_lock`, `odom_cbk_lock`, `rgb_cbk_lock`, `detection_result_lock
 
 ## `CloudImageFusion` – mask → 3D cloud
 
-`CloudImageFusion(platform)` picks a `scan2pixels_<platform>` function. Supported: `wheelchair`, `mecanum`, `mecanum_bagfile`, `mecanum_sim`, `scannet`, `diablo`, `go2w`. Each one encodes the platform‑specific LiDAR‑to‑camera extrinsics + camera intrinsics (panoramic or pinhole). The `go2w_bag` path (direct LIO) sources its calibration from `camera_info` + tf at runtime and applies no gravity rotation.
+`CloudImageFusion(platform)` picks a `scan2pixels_<platform>` function. Supported (`platform_list`, `cloud_image_fusion.py:305`): `wheelchair`, `mecanum`, `mecanum_bagfile`, `mecanum_sim`, `scannet`, `diablo` (`mecanum_bagfile` shares the `mecanum` projection). Calibration is **hardcoded**: each function carries its own `CAMERA_PARA` dict with the camera offset/RPY and a panoramic 1920×640 image model (`mecanum` :136, `mecanum_sim` :74, `diablo` :207). Nothing is read from `camera_info` or tf at runtime.
 
 `generate_seg_cloud(cloud, masks, labels, confidences, R_b2w, t_b2w, image_src)`:
 
@@ -217,8 +220,7 @@ for i, obj in single_obj_list:
             obj.regularize_shape_v2(0.85)
             # DELETE branch ────────────────────────
             if (valid_regularized_voxels < 15
-                and inactive_frame > 50
-                and dominant_label ≠ target_object):
+                and inactive_frame > 50):    # intended `label ≠ target_object` guard is inert, see note below
                 publish_deleted_object(obj)          # batched into deleted_objects_batch
                 obj.cleanup_images(save_queue)       # async delete crop file
                 remove obj from single_obj_list
@@ -244,6 +246,8 @@ for i, obj in single_obj_list:
     if not merged: regularize_shape_v2 again
 ```
 
+> Delete‑guard note: the source reads `single_obj.get_dominant_label!=self.target_object` (`semantic_map_new.py:369`) — the method is not called, so the comparison is always True and **target‑labelled objects are deleted like any other**. Code as written (upstream sysnav bug, left verbatim for identity with `rsb`).
+
 Same‑class merging is by far the most common map‑shrinking event: it collapses a tracker that fragmented into multiple ids back into one object. Background objects (`obj_id < 0`) live in a separate list and never participate in merging.
 
 `MERGE_PRIMITIVE_GROUPS` (`[chair, sofa]`, `[table, desk]`) lists labels treated as equivalent by `is_merge_allowed`, but the same‑class merge branch above only fires when `dominant_label`s match; the primitive groups are checked elsewhere via `is_merge_allowed` (called by future cross‑class branches — kept for extensibility).
@@ -252,7 +256,7 @@ Same‑class merging is by far the most common map‑shrinking event: it collaps
 
 `to_ros2_msgs(stamp, viewpoint_id)` walks `single_obj_list` and, for every object that was `updated` since the last publish, emits:
 
-- a voxel cloud, colored by `map_label_to_color(label)` (red if `label == target_object` and `not is_asked_vlm`),
+- a voxel cloud, colored by `map_label_to_color(label)` (red whenever `label == target_object`, regardless of `is_asked_vlm` — `semantic_map_new.py:621`; only the text marker switches on `is_asked_vlm`),
 - a wireframe bbox `Marker` (id = first `obj_id`),
 - a text `Marker` showing `label(id)` or `Potential Target(id)` for unverified targets,
 - an `ObjectNode` entry in a single `ObjectNodeList` published per cycle.
@@ -266,7 +270,7 @@ Open‑vocabulary YOLO labels are noisy. When the operator (via `/target_object_
 1. Any existing object with that label is forced to re‑publish (`updated = True`).
 2. After each `update_map`, `check_target_objects()` returns candidates whose label matches `target_object` or `anchor_object`, have not yet been confirmed by the VLM (`is_asked_vlm == False`), and have a sufficiently large best image (`best_image_score > 500`).
 3. The node publishes `/object_type_query` with the object id, the candidate label set, and the path to the best masked crop on disk.
-4. An external VLM/captioner responds on `/object_type_answer` with `final_label`. `ObjMapper.update_target_object(id, final_label)` bumps that label's vote (+50) and confidence (50.0) so `weighted_class_scores` makes it dominant, then sets `is_asked_vlm = True` and forces a republish.
+4. An external VLM/captioner responds on `/object_type_answer` with `final_label`. `ObjMapper.update_target_object(id, final_label)` adds +50 to that label's vote; if `final_label` differs from the current dominant label it also sets `conf_list[final_label] = 50.0`. When it equals it, the line is `conf_list[new_label] == 50.0` — a comparison, so no confidence bump (`semantic_map_new.py:764-769`; code as written, upstream sysnav bug, left verbatim for identity with `rsb`). Then sets `is_asked_vlm = True` and forces a republish.
 
 The `Captioner` import is optional; if `captioner` is not on the Python path the module loads in a "no captioning" fallback.
 
@@ -281,8 +285,8 @@ The `Captioner` import is optional; if `captioner` is not on the Python path the
 | **Update** | Detection id matches existing object | Voxels merged, label histogram bumped, pose stored (if novel), `inactive_frame = -1`, best image possibly replaced |
 | **Reproject‑only update** | Object visible but not detected this frame | `reproject_obs_angle` adds angle coverage; `inactive_frame += 1` only happens through the no‑update branch |
 | **Merge** | Same‑label neighbor close enough or 3D IoU/ratio over threshold | Voxel managers fused (`update_through_vote_stat`), obj_id lists concatenated, ids/poses deduped, the *other* object is removed and announced via `status=False` `ObjectNode` |
-| **VLM relabel** | `/object_type_answer` arrives | `class_id[new_label] += 50`, `conf_list[new_label] = 50`, `is_asked_vlm = True`, force republish |
-| **Delete** | Not updated this frame **and** `inactive_frame > 50` **and** `<15` valid regularized voxels **and** label ≠ target | Removed from list, image file deletion queued, `status=False` ObjectNode published in next batch |
+| **VLM relabel** | `/object_type_answer` arrives | `class_id[new_label] += 50`, `conf_list[new_label] = 50` (only when the label changes, see § D), `is_asked_vlm = True`, force republish |
+| **Delete** | Not updated this frame **and** `inactive_frame > 50` **and** `<15` valid regularized voxels (the `label ≠ target` guard is inert, see § B) | Removed from list, image file deletion queued, `status=False` ObjectNode published in next batch |
 
 Inactive‑without‑deletion (`inactive_frame > 20`) is a soft state: the object stays in the list and continues to be published as long as it has enough voxels — it just won't be re‑optimized.
 
@@ -294,17 +298,16 @@ Inactive‑without‑deletion (`inactive_frame > 20`) is a soft state: the objec
 | File | Platform |
 |---|---|
 | `mapping_mecanum_real.yaml` | real mecanum robot |
-| `mapping_mecanum_sim.yaml`  | Gazebo mecanum |
+| `mapping_mecanum_sim.yaml`  | Unity sim mecanum (`system_simulation_teleop.sh`) |
 | `mapping_mecanum_bagfile.yaml` | replay a bag (different odom topic) |
-| `mapping_go2w.yaml` | Unitree Go2‑W (pinhole front camera, image topic override) |
 
-Common keys: `platform` (must be a key recognised by `CloudImageFusion`), `target_object`, `grounding_score_thresh`, `annotate_image`, `object_file` (path to `objects.yaml`), `detection_*_time_bias` (advance/delay detection timestamps relative to odom — useful for sensor latency calibration). `detection_node` extra: `image_topic`.
+Common keys: `platform` (must be a key recognised by `CloudImageFusion`), `target_object`, `grounding_score_thresh`, `annotate_image`, `object_file` (path to `objects.yaml`), `detection_*_time_bias` (advance/delay detection timestamps relative to odom — useful for sensor latency calibration). `detection_node` declares only `platform`, `grounding_score_thresh` (code default 0.3; all yamls set 0.35), `device`, `annotate_image`, `object_file` (`detection_node.py:47-51`); the image topic is not a parameter.
 
 ### Class vocabulary – `config/objects.yaml`
-Hierarchical map `meta_label → { prompts: [text...], is_instance: bool }`. The flattened list of `prompts` is what the YOLO‑World text encoder sees; `is_instance` controls whether merging treats each detection as a separate instance.
+Hierarchical map `meta_label → { prompts: [text...], is_instance: bool }`. The flattened list of `prompts` is used to map YOLOE class indices back to label strings (`detection_node.py:139`) — the vocabulary itself is baked into the `.engine`; `is_instance` controls whether merging treats each detection as a separate instance.
 
 ### Tracker – `config/botsort.yaml`
-Standard ultralytics BoT‑SORT config used by `YOLO.track(..., tracker=...)`.
+Standard ultralytics BoT‑SORT config used by `YOLOE.track(image, imgsz=(640, 1920), half=True, conf=grounding_score_thresh, persist=True, tracker=...)` (`detection_node.py:122`).
 
 ### Tunable mapping constants (`ObjMapper.__init__`)
 | Const | Default | Meaning |
@@ -344,9 +347,10 @@ Launch variants:
 | Launch file | When to use |
 |---|---|
 | `semantic_mapping_real.launch` + `detection_node.launch` | real mecanum |
-| `semantic_mapping_sim.launch` + `detection_node.launch` | sim (uses `use_sim_time:=true`) |
+| `semantic_mapping_sim.launch` + `detection_node.launch` | sim (pass `use_sim_time:=true`; the launch default is `false`) |
 | `semantic_mapping_bagfile.launch` + `detection_node.launch` | bag replay (subscribes `/aft_mapped_to_init_incremental` for odom) |
-| `semantic_mapping_go2w.launch` + `detection_node_go2w.launch` | Unitree Go2‑W (pinhole camera, gravity‑aligned cloud) |
+
+`detection_node.launch` always loads `mapping_mecanum_sim.yaml` (plus a dead `config_file` param pointing at a non‑existent path, `launch/detection_node.launch:21,26`) regardless of platform; harmless because the keys `detection_node` reads are identical across the three yamls.
 
 CLI debugging hooks:
 ```bash
