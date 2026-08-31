@@ -142,6 +142,18 @@ tare_planner_node:
     room_y: 3000
     room_z: 20
 
+    # SemPathBench snapshot export (tools/sempath_export): scene_graph_latest.json + room_mask_latest.png,
+    # written atomically every interval_s, on /keyboard_input == keyword, and once more at shutdown.
+    export:
+      enabled: true
+      output_dir: "output/sempath_export"   # relative to the node cwd (the teleop scripts cd to the repo root)
+      interval_s: 30.0                      # 0 = periodic export off
+      keyword: "export"
+      keep_history: false                   # also keep history/scene_graph_NNNN_<reason>.json + masks
+      include_clouds: true                  # per-object voxel clouds (downsampled) in the JSON
+      cloud_voxel_m: 0.05
+      mask_crop_margin_cells: 20
+
     kDoorCollisionCheckRadius : 0.35
     kDoorCollisionCheckPointNumThr : 1na
     

@@ -35,10 +35,16 @@ A fourth, independent product is the **BEV occupancy map** (`bev_mapper`).
  /registered_scan + /state_estimation ─► bev_mapper ─► /bev_map/grid, /bev_map/local, /bev_map/frontiers
 ```
 
-**There is no exporter on this branch.** The scene graph lives in memory in the
-scene-graph node and is inspected through RViz (`tare_planner_teleop.rviz`);
-`Representation::ToJSON()` is a stub. **Nothing in this stack steers the
-robot** — `local_planner` follows the teleop / waypoint commands only.
+The scene graph lives in memory in the scene-graph node and is inspected
+through RViz (`tare_planner_teleop.rviz`); `Representation::ToJSON()` is a stub.
+The one on-disk product is the **SemPathBench map export**: the scene-graph
+node and `bev_mapper` dump raw snapshots to `output/sempath_export/` (periodic,
+`/keyboard_input "export"`, and at shutdown) and the standalone tool
+`tools/sempath_export/` converts them into a SemPathBench (ProcTHOR-style)
+layered map under `output/sempath_maps/` — see
+[`tools/sempath_export/README.md`](tools/sempath_export/README.md).
+**Nothing in this stack steers the robot** — `local_planner` follows the
+teleop / waypoint commands only.
 
 ---
 
@@ -211,8 +217,11 @@ to the cwd, i.e. the workspace root when started by the scripts. Verbose
 scene-graph logging: `#define ROOM_DBG_ENABLED` at the top of the node's cpp
 (`[room_dbg] CREATE / DEATH / MASK_UPDATE / QUERY_PUB / ANSWER_APPLY`).
 
-A JSON export is a future addition (the deepclean-era exporter was removed with
-its NavGraph dependency; see `RSB_TEST_PLAN.md` for the history).
+Snapshot export: `output/sempath_export/{scene_graph_latest.json, room_mask_latest.png,
+bev_latest.npz}` (params `export.*` in the scenario yamls / `bev_mapper.yaml`), converted by
+`python3 -m tools.sempath_export.transform_sysnav_to_map` into a SemPathBench map bundle
+(`output/sempath_maps/<split>/<id>/`). The deepclean-era GADM exporter was removed with its
+NavGraph dependency; see `RSB_TEST_PLAN.md` for the history.
 
 ---
 
@@ -242,5 +251,6 @@ its NavGraph dependency; see `RSB_TEST_PLAN.md` for the history).
 | Traversability roadmap | [`keypose_graph/README.md`](src/exploration_planner/tare_planner/src/keypose_graph/README.md) |
 | SLAM contract, topics, config | [`slam/arise_slam_mid360/README.md`](src/slam/arise_slam_mid360/README.md) |
 | BEV map | [`bev_mapper/README.md`](src/bev_mapper/README.md) |
+| SemPathBench map export (dumps + converter) | [`tools/sempath_export/README.md`](tools/sempath_export/README.md) |
 | The node that owns & wires it all | `src/exploration_planner/tare_planner/src/sensor_coverage_planner/sensor_coverage_planner_ground.cpp` |
 | Why things were removed (history) | [`EXTRACTION_AUDIT.md`](EXTRACTION_AUDIT.md) (deepclean-era, superseded) |

@@ -38,6 +38,12 @@ a person walking with the robot (torso height is inside the obstacle band)
 leaves permanent marks along the path — ~55 % of the path cells on the
 mecanum test bag. Ray clearing (hit/miss counts) would be the fix.
 
+Snapshot export (`export.*` in the yaml): `bev_latest.npz` (occupancy / explored /
+trajectory channels + grid origin, `[row=+Y, col=+X]`) is written atomically to
+`export.output_dir` (`output/sempath_export`) every `export.interval_s`, on
+`/keyboard_input == export.keyword` and once more at shutdown; it is one of the
+three inputs of `tools/sempath_export/` (SemPathBench map converter).
+
 ```
 ros2 launch bev_mapper bev_mapper.launch.py            # standalone
 ros2 launch tare_planner scene_graph_real_robot.launch # bev:=false to skip

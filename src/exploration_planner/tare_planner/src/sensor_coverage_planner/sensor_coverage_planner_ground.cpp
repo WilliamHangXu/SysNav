@@ -16,6 +16,8 @@
 #include <chrono>
 #include <ctime>
 #include <fstream>
+#include <iomanip>
+#include <sstream>
 #include <unordered_set>
 #include <tf2/LinearMath/Matrix3x3.h>
 #include <tf2/LinearMath/Quaternion.h>
@@ -189,6 +191,26 @@ void SensorCoveragePlanner3D::ReadParameters() {
   room_voxel_dimension_.y() = this->get_parameter("room_y").as_int();
   room_voxel_dimension_.z() = this->get_parameter("room_z").as_int();
 
+  // SemPathBench snapshot export (tools/sempath_export)
+  this->declare_parameter<bool>("export.enabled", sempath_cfg_.enabled);
+  this->declare_parameter<std::string>("export.output_dir", sempath_cfg_.output_dir);
+  this->declare_parameter<double>("export.interval_s", sempath_cfg_.interval_s);
+  this->declare_parameter<std::string>("export.keyword", sempath_cfg_.keyword);
+  this->declare_parameter<bool>("export.keep_history", sempath_cfg_.keep_history);
+  this->declare_parameter<bool>("export.include_clouds", sempath_cfg_.include_clouds);
+  this->declare_parameter<double>("export.cloud_voxel_m", sempath_cfg_.cloud_voxel_m);
+  this->declare_parameter<int>("export.mask_crop_margin_cells", sempath_cfg_.mask_crop_margin_cells);
+  this->get_parameter("export.enabled", sempath_cfg_.enabled);
+  this->get_parameter("export.output_dir", sempath_cfg_.output_dir);
+  this->get_parameter("export.interval_s", sempath_cfg_.interval_s);
+  this->get_parameter("export.keyword", sempath_cfg_.keyword);
+  this->get_parameter("export.keep_history", sempath_cfg_.keep_history);
+  this->get_parameter("export.include_clouds", sempath_cfg_.include_clouds);
+  this->get_parameter("export.cloud_voxel_m", sempath_cfg_.cloud_voxel_m);
+  this->get_parameter("export.mask_crop_margin_cells", sempath_cfg_.mask_crop_margin_cells);
+  // The node cwd is whatever launched it (the teleop scripts cd to the repo root); pin the path now.
+  sempath_cfg_.output_dir =
+      std::filesystem::absolute(std::filesystem::path(sempath_cfg_.output_dir)).lexically_normal().string();
 }
 
 // void PlannerData::Initialize(rclcpp::Node::SharedPtr node_)
@@ -361,6 +383,26 @@ bool SensorCoveragePlanner3D::initialize() {
 
   execution_timer_ = this->create_wall_timer(
       1000ms, std::bind(&SensorCoveragePlanner3D::execute, this));
+
+  if (sempath_cfg_.enabled)
+  {
+    std::error_code ec;
+    std::filesystem::create_directories(sempath_cfg_.output_dir, ec);
+    if (ec)
+    {
+      RCLCPP_ERROR(this->get_logger(), "[sempath_export] cannot create %s: %s",
+                   sempath_cfg_.output_dir.c_str(), ec.message().c_str());
+    }
+    if (sempath_cfg_.interval_s > 0.0)
+    {
+      sempath_export_timer_ = this->create_wall_timer(
+          std::chrono::duration<double>(sempath_cfg_.interval_s),
+          [this]() { ExportSemPathSnapshot("periodic"); });
+    }
+    RCLCPP_INFO(this->get_logger(),
+                "[sempath_export] snapshots -> %s (every %.0f s, keyword \"%s\", final on shutdown)",
+                sempath_cfg_.output_dir.c_str(), sempath_cfg_.interval_s, sempath_cfg_.keyword.c_str());
+  }
 
   registered_scan_sub_ =
       this->create_subscription<sensor_msgs::msg::PointCloud2>(
@@ -811,6 +853,10 @@ void SensorCoveragePlanner3D::KeyboardInputCallback(const std_msgs::msg::String:
   if (keyboard_input_msg->data == "reset")
   {
     tmp_flag_ = true;
+  }
+  else if (keyboard_input_msg->data == sempath_cfg_.keyword)
+  {
+    ExportSemPathSnapshot("manual");
   }
 }
 
@@ -2292,6 +2338,306 @@ void SensorCoveragePlanner3D::ProcessObjectNodes()
     }
   }
   object_ids_to_remove_.clear();
+}
+
+// ===========================================================================
+// SemPathBench snapshot export (consumed offline by tools/sempath_export).
+// Raw dump of the in-memory scene graph; the converter builds the layered map.
+// ===========================================================================
+
+namespace
+{
+json PointToJson(const geometry_msgs::msg::Point& p)
+{
+  return json::array({p.x, p.y, p.z});
+}
+
+double Round3(double v)
+{
+  return std::round(v * 1000.0) / 1000.0;
+}
+}  // namespace
+
+bool SensorCoveragePlanner3D::WriteTextAtomic(const std::filesystem::path& path, const std::string& text,
+                                              rclcpp::Logger log)
+{
+  const std::filesystem::path tmp = path.parent_path() / ("." + path.filename().string() + ".tmp");
+  {
+    std::ofstream out(tmp);
+    if (!out)
+    {
+      RCLCPP_ERROR(log, "[sempath_export] cannot write %s", tmp.c_str());
+      return false;
+    }
+    out << text;
+  }
+  std::error_code ec;
+  std::filesystem::rename(tmp, path, ec);
+  if (ec)
+  {
+    RCLCPP_ERROR(log, "[sempath_export] cannot finalize %s: %s", path.c_str(), ec.message().c_str());
+    std::filesystem::remove(tmp, ec);
+    return false;
+  }
+  return true;
+}
+
+bool SensorCoveragePlanner3D::WriteRoomMaskPng(const std::filesystem::path& out_path, json& geometry) const
+{
+  geometry = nullptr;
+  if (room_mask_.empty())
+  {
+    return true;
+  }
+  const cv::Mat nonzero = room_mask_ != 0;  // CV_8U
+  const int nonzero_cells = cv::countNonZero(nonzero);
+  if (nonzero_cells == 0)
+  {
+    return true;
+  }
+  std::vector<cv::Point> points;
+  cv::findNonZero(nonzero, points);
+  cv::Rect bb = cv::boundingRect(points);  // x = col, y = row
+  const int margin = std::max(0, sempath_cfg_.mask_crop_margin_cells);
+  const int x0 = std::max(0, bb.x - margin);
+  const int y0 = std::max(0, bb.y - margin);
+  const int x1 = std::min(room_mask_.cols, bb.x + bb.width + margin);
+  const int y1 = std::min(room_mask_.rows, bb.y + bb.height + margin);
+  const cv::Rect crop_rect(x0, y0, x1 - x0, y1 - y0);
+  const cv::Mat crop = room_mask_(crop_rect);
+  double min_id = 0.0, max_id = 0.0;
+  cv::minMaxLoc(crop, &min_id, &max_id);
+
+  std::error_code ec;
+  std::filesystem::path final_path = out_path;
+  std::string dtype = "uint16";
+  if (min_id >= 0.0 && max_id < 65536.0)
+  {
+    cv::Mat crop16;
+    crop.convertTo(crop16, CV_16U);
+    const std::filesystem::path tmp = out_path.parent_path() / ("." + out_path.stem().string() + ".tmp.png");
+    if (!cv::imwrite(tmp.string(), crop16))
+    {
+      RCLCPP_ERROR(this->get_logger(), "[sempath_export] cannot write %s", tmp.c_str());
+      return false;
+    }
+    std::filesystem::rename(tmp, final_path, ec);
+  }
+  else
+  {
+    // Ids beyond uint16 (never seen in practice): raw little-endian int32 rows.
+    dtype = "int32";
+    final_path = out_path.parent_path() / (out_path.stem().string() + ".bin");
+    const std::filesystem::path tmp = out_path.parent_path() / ("." + out_path.stem().string() + ".tmp.bin");
+    {
+      std::ofstream out(tmp, std::ios::binary);
+      if (!out)
+      {
+        RCLCPP_ERROR(this->get_logger(), "[sempath_export] cannot write %s", tmp.c_str());
+        return false;
+      }
+      for (int r = 0; r < crop.rows; ++r)
+      {
+        out.write(reinterpret_cast<const char*>(crop.ptr<int>(r)), sizeof(int) * crop.cols);
+      }
+    }
+    std::filesystem::rename(tmp, final_path, ec);
+  }
+  if (ec)
+  {
+    RCLCPP_ERROR(this->get_logger(), "[sempath_export] cannot finalize %s: %s", final_path.c_str(),
+                 ec.message().c_str());
+    return false;
+  }
+  geometry = {
+    {"file", final_path.filename().string()},
+    {"dtype", dtype},
+    {"crop", {{"row0", crop_rect.y}, {"col0", crop_rect.x}, {"rows", crop_rect.height}, {"cols", crop_rect.width}}},
+    {"nonzero_cells", nonzero_cells},
+    {"max_id", static_cast<int>(max_id)},
+  };
+  return true;
+}
+
+json SensorCoveragePlanner3D::BuildSemPathSnapshotJson(const std::string& reason, const json& mask_geometry) const
+{
+  json snapshot;
+  snapshot["schema"] = "sysnav_scene_graph_dump/1";
+  snapshot["reason"] = reason;
+  {
+    const auto wall = std::chrono::system_clock::now();
+    const std::time_t wall_t = std::chrono::system_clock::to_time_t(wall);
+    std::ostringstream iso;
+    iso << std::put_time(std::gmtime(&wall_t), "%Y-%m-%dT%H:%M:%SZ");
+    snapshot["stamp"] = {
+      {"ros_sec", this->now().seconds()},
+      {"wall_unix", std::chrono::duration<double>(wall.time_since_epoch()).count()},
+      {"wall_iso", iso.str()},
+    };
+  }
+  snapshot["frame"] = kWorldFrameID;
+  snapshot["robot_position"] = {{"x", robot_position_.x}, {"y", robot_position_.y}, {"z", robot_position_.z}};
+  snapshot["room_grid"] = {
+    {"room_resolution", room_resolution_},
+    {"shift", json::array({shift_.x(), shift_.y(), shift_.z()})},
+    {"dims", {{"rows", room_mask_.rows}, {"cols", room_mask_.cols}}},
+    {"layout", "row=x_index, col=y_index"},
+    {"index_formula", "ix=floor(x/res+shift[0]); iy=floor(y/res+shift[1]); id=mask[ix][iy]"},
+  };
+  snapshot["room_mask"] = mask_geometry;
+
+  json rooms = json::array();
+  for (const auto& id_room : representation_->GetRoomNodesMap())
+  {
+    const auto& room = id_room.second;
+    json polygon = json::array();
+    for (const auto& pt : room.polygon_.polygon.points)
+    {
+      polygon.push_back(json::array({Round3(pt.x), Round3(pt.y)}));
+    }
+    rooms.push_back({
+      {"id", room.id_},
+      {"show_id", room.show_id_},
+      {"label", room.GetRoomLabel()},
+      {"label_votes", room.GetLabels()},
+      {"is_labeled", room.IsLabeled()},
+      {"is_connected", room.is_connected_},
+      {"centroid", json::array({room.centroid_.x(), room.centroid_.y(), room.centroid_.z()})},
+      {"anchor_point", PointToJson(room.anchor_point_)},
+      {"area_m2", room.area_},
+      {"polygon_xy", polygon},
+      {"neighbors", std::vector<int>(room.neighbors_.begin(), room.neighbors_.end())},
+    });
+  }
+  snapshot["rooms"] = rooms;
+
+  json objects = json::array();
+  for (const auto& id_obj : representation_->GetObjectNodeRepMap())
+  {
+    const auto& obj = id_obj.second;
+    json corners = json::array();
+    for (const auto& corner : obj.bbox3d_)
+    {
+      corners.push_back(json::array({Round3(corner.x), Round3(corner.y), Round3(corner.z)}));
+    }
+    json entry = {
+      {"id", obj.object_id_.empty() ? id_obj.first : obj.object_id_.front()},
+      {"ids", obj.object_id_},
+      {"label", obj.label_},
+      {"confidence", obj.confidence_},
+      {"status", obj.status_},
+      {"room_id", obj.room_id_},
+      {"img_path", obj.img_path_},
+      {"timestamp", obj.timestamp_.seconds()},
+      {"position", PointToJson(obj.position_)},
+      {"bbox3d", corners},
+      {"cloud_xyz", nullptr},
+      {"cloud_points_raw", static_cast<int>(obj.cloud_.width) * static_cast<int>(obj.cloud_.height)},
+    };
+    if (sempath_cfg_.include_clouds && obj.cloud_.width * obj.cloud_.height > 0)
+    {
+      pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>());
+      pcl::fromROSMsg(obj.cloud_, *cloud);
+      if (sempath_cfg_.cloud_voxel_m > 0.0 && cloud->size() > 1)
+      {
+        pcl::VoxelGrid<pcl::PointXYZ> voxel;
+        voxel.setInputCloud(cloud);
+        const float leaf = static_cast<float>(sempath_cfg_.cloud_voxel_m);
+        voxel.setLeafSize(leaf, leaf, leaf);
+        pcl::PointCloud<pcl::PointXYZ>::Ptr filtered(new pcl::PointCloud<pcl::PointXYZ>());
+        voxel.filter(*filtered);
+        cloud = filtered;
+      }
+      json cloud_xyz = json::array();
+      for (const auto& pt : cloud->points)
+      {
+        cloud_xyz.push_back(json::array({Round3(pt.x), Round3(pt.y), Round3(pt.z)}));
+      }
+      entry["cloud_xyz"] = cloud_xyz;
+    }
+    objects.push_back(entry);
+  }
+  snapshot["objects"] = objects;
+
+  json doors = json::array();
+  if (door_cloud_)
+  {
+    for (const auto& pt : door_cloud_->points)
+    {
+      doors.push_back({{"x", Round3(pt.x)}, {"y", Round3(pt.y)}, {"z", Round3(pt.z)},
+                       {"room_a", static_cast<int>(pt.r)}, {"room_b", static_cast<int>(pt.g)},
+                       {"label", static_cast<int>(pt.label)}});
+    }
+  }
+  snapshot["doors"] = doors;
+
+  json adjacency = json::array();
+  for (int i = 0; i < adjacency_matrix.rows(); ++i)
+  {
+    for (int j = i + 1; j < adjacency_matrix.cols(); ++j)
+    {
+      if (adjacency_matrix(i, j) != 0 || adjacency_matrix(j, i) != 0)
+      {
+        adjacency.push_back(json::array({i + 1, j + 1}));
+      }
+    }
+  }
+  snapshot["room_adjacency"] = adjacency;
+  return snapshot;
+}
+
+bool SensorCoveragePlanner3D::ExportSemPathSnapshot(const std::string& reason)
+{
+  if (!sempath_cfg_.enabled || !initialized_ || !representation_)
+  {
+    return false;
+  }
+  const auto t0 = std::chrono::steady_clock::now();
+  const std::filesystem::path dir(sempath_cfg_.output_dir);
+  std::error_code ec;
+  std::filesystem::create_directories(dir, ec);
+
+  // Mask first, JSON last: a reader that sees a fresh JSON always finds its matching PNG.
+  json mask_geometry;
+  if (!WriteRoomMaskPng(dir / "room_mask_latest.png", mask_geometry))
+  {
+    return false;
+  }
+  const json snapshot = BuildSemPathSnapshotJson(reason, mask_geometry);
+  if (!WriteTextAtomic(dir / "scene_graph_latest.json", snapshot.dump(), this->get_logger()))
+  {
+    return false;
+  }
+  if (sempath_cfg_.keep_history)
+  {
+    const std::filesystem::path history = dir / "history";
+    std::filesystem::create_directories(history, ec);
+    char suffix[64];
+    std::snprintf(suffix, sizeof(suffix), "%04d_%s", sempath_export_count_, reason.c_str());
+    std::filesystem::copy_file(dir / "scene_graph_latest.json", history / ("scene_graph_" + std::string(suffix) + ".json"),
+                               std::filesystem::copy_options::overwrite_existing, ec);
+    if (!mask_geometry.is_null())
+    {
+      const std::string mask_file = mask_geometry["file"].get<std::string>();
+      std::filesystem::copy_file(dir / mask_file,
+                                 history / ("room_mask_" + std::string(suffix) + std::filesystem::path(mask_file).extension().string()),
+                                 std::filesystem::copy_options::overwrite_existing, ec);
+    }
+  }
+  const json latest = {
+    {"stamp", snapshot["stamp"]},
+    {"reason", reason},
+    {"count", sempath_export_count_},
+    {"files", json::array({"scene_graph_latest.json",
+                           mask_geometry.is_null() ? json(nullptr) : mask_geometry["file"], "bev_latest.npz"})},
+  };
+  WriteTextAtomic(dir / "latest.json", latest.dump(2), this->get_logger());
+  ++sempath_export_count_;
+  const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+  RCLCPP_INFO(this->get_logger(), "[sempath_export] saved %s snapshot #%d -> %s (%zu rooms, %zu objects, %zu doors, %.0f ms)",
+              reason.c_str(), sempath_export_count_ - 1, (dir / "scene_graph_latest.json").c_str(),
+              snapshot["rooms"].size(), snapshot["objects"].size(), snapshot["doors"].size(), ms);
+  return true;
 }
 
 } // namespace sensor_coverage_planner_3d_ns

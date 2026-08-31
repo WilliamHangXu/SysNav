@@ -81,6 +81,9 @@ public:
   explicit SensorCoveragePlanner3D();
   bool initialize();
   void execute();
+  /// SemPathBench snapshot export (tools/sempath_export): rooms + labels, objects, doors, room mask.
+  /// reason = "periodic" | "manual" | "final". Returns false when disabled / not initialized / write failed.
+  bool ExportSemPathSnapshot(const std::string& reason);
   ~SensorCoveragePlanner3D() = default;
 
 private:
@@ -311,6 +314,24 @@ private:
   
   // Miscellaneous flags
   bool tmp_flag_;
+
+  // ---- SemPathBench snapshot export (see tools/sempath_export/README.md) ----
+  struct SemPathExportConfig {
+    bool enabled = true;
+    std::string output_dir = "output/sempath_export";  // resolved to an absolute path in ReadParameters
+    double interval_s = 30.0;                          // 0 = periodic export off
+    std::string keyword = "export";                    // /keyboard_input payload for a manual export
+    bool keep_history = false;
+    bool include_clouds = true;
+    double cloud_voxel_m = 0.05;
+    int mask_crop_margin_cells = 20;
+  };
+  SemPathExportConfig sempath_cfg_;
+  rclcpp::TimerBase::SharedPtr sempath_export_timer_;
+  int sempath_export_count_ = 0;
+  json BuildSemPathSnapshotJson(const std::string& reason, const json& mask_geometry) const;
+  bool WriteRoomMaskPng(const std::filesystem::path& out_path, json& mask_geometry_out) const;
+  static bool WriteTextAtomic(const std::filesystem::path& path, const std::string& text, rclcpp::Logger log);
 };
 
 } // namespace sensor_coverage_planner_3d_ns

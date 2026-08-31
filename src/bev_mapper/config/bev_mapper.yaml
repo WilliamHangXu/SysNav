@@ -25,6 +25,16 @@ bev_mapper:
     clear_footprint_radius: 0.4
     publish_frontiers: true
 
+    # ---- snapshot export for tools/sempath_export (SemPathBench map converter) ----
+    # bev_latest.npz (occupancy / explored / trajectory + grid origin) is written atomically
+    # every interval_s seconds, on `/keyboard_input` == keyword, and once more at shutdown.
+    export:
+      enabled: true
+      output_dir: "output/sempath_export"   # relative to the node cwd (the teleop scripts cd to the repo root)
+      interval_s: 30.0                      # 0 = periodic export off
+      keyword: "export"
+      keep_history: false                   # also keep history/bev_NNNN_<reason>.npz
+
     # ---- BEV map (LidarBEVMapper, values from vlm_nav_bridge unless noted) --
     map_resolution: 0.05                # m / cell
     map_size: 67.2                      # m; centred on the start pose (+-33.6 m), 1344x1344 cells

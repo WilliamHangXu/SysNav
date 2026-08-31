@@ -13,6 +13,10 @@ Publishes (timer-driven, rates in config)
                                                with trajectory, agent arrow and frontier dots
   /bev_map/frontiers  sensor_msgs/PointCloud2  frontier centres in the map frame
 
+Snapshot dump (for tools/sempath_export): ``<export.output_dir>/bev_latest.npz`` with the
+occupancy / explored / trajectory channels + grid origin, written atomically on a timer
+(``export.interval_s``), on ``/keyboard_input == export.keyword`` and once more at shutdown.
+
 The map/frontier code (lidar_bev_mapper.py, coord_utils.py,
 frontier_detector.py) is copied verbatim from
 Navigation-Physical-Experiment/src/vlm_nav_bridge. This node is the
@@ -23,6 +27,7 @@ reads the two SLAM topics and never steers the robot.
 """
 
 import math
+import os
 import time
 from collections import deque
 from typing import Optional
@@ -34,7 +39,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import PointCloud2, Image
 from sensor_msgs_py import point_cloud2
 from nav_msgs.msg import Odometry, OccupancyGrid
-from std_msgs.msg import Header
+from std_msgs.msg import Header, String
 
 from .lidar_bev_mapper import LidarBEVMapper, BEVMapperConfig
 from .frontier_detector import FrontierDetector, FrontierConfig
@@ -90,6 +95,14 @@ class BEVMapperNode(Node):
         # The FOV wedge only makes sense for a forward camera.
         self.draw_fov = bev_cfg.hfov_deg < 360.0
 
+        # ---- snapshot export (consumed by tools/sempath_export) -----------
+        self.export_enabled = bool(p('export.enabled').value)
+        self.export_dir = os.path.abspath(str(p('export.output_dir').value))
+        self.export_interval_s = float(p('export.interval_s').value)
+        self.export_keyword = str(p('export.keyword').value)
+        self.export_keep_history = bool(p('export.keep_history').value)
+        self._export_count = 0
+
         # ---- state -------------------------------------------------------
         self._pose_history = deque()          # (t, x, y, z, yaw), last 10 s
         self.latest_pose = None               # (x, y, z, yaw)
@@ -123,6 +136,12 @@ class BEVMapperNode(Node):
         self.create_timer(1.0 / max(1e-3, float(p('local_rate').value)), self._publish_local)
         self.create_timer(1.0 / max(1e-3, float(p('grid_rate').value)), self._publish_grid)
         self.create_timer(5.0, self._log_summary)
+        if self.export_enabled:
+            self.create_subscription(String, '/keyboard_input', self._keyboard_callback, 5)
+            if self.export_interval_s > 0.0:
+                self.create_timer(self.export_interval_s, lambda: self.export_snapshot('periodic'))
+            self.get_logger().info(f'bev_mapper: snapshot export -> {self.export_dir} '
+                                   f'(every {self.export_interval_s:g} s, keyword "{self.export_keyword}", final on shutdown)')
 
         self.get_logger().info(
             f'bev_mapper: {self.mapper.global_cells}x{self.mapper.global_cells} cells @ '
@@ -146,6 +165,12 @@ class BEVMapperNode(Node):
         d('self_exclusion_radius', 0.8)  # m; drop returns this close (2-D) to the sensor = robot body
         d('clear_footprint_radius', 0.4)  # m; cells the robot drives through are forced free
         d('publish_frontiers', True)
+        # snapshot export (tools/sempath_export)
+        d('export.enabled', True)
+        d('export.output_dir', 'output/sempath_export')  # relative to the node cwd (the teleop script cd's to the repo root)
+        d('export.interval_s', 30.0)                     # 0 = no periodic export
+        d('export.keyword', 'export')                    # /keyboard_input payload that triggers a manual export
+        d('export.keep_history', False)                  # also keep history/bev_NNNN_<reason>.npz
         # BEVMapperConfig
         d('map_resolution', 0.05)
         d('map_size', 67.2)
@@ -294,6 +319,62 @@ class BEVMapperNode(Node):
         return pts[np.isfinite(pts).all(axis=1)]
 
     # ------------------------------------------------------------------
+    # Snapshot export (tools/sempath_export)
+    # ------------------------------------------------------------------
+    def _keyboard_callback(self, msg: String):
+        if msg.data.strip() == self.export_keyword:
+            self.export_snapshot('manual')
+
+    def export_snapshot(self, reason: str) -> bool:
+        """Write <export_dir>/bev_latest.npz atomically (tmp + os.replace). Safe to call after shutdown."""
+        if not self.export_enabled:
+            return False
+        m = self.mapper
+        if m.full_map is None or self.latest_pose is None:
+            return False
+        try:
+            os.makedirs(self.export_dir, exist_ok=True)
+            stamp_unix = time.time()
+            stamp_ros = float(self.latest_pose_stamp_s or 0.0)
+            arrays = dict(
+                schema='sysnav_bev_dump/1',
+                reason=reason,
+                occupancy=(m.full_map[0] >= m.cfg.map_pred_threshold).astype(np.uint8),
+                explored=(m.full_map[1] >= m.cfg.exp_pred_threshold).astype(np.uint8),
+                trajectory=(m.full_map[3] > 0.0).astype(np.uint8),
+                map_origin_x=float(m.map_origin_x),
+                map_origin_y=float(m.map_origin_y),
+                resolution=float(m.cfg.resolution),
+                map_size=float(m.cfg.map_size),
+                global_cells=int(m.global_cells),
+                start_z=float(self.start_z if self.start_z is not None else 0.0),
+                robot_pose=np.asarray(self.latest_pose, dtype=np.float64),  # x, y, z, yaw
+                stamp_unix=float(stamp_unix),
+                stamp_ros_sec=stamp_ros,
+                frame=str(self._frame()),
+                scan_seq=int(self._scan_seq),
+                layout='[row=+Y, col=+X]; col=floor((x-map_origin_x)/resolution), row=floor((y-map_origin_y)/resolution)',
+            )
+            final_path = os.path.join(self.export_dir, 'bev_latest.npz')
+            tmp_path = os.path.join(self.export_dir, '.bev_latest.npz.tmp')
+            with open(tmp_path, 'wb') as handle:
+                np.savez_compressed(handle, **arrays)
+            os.replace(tmp_path, final_path)
+            if self.export_keep_history:
+                history_dir = os.path.join(self.export_dir, 'history')
+                os.makedirs(history_dir, exist_ok=True)
+                history_path = os.path.join(history_dir, f'bev_{self._export_count:04d}_{reason}.npz')
+                with open(history_path, 'wb') as handle:
+                    np.savez_compressed(handle, **arrays)
+            self._export_count += 1
+            self.get_logger().info(f'bev_mapper: saved {reason} snapshot -> {final_path} '
+                                   f'(scans={self._scan_seq}, occupied={int(arrays["occupancy"].sum())} cells)')
+            return True
+        except Exception as exc:  # never let an export failure take the mapper down
+            self.get_logger().error(f'bev_mapper: snapshot export failed: {exc}')
+            return False
+
+    # ------------------------------------------------------------------
     # Outputs
     # ------------------------------------------------------------------
     def _frame(self) -> str:
@@ -390,9 +471,11 @@ def main(args=None):
     node = BEVMapperNode()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, rclpy.executors.ExternalShutdownException):
         pass
     finally:
+        # Final dump: pure file I/O, works after the context has been shut down (Ctrl-C / SIGTERM from launch).
+        node.export_snapshot('final')
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
