@@ -51,16 +51,22 @@ class ConvertOptions:
     padding_m: float = 1.0
     footprint: str = "cloud"             # "cloud" (projected voxel cloud) | "bbox" (XY hull of bbox3d)
     objects_block: bool = True           # non-traversable object cells become obstacles (ProcTHOR semantics)
+    object_margin_m: float = 0.15        # inflate occupancy around obstacles/objects, as ProcTHOR's agent-radius
+                                         #   reachability does (~3 cells of solid contour there); unconditional
+    separate_objects: bool = True        # carve a 1-cell unlabeled (black) seam where different instances touch
     unknown_as: str = "exterior"         # "exterior": grey only outside the building (border-connected unknown);
                                          #   enclosed unknown (furniture interiors, sealed pockets) becomes obstacle.
                                          # "obstacle": binary map | "unknown": keep all unknown as occupancy 2
     footprint_fill: bool = True          # claim enclosed non-free regions (e.g. a bed's unobserved interior)
     absorb_pockets: bool = True          # give leftover non-free pockets to the geodesically nearest object
+    contain_merge: float = 0.8           # post-growth merge: fold a same-type footprint this contained in a bigger one (0 = off)
     footprint_box: str = "guarded"       # finalize each footprint as its axis-aligned bounding rectangle:
                                          #   "guarded" = rectangle ∩ not-explored-free (observed floor stays out)
                                          #   "full" = the whole rectangle | "off"
     clear_trajectory_radius_m: float = 0.4
     doors_as_objects: bool = True
+    door_thickness_m: float = 0.2        # doors come from the watershed boundary (a thin line spanning the
+                                         #   opening); pad the thin axis to this depth -> ProcTHOR-style rectangle
     room_fill_radius_m: float = 0.5
     min_room_cells: int = 25
     min_object_cells: int = 1
@@ -73,10 +79,12 @@ class ConvertOptions:
     def public_dict(self) -> dict[str, object]:
         return {
             "resolution": self.resolution, "padding_m": self.padding_m, "footprint": self.footprint,
-            "objects_block": self.objects_block, "unknown_as": self.unknown_as,
+            "objects_block": self.objects_block, "object_margin_m": self.object_margin_m,
+            "separate_objects": self.separate_objects, "unknown_as": self.unknown_as,
             "footprint_fill": self.footprint_fill, "footprint_box": self.footprint_box,
-            "absorb_pockets": self.absorb_pockets,
+            "absorb_pockets": self.absorb_pockets, "contain_merge": self.contain_merge,
             "clear_trajectory_radius_m": self.clear_trajectory_radius_m, "doors_as_objects": self.doors_as_objects,
+            "door_thickness_m": self.door_thickness_m,
             "room_fill_radius_m": self.room_fill_radius_m, "min_room_cells": self.min_room_cells,
             "min_object_cells": self.min_object_cells, "merge_gap_m": self.merge_gap_m,
             "footprint_close_m": self.footprint_close_m, "drop_labels": list(self.drop_labels),
@@ -750,6 +758,70 @@ def _merge_same_type_records(records: list[dict], gap_m: float, resolution: floa
     return merged
 
 
+def _merge_contained_records(records: list[dict], threshold: float) -> list[dict]:
+    """Post-growth merge: fold a same-type object whose FINAL footprint is ≥ threshold contained in a
+    bigger same-type footprint into that object.
+
+    The early gap merge runs on raw cloud footprints; fill/absorption/boxing then grow a host object
+    over fragments that were originally farther than the gap (BoT-SORT id churn on one sofa), leaving
+    tiny remnant instances at paint time. Containment — not adjacency — separates those fragments
+    (~100% inside the host) from genuine neighbours (touching boxes, but nowhere near contained).
+    """
+    if threshold <= 0 or len(records) < 2:
+        return records
+    parent = list(range(len(records)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    cell_sets = [set(record["cells"]) for record in records]
+    by_type: dict[str, list[int]] = {}
+    for index, record in enumerate(records):
+        by_type.setdefault(record["object_type"], []).append(index)
+    for indices in by_type.values():
+        for pos, i in enumerate(indices):
+            for j in indices[pos + 1:]:
+                a, b = cell_sets[i], cell_sets[j]
+                if not a or not b:
+                    continue
+                small = a if len(a) <= len(b) else b
+                if len(a & b) >= threshold * len(small) and find(i) != find(j):
+                    parent[find(j)] = find(i)
+
+    groups: dict[int, list[dict]] = {}
+    for index, record in enumerate(records):
+        groups.setdefault(find(index), []).append(record)
+    merged: list[dict] = []
+    for group in groups.values():
+        if len(group) == 1:
+            merged.append(group[0])
+            continue
+        group.sort(key=lambda rec: -len(rec["cells"]))
+        primary = group[0]
+        record = dict(primary)
+        record["cells"] = sorted({cell for rec in group for cell in rec["cells"]})
+        fragment_ids = sorted({fid for rec in group
+                               for fid in (rec.get("merged_ids") or [int(str(rec["object_id"]).rsplit("|", 1)[-1])])})
+        record["object_id"] = f"sysnav|{fragment_ids[0]}"
+        record["merged_ids"] = fragment_ids
+        record["all_sysnav_ids"] = sorted({int(i) for rec in group
+                                           for i in (rec.get("all_sysnav_ids")
+                                                     or rec["sysnav"].get("ids", [rec["sysnav"]["id"]]))})
+        record["cloud_points_total"] = sum(rec.get("cloud_points_total", len(rec["sysnav"].get("cloud_xyz") or []))
+                                           for rec in group)
+        record["confidence"] = max((rec.get("confidence") or rec["sysnav"].get("confidence") or 0.0) for rec in group)
+        for key in ("filled_cells", "absorbed_cells", "boxed_cells"):
+            total = sum(rec.get(key, 0) for rec in group)
+            if total:
+                record[key] = total
+        merged.append(record)
+    merged.sort(key=lambda rec: int(str(rec["object_id"]).rsplit("|", 1)[-1]))
+    return merged
+
+
 def _door_groups(dump: SysNavDump) -> list[dict]:
     groups: dict[tuple, dict] = {}
     for door in dump.snapshot.get("doors", []):
@@ -822,24 +894,35 @@ def build_object_layers(
             record["cells"], sealed = _fill_mask_holes(record["cells"], None)
             if sealed > 0:
                 record["filled_cells"] = record.get("filled_cells", 0) + sealed
+    records = _merge_contained_records(records, opts.contain_merge)
     if opts.doors_as_objects:
         for group in _door_groups(dump):
             seen: set[tuple[int, int]] = set()
             for x, y, _z in group["points"]:
                 row, col = world_to_grid(x, y, x_min, z_min, res)
-                for dr in (-1, 0, 1):
-                    for dc in (-1, 0, 1):
-                        if _in_bounds(row + dr, col + dc, map_info):
-                            seen.add((row + dr, col + dc))
+                if _in_bounds(row, col, map_info):
+                    seen.add((row, col))
             if not seen:
                 continue
+            # The watershed line spans the opening; pad the thin axis to door depth -> filled rectangle.
+            door_rows = [cell[0] for cell in seen]
+            door_cols = [cell[1] for cell in seen]
+            r0, r1 = min(door_rows), max(door_rows)
+            c0, c1 = min(door_cols), max(door_cols)
+            thickness = max(1, int(round(opts.door_thickness_m / res)))
+            pad_r = max(0, thickness - (r1 - r0 + 1))
+            pad_c = max(0, thickness - (c1 - c0 + 1))
+            r0 = max(0, r0 - (pad_r + 1) // 2); r1 = min(height - 1, r1 + pad_r // 2)
+            c0 = max(0, c0 - (pad_c + 1) // 2); c1 = min(width - 1, c1 + pad_c // 2)
+            cells = [(r, c) for r in range(r0, r1 + 1) for c in range(c0, c1 + 1)]
             pts = np.asarray(group["points"], dtype=np.float64)
             records.append({
                 "object_type": "Doorway",
                 "raw_label": "door",
-                "cells": sorted(seen),
+                "cells": cells,
                 "source": "sysnav_door_cloud",
-                "polygon": None,
+                "polygon": _rectangle_from_bounds(x_min + c0 * res, x_min + c1 * res,
+                                                  z_min + r0 * res, z_min + r1 * res),
                 "position": [float(pts[:, 0].mean()), float(pts[:, 1].mean()), float(pts[:, 2].mean())],
                 "object_id": f"sysnav|door|{group['room_a']}_{group['room_b']}_{group['label']}",
                 "sysnav": {"door_rooms": [rooms.id_map.get(group["room_a"]), rooms.id_map.get(group["room_b"])],
@@ -923,6 +1006,20 @@ def build_object_layers(
             cols = np.fromiter((c[1] for c in cells), dtype=np.int64, count=len(cells))
             blocked[rows, cols] = True
 
+    if opts.separate_objects:
+        # Unlabel the boundary where two different instances touch: the cells stay blocked (they are in
+        # the records' cells), so they render as a black line — as in ProcTHOR, where adjacent objects
+        # keep their true gap as unlabeled obstacle. Carve from the larger side (ties: both) so a small
+        # object squeezed between big ones never loses its footprint.
+        sizes = np.bincount(object_instance_map.ravel(), minlength=len(records) + 1)
+        carve = np.zeros_like(object_instance_map, dtype=bool)
+        for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            here = object_instance_map[max(0, dr):height + min(0, dr), max(0, dc):width + min(0, dc)]
+            there = object_instance_map[max(0, -dr):height + min(0, -dr), max(0, -dc):width + min(0, -dc)]
+            touching = (here > 0) & (there > 0) & (here != there) & (sizes[here] >= sizes[there])
+            carve[max(0, dr):height + min(0, dr), max(0, dc):width + min(0, dc)] |= touching
+        object_instance_map[carve] = 0
+        object_category_map[carve] = 0
     return ObjectLayers(object_category_map, object_instance_map, object_metadata, category_to_id, blocked)
 
 
@@ -956,6 +1053,20 @@ def build_scene_representation(
         traversibility[objects.blocked] = 0
         if unknown is not None:
             unknown = unknown & ~objects.blocked
+    margin_cells = int(round(opts.object_margin_m / float(map_info["resolution"])))
+    if margin_cells > 0:
+        # ProcTHOR's free space comes from agent-radius reachability, so furniture and walls carry an
+        # inflated obstacle margin (the black contour around objects). Mimic it unconditionally: every
+        # cell within the margin of an obstacle/blocked-object cell becomes obstacle — including cells
+        # on the robot's own driven path (the map is deliberately as conservative as ProcTHOR's).
+        sources = occupied.copy()
+        if opts.objects_block:
+            sources |= objects.blocked
+        inflate = cv2.dilate(sources.astype(np.uint8), _disk(margin_cells)).astype(bool)
+        traversibility = traversibility.copy()
+        traversibility[inflate] = 0
+        if unknown is not None:
+            unknown = unknown & ~inflate            # margin against unexplored space becomes obstacle, not grey
     bev = dump.bev
     snapshot = dump.snapshot
     return {

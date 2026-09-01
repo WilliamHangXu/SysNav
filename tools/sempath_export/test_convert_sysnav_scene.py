@@ -240,7 +240,9 @@ class ConverterTest(unittest.TestCase):
         return rooms, cs.build_object_layers(self.dump, self.map_info, self.rc0, rooms, opts)
 
     def test_object_priority_and_aliases(self):
-        rooms, objects = self._objects()
+        # separation off: this test probes the raw per-cell priority rule at the sofa/chair interface,
+        # which the seam carve (tested separately) would blank
+        rooms, objects = self._objects(cs.ConvertOptions(separate_objects=False))
         by_id = {m["objectId"]: m for m in objects.object_metadata}
         self.assertEqual(by_id["sysnav|11"]["objectType"], "Chair")
         self.assertEqual(by_id["sysnav|12"]["objectType"], "Sofa")
@@ -286,6 +288,13 @@ class ConverterTest(unittest.TestCase):
         doors = [m for m in objects.object_metadata if m["objectType"] == "Doorway"]
         self.assertEqual(len(doors), 1)
         self.assertEqual(doors[0]["door_rooms"], [1, 2])
+        # the watershed line became a filled rectangle: cells == bbox area, thin axis >= 0.2 m / 0.05 = 4 cells
+        cells = doors[0]["grid_cells"]
+        rows = {c[0] for c in cells}; cols = {c[1] for c in cells}
+        h = max(rows) - min(rows) + 1; w = max(cols) - min(cols) + 1
+        self.assertEqual(len(cells), h * w)
+        self.assertGreaterEqual(min(h, w), 4)
+        self.assertEqual(len(doors[0]["bbox_polygon_xz"]), 4)
         rep = cs.build_scene_representation(self.dump, self.opts, map_id="001_train", map_split="train")
         r, c = self.export_cell(0.0, 0.0)
         self.assertEqual(rep["object_instance_map"][r, c], doors[0]["instance_id"])
@@ -293,6 +302,40 @@ class ConverterTest(unittest.TestCase):
         self.assertEqual(rep["traversibility_map"][self.export_cell(-1.3, 1.0)], 0)  # sofa blocks
         rep_nb = cs.build_scene_representation(self.dump, cs.ConvertOptions(objects_block=False), map_id="001_train", map_split="train")
         self.assertEqual(rep_nb["traversibility_map"][self.export_cell(-1.3, 1.0)], 1)
+
+    def test_object_margin(self):
+        rep = cs.build_scene_representation(self.dump, self.opts, map_id="001_train", map_split="train")
+        r, c = self.export_cell(-1.3, 1.35)                          # 0.2 m off the sofa's edge, off the trail
+        self.assertEqual(rep["traversibility_map"][r, c], 0)          # inside the inflated margin
+        self.assertEqual(rep["object_instance_map"][r, c], 0)         # margin blocks, but never labels
+        rep0 = cs.build_scene_representation(self.dump, cs.ConvertOptions(object_margin_m=0.0),
+                                             map_id="001_train", map_split="train")
+        self.assertEqual(rep0["traversibility_map"][r, c], 1)
+        r, c = self.export_cell(0.0, 0.0)                            # doorway centre is beyond both walls' margins
+        self.assertEqual(rep["traversibility_map"][r, c], 1)
+        # the contour is unconditional: no free cell may touch a blocked object's mask anywhere
+        inst = rep["object_instance_map"]; trav = rep["traversibility_map"]
+        for dr, dc in ((0, 1), (1, 0)):
+            a = inst[:inst.shape[0] - dr, :inst.shape[1] - dc]; b = inst[dr:, dc:]
+            ta = trav[:inst.shape[0] - dr, :inst.shape[1] - dc]; tb = trav[dr:, dc:]
+            doors = {m["instance_id"] for m in rep["object_metadata"] if m["objectType"] == "Doorway"}
+            blocked_a = (a > 0) & ~np.isin(a, list(doors)); blocked_b = (b > 0) & ~np.isin(b, list(doors))
+            self.assertFalse(bool((blocked_a & (tb > 0)).any()))
+            self.assertFalse(bool((blocked_b & (ta > 0)).any()))
+
+    def test_object_separation_and_unknown_margin(self):
+        rep = cs.build_scene_representation(self.dump, self.opts, map_id="001_train", map_split="train")
+        inst = rep["object_instance_map"]
+        # invariant: no two different instances are 4-adjacent anywhere
+        for dr, dc in ((0, 1), (1, 0)):
+            a = inst[:inst.shape[0] - dr, :inst.shape[1] - dc]
+            b = inst[dr:, dc:]
+            self.assertFalse(bool(((a > 0) & (b > 0) & (a != b)).any()))
+        # margin against unexplored space: just outside the building wall turns obstacle, far exterior stays grey
+        state = scene_representation_to_layered_state(rep, "001_train")
+        r, c = self.export_cell(0.0, 3.15)
+        self.assertEqual(state["layers"]["occupancy"][r][c], 1)
+        self.assertEqual(state["layers"]["occupancy"][0][0], 2)
 
     def test_occupancy_values(self):
         rep = cs.build_scene_representation(self.dump, self.opts, map_id="001_train", map_split="train")
@@ -329,6 +372,28 @@ class ConverterTest(unittest.TestCase):
         occupied3[40, 82:93] = True; occupied3[70, 82:93] = True
         sets3, _ = cs._fill_enclosed_regions([shell], occupied3, free)
         self.assertNotIn((55, 87), set(sets3[0]))
+
+    def test_contain_merge(self):
+        def make_record(oid, otype, cells, **extra):
+            base = {"object_type": otype, "raw_label": otype.lower(), "cells": sorted(cells), "source": "sysnav_cloud",
+                    "polygon": None, "position": [0.0, 0.0, 0.4], "object_id": f"sysnav|{oid}",
+                    "sysnav": {"id": oid, "ids": [oid], "confidence": 0.5, "cloud_xyz": None}}
+            base.update(extra)
+            return base
+        host = make_record(4, "Sofa", [(r, c) for r in range(10, 30) for c in range(10, 30)], boxed_cells=50)
+        fragment = make_record(6, "Sofa", [(r, c) for r in range(15, 18) for c in range(15, 18)])
+        neighbour = make_record(7, "Sofa", [(r, c) for r in range(10, 30) for c in range(28, 45)])  # touches, ~10% overlap
+        chair = make_record(9, "Chair", [(r, c) for r in range(20, 23) for c in range(20, 23)])     # inside, other type
+        out = cs._merge_contained_records([host, fragment, neighbour, chair], 0.8)
+        by_id = {r["object_id"]: r for r in out}
+        self.assertEqual(len(out), 3)
+        self.assertIn("sysnav|4", by_id)
+        self.assertNotIn("sysnav|6", by_id)                          # fragment folded into the host
+        self.assertEqual(by_id["sysnav|4"]["merged_ids"], [4, 6])
+        self.assertEqual(by_id["sysnav|4"]["boxed_cells"], 50)
+        self.assertIn("sysnav|7", by_id)                             # touching neighbour survives
+        self.assertIn("sysnav|9", by_id)                             # stacked other-type object survives
+        self.assertEqual(len(cs._merge_contained_records([host, fragment], 0.0)), 2)   # 0 = off
 
     def test_absorb_pockets(self):
         # building: walls rows/cols 10 & 40; sofa against the top wall with an unexplored strip behind it

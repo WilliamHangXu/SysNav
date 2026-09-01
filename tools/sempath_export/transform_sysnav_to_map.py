@@ -154,6 +154,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--footprint-close", type=float, default=0.10,
                         help="morphological-closing radius in metres for object footprints (0 = off)")
     parser.add_argument("--objects-block", dest="objects_block", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--object-margin", type=float, default=0.15,
+                        help="inflate occupancy this far (m) around obstacles and blocked objects, mimicking ProcTHOR's "
+                             "agent-radius reachability margin (an unconditional black contour around furniture and "
+                             "walls); 0 = off")
     parser.add_argument("--unknown-as", choices=("exterior", "obstacle", "unknown"), default="exterior",
                         help="unexplored cells: 'exterior' keeps occupancy 2 only outside the building (border-connected) "
                              "and turns enclosed pockets (furniture interiors) into obstacle; 'obstacle' = fully binary; "
@@ -162,6 +166,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="assign leftover non-navigable cells (occlusion bays, enclosed unexplored patches, and "
                              "observed floor unreachable through a 0.15 m corridor from the robot's trajectory, e.g. under "
                              "chairs/beds) to the geodesically nearest object; navigable space competes, so walls stay unlabeled")
+    parser.add_argument("--object-separation", dest="separate_objects", action=argparse.BooleanOptionalAction, default=True,
+                        help="carve a 1-cell unlabeled (black) seam where two different object instances touch")
+    parser.add_argument("--contain-merge", type=float, default=0.8,
+                        help="after footprint growth, fold a same-category object whose footprint is at least this "
+                             "fraction contained in a bigger one into it (fragments swallowed by fill/box; 0 = off)")
     parser.add_argument("--footprint-box", choices=("guarded", "full", "off"), default="guarded",
                         help="finalize each object footprint as its axis-aligned bounding rectangle; 'guarded' keeps "
                              "explored-free cells out of the box, 'full' paints the whole rectangle")
@@ -169,6 +178,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="claim regions enclosed by an object's shell + occupied cells (fills bed/sofa interiors)")
     parser.add_argument("--clear-trajectory-radius", type=float, default=0.4)
     parser.add_argument("--doors-as-objects", dest="doors_as_objects", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--door-thickness", type=float, default=0.2,
+                        help="pad the watershed door line's thin axis to this depth (m) -> ProcTHOR-style door rectangle")
     parser.add_argument("--room-fill-radius", type=float, default=0.5)
     parser.add_argument("--min-room-cells", type=int, default=25)
     parser.add_argument("--drop-labels", default="person", help="comma-separated YOLOE labels to ignore")
@@ -185,12 +196,16 @@ def options_from_args(args: argparse.Namespace) -> ConvertOptions:
         padding_m=args.padding,
         footprint=args.footprint,
         objects_block=args.objects_block,
+        object_margin_m=args.object_margin,
         unknown_as=args.unknown_as,
         footprint_fill=args.footprint_fill,
         footprint_box=args.footprint_box,
         absorb_pockets=args.absorb_pockets,
+        contain_merge=args.contain_merge,
+        separate_objects=args.separate_objects,
         clear_trajectory_radius_m=args.clear_trajectory_radius,
         doors_as_objects=args.doors_as_objects,
+        door_thickness_m=args.door_thickness,
         room_fill_radius_m=args.room_fill_radius,
         min_room_cells=args.min_room_cells,
         merge_gap_m=args.merge_gap,
