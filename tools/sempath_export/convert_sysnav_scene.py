@@ -49,14 +49,23 @@ TRAVERSABLE_OBJECT_TYPES = {"doorway", "doorframe"}  # normalised categories the
 class ConvertOptions:
     resolution: float = 0.05
     padding_m: float = 1.0
-    footprint: str = "bbox"              # "bbox" (XY hull of bbox3d) | "cloud" (projected voxel cloud)
+    footprint: str = "cloud"             # "cloud" (projected voxel cloud) | "bbox" (XY hull of bbox3d)
     objects_block: bool = True           # non-traversable object cells become obstacles (ProcTHOR semantics)
-    unknown_as: str = "unknown"          # "unknown" (occupancy 2) | "obstacle"
+    unknown_as: str = "exterior"         # "exterior": grey only outside the building (border-connected unknown);
+                                         #   enclosed unknown (furniture interiors, sealed pockets) becomes obstacle.
+                                         # "obstacle": binary map | "unknown": keep all unknown as occupancy 2
+    footprint_fill: bool = True          # claim enclosed non-free regions (e.g. a bed's unobserved interior)
+    absorb_pockets: bool = True          # give leftover non-free pockets to the geodesically nearest object
+    footprint_box: str = "guarded"       # finalize each footprint as its axis-aligned bounding rectangle:
+                                         #   "guarded" = rectangle ∩ not-explored-free (observed floor stays out)
+                                         #   "full" = the whole rectangle | "off"
     clear_trajectory_radius_m: float = 0.4
     doors_as_objects: bool = True
     room_fill_radius_m: float = 0.5
     min_room_cells: int = 25
     min_object_cells: int = 1
+    merge_gap_m: float = 0.10            # single-linkage merge of same-type footprints within this gap (0 = off)
+    footprint_close_m: float = 0.10      # morphological-closing radius sealing holes/seams in a footprint (0 = off)
     drop_labels: tuple[str, ...] = ("person",)
     object_aliases: dict[str, str] | None = None
     room_aliases: dict[str, str] | None = None
@@ -65,9 +74,12 @@ class ConvertOptions:
         return {
             "resolution": self.resolution, "padding_m": self.padding_m, "footprint": self.footprint,
             "objects_block": self.objects_block, "unknown_as": self.unknown_as,
+            "footprint_fill": self.footprint_fill, "footprint_box": self.footprint_box,
+            "absorb_pockets": self.absorb_pockets,
             "clear_trajectory_radius_m": self.clear_trajectory_radius_m, "doors_as_objects": self.doors_as_objects,
             "room_fill_radius_m": self.room_fill_radius_m, "min_room_cells": self.min_room_cells,
-            "min_object_cells": self.min_object_cells, "drop_labels": list(self.drop_labels),
+            "min_object_cells": self.min_object_cells, "merge_gap_m": self.merge_gap_m,
+            "footprint_close_m": self.footprint_close_m, "drop_labels": list(self.drop_labels),
             "custom_aliases": bool(self.object_aliases or self.room_aliases),
         }
 
@@ -264,7 +276,11 @@ def build_traversibility_layers(
         occ[trail] = False
         exp[trail] = True
     traversibility = (exp & ~occ).astype(np.uint8)
-    unknown = (~exp & ~occ) if opts.unknown_as == "unknown" else None
+    unknown = None
+    if opts.unknown_as != "obstacle":
+        unknown = ~exp & ~occ
+        if opts.unknown_as == "exterior":
+            unknown = _exterior_unknown(unknown)
     return traversibility, unknown, occ
 
 
@@ -407,6 +423,333 @@ def _object_cells(obj: dict, map_info: dict, opts: ConvertOptions) -> tuple[list
     return cells, source, polygon
 
 
+def _postprocess_cells(cells: list[tuple[int, int]], close_cells: int) -> list[tuple[int, int]]:
+    """Drop stray cells, then seal holes/seams — both class-agnostic.
+
+    1. Connected components on the mask dilated by ``close_cells`` (so cells within ``2*close_cells``
+       of each other count as one group); keep the group holding the most *original* cells. This
+       removes isolated depth-bleed cells without ever growing the footprint.
+    2. Morphological closing (same radius) on the kept cells to fill interior holes and narrow seams.
+       Closing cannot bridge sparse dots or end-to-end gaps of thin strips — that is what step 1's
+       dilated grouping is for — and it is the identity on solid shapes.
+    """
+    if not cells:
+        return cells
+    rows = np.fromiter((c[0] for c in cells), dtype=np.int64, count=len(cells))
+    cols = np.fromiter((c[1] for c in cells), dtype=np.int64, count=len(cells))
+    margin = 2 * max(1, close_cells) + 2   # dilation must never touch the ROI border (cv2 border handling)
+    r0, c0 = int(rows.min()) - margin, int(cols.min()) - margin
+    mask = np.zeros((int(rows.max()) - r0 + margin + 1, int(cols.max()) - c0 + margin + 1), dtype=np.uint8)
+    mask[rows - r0, cols - c0] = 1
+    kernel = None
+    if close_cells > 0:
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * close_cells + 1, 2 * close_cells + 1))
+    grouped = cv2.dilate(mask, kernel) if kernel is not None else mask
+    count, labels = cv2.connectedComponents(grouped, connectivity=8)
+    if count > 2:
+        cell_labels = labels[rows - r0, cols - c0]
+        best = int(np.bincount(cell_labels).argmax())
+        mask &= (labels == best).astype(np.uint8)
+    if kernel is not None:
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    out_rows, out_cols = np.nonzero(mask)
+    return sorted((int(r) + r0, int(c) + c0) for r, c in zip(out_rows, out_cols))
+
+
+def _exterior_unknown(unknown: np.ndarray) -> np.ndarray:
+    """Keep only unknown regions connected to the export-grid border ("outside the building").
+
+    Enclosed unknown pockets — a bed's unobserved interior, occlusion pockets sealed by walls — are
+    dropped from the mask and therefore end up as obstacle in the occupancy layer.
+    """
+    count, labels = cv2.connectedComponents(unknown.astype(np.uint8), connectivity=4)
+    if count <= 1:
+        return unknown
+    border = np.zeros(count, dtype=bool)
+    border[labels[0, :]] = True
+    border[labels[-1, :]] = True
+    border[labels[:, 0]] = True
+    border[labels[:, -1]] = True
+    border[0] = False
+    return border[labels]
+
+
+def _fill_enclosed_regions(
+    cell_sets: list[list[tuple[int, int]]], occupied: np.ndarray, free: np.ndarray, near_cells: int = 3
+) -> tuple[list[list[tuple[int, int]]], list[int]]:
+    """Jointly claim enclosed regions for the objects whose shells bound them.
+
+    A lidar at chest height sees a bed/sofa as a ring in BEV occupancy while the camera-masked cloud
+    shell may cover only one side; the top surface is occluded, so the interior stays unexplored.
+    Structure = occupied ∪ every object's shell; each background region not touching the grid border
+    is a candidate interior. Every boundary cell of the region is attributed to the object whose
+    shell is nearest within ``near_cells`` (so an object's own BEV edge — typically 1-2 cells from
+    its cloud shell — counts as that object, while distant walls stay neutral). The region goes to
+    the object with the largest attributed share, and only if that share is at least
+    ``max(10 cells, 5%)`` of the boundary — i.e. at least ~0.5 m of the ring must be this object's
+    own edge; an observed furniture side is tens of cells, a small object on the rim is a handful — so a cup on a bed
+    it can neither swallow the bed's interior nor claim it when the bed went undetected. Per cell,
+    only NOT-explored-free cells are claimed (observed floor is never relabelled as furniture).
+    Class-agnostic; no per-class priors.
+    """
+    added_counts = [0] * len(cell_sets)
+    if not any(cell_sets):
+        return cell_sets, added_counts
+    shells = np.zeros(occupied.shape, dtype=np.int32)          # cell -> object index + 1
+    for index, cells in enumerate(cell_sets):
+        for row, col in cells:
+            shells[row, col] = index + 1
+    # nearest-shell attribution: distance + per-pixel label of the nearest shell cell
+    dist, nearest = cv2.distanceTransformWithLabels(
+        (shells == 0).astype(np.uint8), cv2.DIST_L2, 3, labelType=cv2.DIST_LABEL_PIXEL)
+    label_to_object = np.zeros(int(nearest.max()) + 1, dtype=np.int32)
+    shell_rows, shell_cols = np.nonzero(shells)
+    label_to_object[nearest[shell_rows, shell_cols]] = shells[shell_rows, shell_cols]
+    attribution = np.where(dist <= near_cells, label_to_object[nearest], 0)
+
+    structure = (occupied | (shells > 0)).astype(np.uint8)
+    count, labels = cv2.connectedComponents((structure == 0).astype(np.uint8), connectivity=4)
+    if count <= 1:
+        return cell_sets, added_counts
+    border_labels = set(labels[0, :]) | set(labels[-1, :]) | set(labels[:, 0]) | set(labels[:, -1])
+    kernel = np.ones((3, 3), dtype=np.uint8)
+    out_sets = [set(cells) for cells in cell_sets]
+    for label in range(1, count):
+        if label in border_labels:
+            continue
+        component = (labels == label).astype(np.uint8)
+        rows, cols = np.nonzero(component)
+        r0, c0 = max(0, rows.min() - 1), max(0, cols.min() - 1)
+        r1, c1 = min(component.shape[0], rows.max() + 2), min(component.shape[1], cols.max() + 2)
+        roi = (slice(r0, r1), slice(c0, c1))
+        comp_roi = component[roi].astype(bool)
+        ring = cv2.dilate(component[roi], kernel).astype(bool) & ~comp_roi
+        ring_owners = attribution[roi][ring]
+        owners = np.bincount(ring_owners[ring_owners > 0], minlength=len(cell_sets) + 1)
+        if not owners.any():
+            continue                                            # bounded by walls only: leave it alone
+        winner = int(owners.argmax())
+        if owners[winner] < max(10, int(math.ceil(0.05 * int(ring.sum())))):
+            continue                                            # touches an object but is not bounded by it
+        claim = comp_roi & ~(free[roi] > 0)
+        claim_rows, claim_cols = np.nonzero(claim)
+        if len(claim_rows) == 0:
+            continue
+        out_sets[winner - 1].update((int(r) + r0, int(c) + c0) for r, c in zip(claim_rows, claim_cols))
+        added_counts[winner - 1] += len(claim_rows)
+    return [sorted(cells) for cells in out_sets], added_counts
+
+
+def _fill_mask_holes(cells: list[tuple[int, int]], free: np.ndarray | None) -> tuple[list[tuple[int, int]], int]:
+    """Fill regions fully enclosed by the object's OWN cells (its body returns show up as occupied
+    cells inside the footprint and are structure, not background, for the joint fill — leaving the
+    mask hollow). With a ``free`` mask, claims only NOT-explored-free cells; with ``free=None``,
+    claims everything enclosed (a cell fully surrounded by one object is unreachable by definition)."""
+    if not cells:
+        return cells, 0
+    rows = np.fromiter((c[0] for c in cells), dtype=np.int64, count=len(cells))
+    cols = np.fromiter((c[1] for c in cells), dtype=np.int64, count=len(cells))
+    r0, c0 = int(rows.min()) - 1, int(cols.min()) - 1
+    mask = np.zeros((int(rows.max()) - r0 + 2, int(cols.max()) - c0 + 2), dtype=np.uint8)
+    mask[rows - r0, cols - c0] = 1
+    count, labels = cv2.connectedComponents((mask == 0).astype(np.uint8), connectivity=4)
+    if count <= 2:
+        return cells, 0
+    border_labels = set(labels[0, :]) | set(labels[-1, :]) | set(labels[:, 0]) | set(labels[:, -1])
+    added: list[tuple[int, int]] = []
+    for label in range(1, count):
+        if label in border_labels:
+            continue
+        hole_rows, hole_cols = np.nonzero(labels == label)
+        for r, c in zip(hole_rows, hole_cols):
+            gr, gc = int(r) + r0, int(c) + c0
+            if free is None or (0 <= gr < free.shape[0] and 0 <= gc < free.shape[1] and not free[gr, gc]):
+                added.append((gr, gc))
+    if not added:
+        return cells, 0
+    return sorted(set(cells) | set(added)), len(added)
+
+
+def _reachable_free(free_mask: np.ndarray, blocked: np.ndarray, seed: np.ndarray) -> np.ndarray:
+    """Free cells reachable from ``seed`` through corridors at least 3 cells (0.15 m) wide,
+    treating object cells as walls. Floor under a chair connects to the room only through leg
+    gaps 1-2 cells wide, so it fails this test; a walkable alcove or an L-sofa's corner passes."""
+    open_space = free_mask & ~blocked
+    eroded = cv2.erode(open_space.astype(np.uint8), np.ones((3, 3), dtype=np.uint8)).astype(bool)
+    count, labels = cv2.connectedComponents(eroded.astype(np.uint8), connectivity=8)
+    if count <= 1:
+        return open_space if seed.any() else open_space  # nothing wide enough: treat all as reachable
+    keep = np.zeros(count, dtype=bool)
+    seed_labels = labels[seed & eroded]
+    keep[seed_labels] = True
+    keep[0] = False
+    core = keep[labels] & eroded
+    reachable = cv2.dilate(core.astype(np.uint8), np.ones((3, 3), dtype=np.uint8)).astype(bool) & open_space
+    return reachable
+
+
+def _absorb_enclosed_pockets(
+    cell_sets: list[list[tuple[int, int]]], occupied: np.ndarray, free: np.ndarray,
+    trajectory: np.ndarray | None = None,
+) -> tuple[list[list[tuple[int, int]]], list[int]]:
+    """Assign leftover non-navigable cells to objects by geodesic competition (multi-source BFS).
+
+    Domain = cells that are neither navigable, nor exterior unknown (border-connected), nor already
+    part of an object: unlabeled walls, occlusion pockets, enclosed unexplored patches — and, when
+    the robot trajectory is given, "inaccessible free" cells: explored floor that cannot be reached
+    from the trajectory through a corridor at least 3 cells (0.15 m) wide once object cells are
+    treated as walls (floor seen under a chair/bed through leg gaps). Sources: every
+    navigable/exterior-adjacent domain cell (background) and every object-adjacent domain cell
+    (that object); BFS through the domain, first arrival wins, background wins ties. A pocket
+    behind/inside an object is geodesically closer to the object than to navigable space, so it is
+    absorbed; a wall run is within a cell or two of navigable space almost everywhere, so the
+    background reclaims it and object creep along walls stops on its own. No per-class priors.
+    """
+    from collections import deque
+
+    height, width = free.shape
+    free_mask = free > 0
+    exterior = _exterior_unknown(~free_mask & ~occupied)
+    inaccessible = np.zeros((height, width), dtype=bool)
+    if trajectory is not None and trajectory.any():
+        blocked = np.zeros((height, width), dtype=bool)
+        for cells in cell_sets:
+            for row, col in cells:
+                blocked[row, col] = True
+        seed = cv2.dilate(trajectory.astype(np.uint8), np.ones((3, 3), dtype=np.uint8)).astype(bool) & free_mask
+        navigable = _reachable_free(free_mask, blocked, seed)
+        inaccessible = free_mask & ~navigable                    # floor the robot cannot actually reach
+        free_mask = navigable                                    # the rest joins the domain
+    label = np.zeros((height, width), dtype=np.int32)          # 0 unvisited, -1 background, i+1 object
+    for index, cells in enumerate(cell_sets):
+        for row, col in cells:
+            label[row, col] = index + 1
+    domain = ~free_mask & ~exterior & (label == 0)          # free_mask here = navigable floor
+    background = free_mask | exterior
+    queue: deque = deque()
+    rows, cols = np.nonzero(domain)
+    object_seeds = []
+    for row, col in zip(rows, cols):
+        seed = 0
+        for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            r, c = row + dr, col + dc
+            if not (0 <= r < height and 0 <= c < width) or background[r, c]:
+                seed = -1                                       # grid border / free / exterior neighbour
+                break
+            if label[r, c] > 0 and seed == 0:
+                seed = label[r, c]
+        if seed == -1 and not inaccessible[row, col]:
+            label[row, col] = -1
+            queue.append((row, col))                            # background seeds first: they win ties
+        elif seed > 0:
+            object_seeds.append((row, col, seed))
+    for row, col, seed in object_seeds:
+        if label[row, col] == 0:
+            label[row, col] = seed
+            queue.append((row, col))
+    while queue:
+        row, col = queue.popleft()
+        value = label[row, col]
+        for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            r, c = row + dr, col + dc
+            if 0 <= r < height and 0 <= c < width and domain[r, c] and label[r, c] == 0:
+                if value == -1 and inaccessible[r, c]:
+                    continue                                    # navigable space never flows into sealed-off floor
+                label[r, c] = value
+                queue.append((r, c))
+    out_sets = [set(cells) for cells in cell_sets]
+    added_counts = [0] * len(cell_sets)
+    for index in range(len(cell_sets)):
+        claim_rows, claim_cols = np.nonzero(domain & (label == index + 1))
+        if len(claim_rows):
+            out_sets[index].update((int(r), int(c)) for r, c in zip(claim_rows, claim_cols))
+            added_counts[index] = len(claim_rows)
+    return [sorted(cells) for cells in out_sets], added_counts
+
+
+def _box_cells(cells: list[tuple[int, int]], free: np.ndarray, mode: str) -> tuple[list[tuple[int, int]], int]:
+    """Finalize a footprint as its axis-aligned bounding rectangle (class-agnostic shape prior).
+
+    Open bays in a ragged mask (the object's body seen by the BEV but not the camera cloud, connected
+    to the outside, so no topological fill can claim them) are absorbed by the rectangle. "guarded"
+    keeps every explored-free cell out, so walkable floor — an L-sofa's real inner corner, a walkway
+    clipped by the box of a diagonal object — is never turned into furniture.
+    """
+    if not cells or mode == "off":
+        return cells, 0
+    rows = np.fromiter((c[0] for c in cells), dtype=np.int64, count=len(cells))
+    cols = np.fromiter((c[1] for c in cells), dtype=np.int64, count=len(cells))
+    r0, r1 = int(rows.min()), int(rows.max())
+    c0, c1 = int(cols.min()), int(cols.max())
+    take = np.ones((r1 - r0 + 1, c1 - c0 + 1), dtype=bool)
+    if mode == "guarded":
+        take &= ~(free[r0:r1 + 1, c0:c1 + 1] > 0)
+    take[rows - r0, cols - c0] = True
+    out_rows, out_cols = np.nonzero(take)
+    out = sorted((int(r) + r0, int(c) + c0) for r, c in zip(out_rows, out_cols))
+    return out, len(out) - len(set(cells))
+
+
+def _merge_same_type_records(records: list[dict], gap_m: float, resolution: float) -> list[dict]:
+    """Single-linkage merge of same-objectType footprints whose cells come within ``gap_m`` of each other.
+
+    Class-agnostic: one global gap. Distance is Chebyshev on the grid (a cell dilated by
+    ``ceil(gap/res)`` cells), so the threshold is approximate on diagonals.
+    """
+    if gap_m <= 0 or len(records) < 2:
+        return records
+    reach = max(1, int(math.ceil(gap_m / resolution)))
+    offsets = [(dr, dc) for dr in range(-reach, reach + 1) for dc in range(-reach, reach + 1)]
+    parent = list(range(len(records)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    by_type: dict[str, list[int]] = {}
+    for index, record in enumerate(records):
+        by_type.setdefault(record["object_type"], []).append(index)
+    for indices in by_type.values():
+        if len(indices) < 2:
+            continue
+        cell_sets = {i: set(records[i]["cells"]) for i in indices}
+        for pos, i in enumerate(indices):
+            grown = {(r + dr, c + dc) for r, c in cell_sets[i] for dr, dc in offsets}
+            for j in indices[pos + 1:]:
+                if find(i) != find(j) and not grown.isdisjoint(cell_sets[j]):
+                    parent[find(j)] = find(i)
+
+    groups: dict[int, list[dict]] = {}
+    for index, record in enumerate(records):
+        groups.setdefault(find(index), []).append(record)
+    merged: list[dict] = []
+    for group in groups.values():
+        if len(group) == 1:
+            merged.append(group[0])
+            continue
+        group.sort(key=lambda rec: -len(rec["cells"]))     # primary evidence = largest fragment
+        primary = group[0]
+        cells = sorted({cell for rec in group for cell in rec["cells"]})
+        weights = np.array([max(1, len(rec["cells"])) for rec in group], dtype=np.float64)
+        positions = np.array([rec["position"] for rec in group], dtype=np.float64)
+        mean_pos = (positions * weights[:, None]).sum(axis=0) / weights.sum()
+        fragment_ids = sorted(int(rec["sysnav"]["id"]) for rec in group)
+        record = dict(primary)
+        record["cells"] = cells
+        record["polygon"] = None                            # a merged footprint is no longer one rectangle
+        record["position"] = [float(v) for v in mean_pos]
+        record["object_id"] = f"sysnav|{fragment_ids[0]}"
+        record["merged_ids"] = fragment_ids
+        record["all_sysnav_ids"] = sorted({int(i) for rec in group for i in rec["sysnav"].get("ids", [rec["sysnav"]["id"]])})
+        record["cloud_points_total"] = sum(len(rec["sysnav"].get("cloud_xyz") or []) for rec in group)
+        record["confidence"] = max((rec["sysnav"].get("confidence") or 0.0) for rec in group)
+        merged.append(record)
+    merged.sort(key=lambda rec: int(str(rec["object_id"]).rsplit("|", 1)[-1]))
+    return merged
+
+
 def _door_groups(dump: SysNavDump) -> list[dict]:
     groups: dict[tuple, dict] = {}
     for door in dump.snapshot.get("doors", []):
@@ -417,7 +760,9 @@ def _door_groups(dump: SysNavDump) -> list[dict]:
 
 
 def build_object_layers(
-    dump: SysNavDump, map_info: dict, rc0: tuple[int, int], rooms: RoomLayers, opts: ConvertOptions
+    dump: SysNavDump, map_info: dict, rc0: tuple[int, int], rooms: RoomLayers, opts: ConvertOptions,
+    traversibility: np.ndarray | None = None, occupied: np.ndarray | None = None,
+    trajectory: np.ndarray | None = None,
 ) -> ObjectLayers:
     del rc0
     height, width = int(map_info["H"]), int(map_info["W"])
@@ -445,6 +790,38 @@ def build_object_layers(
             "object_id": f"sysnav|{int(obj['id'])}",
             "sysnav": obj,
         })
+    records = _merge_same_type_records(records, opts.merge_gap_m, res)
+    close_cells = int(round(opts.footprint_close_m / res))
+    for record in records:
+        record["cells"] = _postprocess_cells(record["cells"], close_cells)
+    if opts.footprint_fill and traversibility is not None and occupied is not None and records:
+        cell_sets, added = _fill_enclosed_regions([r["cells"] for r in records], occupied.astype(bool), traversibility)
+        for record, cells, added_count in zip(records, cell_sets, added):
+            cells, hole_count = _fill_mask_holes(cells, traversibility > 0)
+            record["cells"] = cells
+            record["filled_cells"] = added_count + hole_count
+    if opts.absorb_pockets and traversibility is not None and occupied is not None and records:
+        cell_sets, absorbed = _absorb_enclosed_pockets(
+            [r["cells"] for r in records], occupied.astype(bool), traversibility, trajectory=trajectory)
+        for record, cells, absorbed_count in zip(records, cell_sets, absorbed):
+            record["cells"] = cells
+            if absorbed_count > 0:
+                record["absorbed_cells"] = absorbed_count
+    if opts.footprint_box != "off" and traversibility is not None:
+        for record in records:
+            record["cells"], boxed = _box_cells(record["cells"], traversibility, opts.footprint_box)
+            if boxed > 0:
+                record["boxed_cells"] = boxed
+                rows = [cell[0] for cell in record["cells"]]
+                cols = [cell[1] for cell in record["cells"]]
+                record["polygon"] = _rectangle_from_bounds(
+                    x_min + min(cols) * res, x_min + max(cols) * res,
+                    z_min + min(rows) * res, z_min + max(rows) * res)
+    if opts.footprint_fill and traversibility is not None:
+        for record in records:                                  # last pass: seal anything the later stages enclosed
+            record["cells"], sealed = _fill_mask_holes(record["cells"], None)
+            if sealed > 0:
+                record["filled_cells"] = record.get("filled_cells", 0) + sealed
     if opts.doors_as_objects:
         for group in _door_groups(dump):
             seen: set[tuple[int, int]] = set()
@@ -514,12 +891,20 @@ def build_object_layers(
             entry["door_rooms"] = sysnav["door_rooms"]
             entry["door_label"] = sysnav["door_label"]
         else:
-            entry["sysnav_object_id"] = int(sysnav["id"])
-            entry["sysnav_object_ids"] = [int(i) for i in sysnav.get("ids", [sysnav["id"]])]
+            entry["sysnav_object_id"] = int(str(record["object_id"]).rsplit("|", 1)[-1])
+            entry["sysnav_object_ids"] = record.get("all_sysnav_ids") or [int(i) for i in sysnav.get("ids", [sysnav["id"]])]
             entry["sysnav_room_id"] = rooms.id_map.get(int(sysnav.get("room_id", -1)))
-            entry["confidence"] = sysnav.get("confidence")
+            entry["confidence"] = record.get("confidence", sysnav.get("confidence"))
             entry["img_path"] = sysnav.get("img_path")
-            entry["cloud_points"] = len(sysnav.get("cloud_xyz") or [])
+            entry["cloud_points"] = record.get("cloud_points_total", len(sysnav.get("cloud_xyz") or []))
+            if record.get("merged_ids"):
+                entry["merged_sysnav_ids"] = record["merged_ids"]
+        if record.get("filled_cells"):
+            entry["filled_cells"] = int(record["filled_cells"])
+        if record.get("boxed_cells"):
+            entry["boxed_cells"] = int(record["boxed_cells"])
+        if record.get("absorbed_cells"):
+            entry["absorbed_cells"] = int(record["absorbed_cells"])
         if len(cells) <= 128:
             entry["grid_cells"] = [list(cell) for cell in cells]
         object_metadata.append(entry)
@@ -562,7 +947,10 @@ def build_scene_representation(
     map_info, rc0 = compute_export_grid(dump, opts)
     traversibility, unknown, occupied = build_traversibility_layers(dump, map_info, rc0, opts)
     rooms = build_room_layers(dump, map_info, rc0, traversibility, opts)
-    objects = build_object_layers(dump, map_info, rc0, rooms, opts)
+    r0, c0 = rc0
+    trajectory = (np.asarray(dump.bev["trajectory"]) > 0)[r0:r0 + int(map_info["H"]), c0:c0 + int(map_info["W"])]
+    objects = build_object_layers(dump, map_info, rc0, rooms, opts,
+                                  traversibility=traversibility, occupied=occupied, trajectory=trajectory)
     if opts.objects_block:
         traversibility = traversibility.copy()
         traversibility[objects.blocked] = 0

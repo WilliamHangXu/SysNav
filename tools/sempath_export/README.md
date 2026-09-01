@@ -66,9 +66,14 @@ python3 -m tools.sempath_export.vendor.view_procthor_map --prefix output/sempath
 | `--output-dir` | `output/sempath_maps` | writes `<out>/<split>/<id>/<id>.*` (leaf dir == JSON stem, as SemPathBench's discovery requires) |
 | `--resolution` | 0.05 | must equal the BEV resolution (no resampling in v1) |
 | `--padding` | 1.0 m | margin around the explored area |
-| `--footprint bbox\|cloud` | bbox | object footprint from the XY hull of the 8 `bbox3d` corners, or from the projected voxel cloud |
+| `--footprint cloud\|bbox` | cloud | object footprint from the projected voxel cloud (bbox-hull fallback when an object has no cloud), or from the XY hull of the 8 `bbox3d` corners |
+| `--merge-gap` | 0.10 m | single-linkage merge of same-type footprints whose cells come within this gap (class-agnostic; collapses fragmented tracks of one object; 0 = off) |
+| `--footprint-close` | 0.10 m | per-object cleanup radius: connected-component grouping on the k-dilated mask keeps the dominant blob (drops stray depth-bleed cells), then a morphological closing seals holes/seams (0 = off) |
 | `--objects-block / --no-objects-block` | on | non-traversable object cells become obstacles (mimics ProcTHOR's reachable-position semantics) |
-| `--unknown-as unknown\|obstacle` | unknown | unexplored cells → occupancy `2` (non-traversable but distinguishable) or `1` |
+| `--unknown-as exterior\|obstacle\|unknown` | exterior | unexplored cells: `exterior` keeps occupancy `2` only outside the building (border-connected unknown; square padding is also `2`) and turns enclosed pockets — furniture interiors, sealed occlusion pockets — into obstacle `1`; `obstacle` = fully binary; `unknown` keeps every unexplored cell as `2` |
+| `--absorb-pockets / --no-absorb-pockets` | on | geodesic competition (multi-source BFS) assigns leftover non-navigable cells to the nearest object: occlusion bays, enclosed unexplored patches, and *inaccessible floor* — explored-free cells unreachable from the robot's trajectory through a ≥0.15 m corridor once object cells count as walls (floor seen under chairs/beds through leg gaps); navigable space competes, so wall runs stay unlabeled; a final pass seals anything fully enclosed by one object's cells |
+| `--footprint-box guarded\|full\|off` | guarded | finalize each footprint as its axis-aligned bounding rectangle (absorbs open bays no topological fill can claim); `guarded` keeps explored-free cells out of the box |
+| `--footprint-fill / --no-footprint-fill` | on | claim regions enclosed by an object's shell + adjacent BEV-occupied cells for that object (fills a bed/sofa's occluded interior with its instance id), then fill any region enclosed by the object's own final cells (its body returns would otherwise leave the mask hollow); guarded: explored-free cells are never claimed, pockets bounded mostly by walls are left alone, and a region's claimant must own at least max(0.5 m, 5%) of its boundary |
 | `--clear-trajectory-radius` | 0.4 m | cells the robot drove through are forced free (removes the BEV "person walking alongside" trail) |
 | `--doors-as-objects` | on | door clusters become `Doorway` objects (traversable for the evaluator) |
 | `--room-fill-radius` | 0.5 m | free cells with no room id take the nearest room within this distance |
@@ -83,8 +88,10 @@ Pipeline (`convert_sysnav_scene.py` → `layered_map.py` → vendored writers):
 2. traversibility = explored ∧ ¬occupied (after trajectory clearing), unknown = ¬explored ∧ ¬occupied;
 3. rooms: the 0.1 m mask is sampled at every 0.05 m cell centre (X-major formula), ids renumbered 1..N by ascending
    SysNav id, nearest-room fill, simplified contour polygon, VLM label → category via `label_aliases.py`;
-4. objects: hull → `rasterize_polygon_to_grid`, per-cell winner by ProcTHOR's `(priority, area, −height)` rule,
-   metadata mirrors ProcTHOR (`objectId = sysnav|<id>`), doors → `Doorway`;
+4. objects: footprint cells (cloud projection by default, bbox hull as fallback/mode) → same-type single-linkage
+   merge (`--merge-gap`) → dilated-CC stray-cell drop + closing (`--footprint-close`) → per-cell winner by
+   ProcTHOR's `(priority, area, −height)` rule; metadata mirrors ProcTHOR (`objectId = sysnav|<id>`, merged
+   instances record `merged_sysnav_ids`), doors → `Doorway`;
 5. writes `_maps.npz` + `_metadata.json` (+ `sysnav` provenance), the layered bundle, the overview, then
    `migrate_map_payload` (`object_footprints`, `cell_object_ids`), `grid_coordinate_frame{row_axis: ros_y, col_axis: ros_x}`,
    validation, and the metric cache **last** (its validity is keyed on the JSON's size + mtime).

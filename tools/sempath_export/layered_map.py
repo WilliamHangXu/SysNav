@@ -89,7 +89,9 @@ def scene_representation_to_layered_state(scene_representation: dict, map_id: st
         raise ValueError("room_instance_map shape != traversibility_map shape")
     object_instances = _object_instances_from_metadata(scene_representation)
 
-    occupancy = _pad_to_square(occupancy, tiles["obstacle"]["value"])
+    # square padding is outside the building: grey when the map distinguishes unknown, obstacle otherwise
+    pad_value = tiles["unknown"]["value"] if unknown is not None else tiles["obstacle"]["value"]
+    occupancy = _pad_to_square(occupancy, pad_value)
     room_layer = _pad_to_square(room_layer, 0)
     object_instance_map = _pad_to_square(object_instance_map, 0)
     grid_size = int(occupancy.shape[0])

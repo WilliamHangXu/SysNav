@@ -2,7 +2,7 @@ from ultralytics import YOLOWorld, YOLO, YOLOE
 import yaml
 import os
 
-object_file_path = 'src/semantic_mapping/semantic_mapping/config/objects_office.yaml'
+object_file_path = 'src/semantic_mapping/semantic_mapping/config/objects.yaml'
 with open(object_file_path, "r") as file:
     object_config = yaml.safe_load(file)
 label_template = object_config['prompts']

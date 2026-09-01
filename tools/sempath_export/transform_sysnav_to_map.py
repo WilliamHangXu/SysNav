@@ -148,9 +148,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--resolution", type=float, default=0.05)
     parser.add_argument("--padding", type=float, default=1.0)
-    parser.add_argument("--footprint", choices=("bbox", "cloud"), default="bbox")
+    parser.add_argument("--footprint", choices=("cloud", "bbox"), default="cloud")
+    parser.add_argument("--merge-gap", type=float, default=0.10,
+                        help="single-linkage merge of same-type footprints within this gap in metres (0 = off)")
+    parser.add_argument("--footprint-close", type=float, default=0.10,
+                        help="morphological-closing radius in metres for object footprints (0 = off)")
     parser.add_argument("--objects-block", dest="objects_block", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--unknown-as", choices=("unknown", "obstacle"), default="unknown")
+    parser.add_argument("--unknown-as", choices=("exterior", "obstacle", "unknown"), default="exterior",
+                        help="unexplored cells: 'exterior' keeps occupancy 2 only outside the building (border-connected) "
+                             "and turns enclosed pockets (furniture interiors) into obstacle; 'obstacle' = fully binary; "
+                             "'unknown' keeps every unexplored cell as 2")
+    parser.add_argument("--absorb-pockets", dest="absorb_pockets", action=argparse.BooleanOptionalAction, default=True,
+                        help="assign leftover non-navigable cells (occlusion bays, enclosed unexplored patches, and "
+                             "observed floor unreachable through a 0.15 m corridor from the robot's trajectory, e.g. under "
+                             "chairs/beds) to the geodesically nearest object; navigable space competes, so walls stay unlabeled")
+    parser.add_argument("--footprint-box", choices=("guarded", "full", "off"), default="guarded",
+                        help="finalize each object footprint as its axis-aligned bounding rectangle; 'guarded' keeps "
+                             "explored-free cells out of the box, 'full' paints the whole rectangle")
+    parser.add_argument("--footprint-fill", dest="footprint_fill", action=argparse.BooleanOptionalAction, default=True,
+                        help="claim regions enclosed by an object's shell + occupied cells (fills bed/sofa interiors)")
     parser.add_argument("--clear-trajectory-radius", type=float, default=0.4)
     parser.add_argument("--doors-as-objects", dest="doors_as_objects", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--room-fill-radius", type=float, default=0.5)
@@ -170,10 +186,15 @@ def options_from_args(args: argparse.Namespace) -> ConvertOptions:
         footprint=args.footprint,
         objects_block=args.objects_block,
         unknown_as=args.unknown_as,
+        footprint_fill=args.footprint_fill,
+        footprint_box=args.footprint_box,
+        absorb_pockets=args.absorb_pockets,
         clear_trajectory_radius_m=args.clear_trajectory_radius,
         doors_as_objects=args.doors_as_objects,
         room_fill_radius_m=args.room_fill_radius,
         min_room_cells=args.min_room_cells,
+        merge_gap_m=args.merge_gap,
+        footprint_close_m=args.footprint_close,
         drop_labels=tuple(label.strip() for label in args.drop_labels.split(",") if label.strip()),
         object_aliases=object_aliases,
         room_aliases=room_aliases,

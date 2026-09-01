@@ -65,6 +65,14 @@ def make_synthetic_dump(tmp: Path) -> Path:
     occ[r_hi + 1, c_lo - 1:c_hi + 2] = 1
     occ[r_lo - 1:r_hi + 2, c_lo - 1] = 1
     occ[r_lo - 1:r_hi + 2, c_hi + 1] = 1
+    # bed at (1.8, 1.8), 1.0 x 0.8: BEV shows an occupied ring with an unexplored (occluded) interior
+    b_r0, b_c0 = bev_index(1.3, 1.4)
+    b_r1, b_c1 = bev_index(2.3, 2.2)
+    occ[b_r0:b_r1 + 1, b_c0] = 1
+    occ[b_r0:b_r1 + 1, b_c1] = 1
+    occ[b_r0, b_c0:b_c1 + 1] = 1
+    occ[b_r1, b_c0:b_c1 + 1] = 1
+    exp[b_r0 + 1:b_r1, b_c0 + 1:b_c1] = 0
     wall_col = bev_index(0.0, 0.0)[1]
     occ[r_lo:r_hi + 1, wall_col] = 1
     gap_lo, gap_hi = bev_index(0.0, -0.3)[0], bev_index(0.0, 0.3)[0]
@@ -108,11 +116,28 @@ def make_synthetic_dump(tmp: Path) -> Path:
              "timestamp": 90.0, "position": [-1.5, 1.0, 0.4], "bbox3d": box_corners(-1.5, 1.0, 0.5, 0.5), "cloud_xyz": None},
             {"id": 12, "ids": [12, 15], "label": "sofa", "confidence": 0.9, "status": True, "room_id": 3, "img_path": "",
              "timestamp": 91.0, "position": [-1.3, 1.0, 0.4], "bbox3d": box_corners(-1.3, 1.0, 1.6, 0.8, yaw=0.2),
-             "cloud_xyz": [[-1.3 + 0.1 * i, 1.0, 0.4] for i in range(-5, 6)]},
+             "cloud_xyz": [[-1.3 + 0.05 * i, 1.0, 0.4] for i in range(-10, 11)]
+                          + [[-1.3 + 0.05 * i, 1.05, 0.4] for i in range(-10, 11)]
+                          + [[0.5, -2.6, 0.4]]},                                  # stray depth-bleed point
+            {"id": 18, "ids": [18], "label": "sofa", "confidence": 0.85, "status": True, "room_id": 3, "img_path": "",
+             "timestamp": 95.0, "position": [-0.55, 1.0, 0.4], "bbox3d": box_corners(-0.55, 1.0, 0.3, 0.3),
+             "cloud_xyz": [[-0.72 + 0.05 * i, 1.0, 0.4] for i in range(6)]
+                          + [[-0.72 + 0.05 * i, 1.05, 0.4] for i in range(6)]},   # fragment, 0.08 m gap to sofa 12
             {"id": 13, "ids": [13], "label": "trash can", "confidence": 0.7, "status": True, "room_id": 7, "img_path": "",
              "timestamp": 92.0, "position": [2.0, -2.0, 0.3], "bbox3d": box_corners(2.0, -2.0, 0.3, 0.3), "cloud_xyz": None},
             {"id": 14, "ids": [14], "label": "person", "confidence": 0.9, "status": True, "room_id": 7, "img_path": "",
              "timestamp": 93.0, "position": [2.0, 2.0, 0.9], "bbox3d": box_corners(2.0, 2.0, 0.5, 0.5, 0, 1.7), "cloud_xyz": None},
+            {"id": 19, "ids": [19], "label": "bed", "confidence": 0.9, "status": True, "room_id": 7, "img_path": "",
+             "timestamp": 96.0, "position": [1.8, 1.8, 0.3], "bbox3d": box_corners(1.8, 1.8, 1.0, 0.8),
+             "cloud_xyz": [[1.3 + 0.05 * i, 1.4, 0.4] for i in range(21)]           # three sides of the rim;
+                          + [[1.3 + 0.05 * i, 2.2, 0.4] for i in range(21)]         # the x = 2.3 side is unobserved
+                          + [[1.3, 1.4 + 0.05 * i, 0.4] for i in range(17)]},
+            {"id": 20, "ids": [20], "label": "table", "confidence": 0.6, "status": True, "room_id": 3, "img_path": "",
+             "timestamp": 97.0, "position": [-2.2, -2.2, 0.4], "bbox3d": box_corners(-2.2, -2.2, 0.6, 0.6),
+             "cloud_xyz": [[-2.5 + 0.05 * i, -2.5, 0.4] for i in range(13)]         # closed ring around floor the
+                          + [[-2.5 + 0.05 * i, -1.9, 0.4] for i in range(13)]       # robot has actually observed
+                          + [[-2.5, -2.5 + 0.05 * i, 0.4] for i in range(13)]
+                          + [[-1.9, -2.5 + 0.05 * i, 0.4] for i in range(13)]},
             {"id": 16, "ids": [16], "label": "vase", "confidence": 0.5, "status": False, "room_id": 7, "img_path": "",
              "timestamp": 94.0, "position": [2.5, 2.5, 0.9], "bbox3d": box_corners(2.5, 2.5, 0.2, 0.2), "cloud_xyz": None},
         ],
@@ -222,12 +247,39 @@ class ConverterTest(unittest.TestCase):
         self.assertEqual(by_id["sysnav|13"]["objectType"], "GarbageCan")
         self.assertNotIn("sysnav|14", by_id)                    # person dropped
         self.assertNotIn("sysnav|16", by_id)                    # status False dropped
+        self.assertNotIn("sysnav|18", by_id)                    # sofa fragment merged into sysnav|12
         sofa_id = by_id["sysnav|12"]["instance_id"]
         self.assertEqual(objects.object_instance_map[self.export_cell(-1.5, 1.0)], sofa_id)   # Sofa (100) beats Chair (90)
         self.assertEqual(by_id["sysnav|12"]["sysnav_room_id"], 1)
         # scrambled corners: hull has 4 vertices and covers the 0.5 x 0.5 chair (~100 cells)
         self.assertEqual(len(by_id["sysnav|11"]["bbox_polygon_xz"]), 4)
         self.assertAlmostEqual(by_id["sysnav|11"]["num_grid_cells"], 100, delta=25)
+
+    def test_footprint_merge_and_stray(self):
+        rooms, objects = self._objects()
+        by_id = {m["objectId"]: m for m in objects.object_metadata}
+        sofa = by_id["sysnav|12"]
+        self.assertEqual(sofa["merged_sysnav_ids"], [12, 18])
+        self.assertEqual(sofa["sysnav_object_ids"], [12, 15, 18])
+        sofa_cells = {tuple(c) for c in sofa["grid_cells"]}
+        self.assertIn(self.export_cell(-1.7, 1.0), sofa_cells)      # main fragment
+        self.assertIn(self.export_cell(-0.5, 1.0), sofa_cells)      # merged fragment
+        self.assertNotIn(self.export_cell(0.5, -2.6), sofa_cells)   # stray bleed cell dropped
+        self.assertEqual(objects.object_instance_map[self.export_cell(0.5, -2.6)], 0)
+        # merging off -> the fragment stays a separate instance
+        _, objects_off = self._objects(cs.ConvertOptions(merge_gap_m=0.0))
+        ids_off = {m["objectId"] for m in objects_off.object_metadata}
+        self.assertIn("sysnav|18", ids_off)
+
+    def test_postprocess_cells_semantics(self):
+        # solid shapes are untouched; a stray cell is dropped; a 2-cell seam between blobs is sealed
+        rect = [(r, c) for r in range(20, 30) for c in range(40, 50)]
+        self.assertEqual(cs._postprocess_cells(rect, 2), sorted(rect))
+        self.assertEqual(cs._postprocess_cells(rect + [(80, 80)], 2), sorted(rect))
+        two_blobs = rect + [(r, c) for r in range(20, 30) for c in range(52, 60)]
+        sealed = set(cs._postprocess_cells(two_blobs, 2))
+        self.assertTrue({(r, 50) for r in range(22, 28)} <= sealed)  # seam filled
+        self.assertEqual(cs._postprocess_cells(rect, 0), sorted(rect))
 
     def test_doorway_traversable(self):
         rooms, objects = self._objects()
@@ -245,13 +297,110 @@ class ConverterTest(unittest.TestCase):
     def test_occupancy_values(self):
         rep = cs.build_scene_representation(self.dump, self.opts, map_id="001_train", map_split="train")
         state = scene_representation_to_layered_state(rep, "001_train")
-        values = {v for row in state["layers"]["occupancy"] for v in row}
-        self.assertEqual(values, {0, 1, 2})
+        occ = state["layers"]["occupancy"]
+        self.assertEqual({v for row in occ for v in row}, {0, 1, 2})
+        self.assertEqual(occ[0][0], 2)                                    # outside the building stays grey
+        r, c = self.export_cell(1.8, 1.8)
+        self.assertEqual(occ[r][c], 1)                                    # enclosed bed interior is obstacle
         self.assertEqual(state["grid_size"], len(state["layers"]["room"]))
         self.assertEqual(state["metadata"]["source"], "sysnav")
         rep2 = cs.build_scene_representation(self.dump, cs.ConvertOptions(unknown_as="obstacle"), map_id="001_train", map_split="train")
         values2 = {v for row in scene_representation_to_layered_state(rep2, "001_train")["layers"]["occupancy"] for v in row}
         self.assertEqual(values2, {0, 1})
+
+    def test_fill_one_sided_shell_and_competition(self):
+        # camera shell on ONE side only; BEV occupancy closes the ring -> interior assigned via boundary share
+        occupied = np.zeros((100, 100), bool); free = np.zeros((100, 100), bool)
+        occupied[40, 40:71] = True; occupied[70, 40:71] = True
+        occupied[40:71, 40] = True; occupied[40:71, 70] = True       # closed 30x30 ring
+        free[:38, :] = True                                          # observed floor elsewhere
+        shell = [(40, c) for c in range(40, 71)]                     # bed shell = the top side only
+        cup = [(70, 55), (70, 56)]                                   # tiny object standing on the rim
+        sets, added = cs._fill_enclosed_regions([shell, cup], occupied, free)
+        self.assertGreater(added[0], 700)                            # bed claims its ~29x29 interior
+        self.assertIn((55, 55), set(sets[0]))
+        self.assertEqual(added[1], 0)                                # the cup cannot swallow it
+        # cup alone (bed undetected): boundary share < 5% -> interior stays unclaimed
+        sets2, added2 = cs._fill_enclosed_regions([cup], occupied, free)
+        self.assertEqual(added2[0], 0)
+        # a second, separate ring away from any shell is bounded by walls only -> untouched
+        occupied3 = occupied.copy()
+        occupied3[40:71, 82] = True; occupied3[40:71, 92] = True
+        occupied3[40, 82:93] = True; occupied3[70, 82:93] = True
+        sets3, _ = cs._fill_enclosed_regions([shell], occupied3, free)
+        self.assertNotIn((55, 87), set(sets3[0]))
+
+    def test_absorb_pockets(self):
+        # building: walls rows/cols 10 & 40; sofa against the top wall with an unexplored strip behind it
+        occupied = np.zeros((60, 60), bool); free = np.zeros((60, 60), np.uint8)
+        occupied[10, 10:41] = occupied[40, 10:41] = True
+        occupied[10:41, 10] = occupied[10:41, 40] = True
+        free[15:40, 11:40] = 1                                        # explored floor
+        free[11:15, 11:14] = 1                                        # explored gap left of the sofa
+        sofa = [(r, c) for r in range(12, 15) for c in range(15, 31)]
+        sets, added = cs._absorb_enclosed_pockets([sofa], occupied, free)
+        claimed = set(sets[0])
+        self.assertIn((11, 20), claimed)                              # strip behind the sofa absorbed
+        self.assertGreaterEqual(added[0], 16)                         # the full 1x16 strip (+ a few edge cells)
+        self.assertNotIn((10, 20), claimed)                           # wall itself is exterior-adjacent -> background
+        self.assertNotIn((10, 35), claimed)                           # wall far along: background reclaims
+        self.assertNotIn((40, 20), claimed)                           # opposite wall untouched
+        self.assertNotIn((9, 20), claimed)                            # exterior unknown never claimed
+
+    def test_inaccessible_free_absorbed(self):
+        # chair ring with 1-cell leg gaps around observed floor: interior unreachable (corridors < 3 cells)
+        occupied = np.zeros((60, 60), bool)
+        free = np.zeros((60, 60), np.uint8); free[5:55, 5:55] = 1
+        traj = np.zeros((60, 60), bool); traj[30, 5:55] = True
+        ring = [(r, c) for r in range(10, 21) for c in range(10, 21) if r in (10, 20) or c in (10, 20)]
+        ring = [cell for cell in ring if cell not in {(10, 15), (15, 10), (20, 15), (15, 20)}]   # leg gaps
+        sets, added = cs._absorb_enclosed_pockets([ring], occupied, free, trajectory=traj)
+        self.assertIn((15, 15), set(sets[0]))                        # under-chair floor claimed
+        self.assertGreater(added[0], 60)
+        # a wide-open alcove (>= 3-cell corridor) stays free
+        alcove = [(r, c) for r in range(40, 51) for c in range(40, 51) if (r in (40, 50) or c in (40, 50))]
+        alcove = [cell for cell in alcove if not (cell[0] == 40 and 43 <= cell[1] <= 47)]        # 5-cell opening
+        sets2, added2 = cs._absorb_enclosed_pockets([alcove], occupied, free, trajectory=traj)
+        self.assertNotIn((45, 45), set(sets2[0]))
+
+    def test_guarded_box(self):
+        free = np.ones((40, 40), np.uint8)
+        free[10:20, 10:26] = 0                                        # non-free zone
+        free[14, 14] = 1                                              # observed floor speck inside it
+        cells = [(r, 10) for r in range(10, 20)] + [(10, c) for c in range(10, 26)]   # open C/L shape
+        boxed, added = cs._box_cells(cells, free, "guarded")
+        self.assertGreater(added, 100)
+        self.assertIn((19, 25), set(boxed))                           # open bay absorbed by the rectangle
+        self.assertNotIn((14, 14), set(boxed))                        # observed floor stays out
+        full, _ = cs._box_cells(cells, free, "full")
+        self.assertIn((14, 14), set(full))
+        same, zero = cs._box_cells(cells, free, "off")
+        self.assertEqual(zero, 0)
+
+    def test_mask_holes_filled(self):
+        ring = [(r, c) for r in range(10, 21) for c in range(10, 21) if r in (10, 20) or c in (10, 20)]
+        free = np.zeros((40, 40), bool)
+        cells, added = cs._fill_mask_holes(ring, free)                # interior non-free -> filled solid
+        self.assertEqual(added, 81)
+        self.assertIn((15, 15), set(cells))
+        free[11:20, 11:20] = True                                     # interior is observed floor -> guarded
+        cells2, added2 = cs._fill_mask_holes(ring, free)
+        self.assertEqual(added2, 0)
+
+    def test_bed_interior_filled_and_guard(self):
+        rep = cs.build_scene_representation(self.dump, self.opts, map_id="001_train", map_split="train")
+        meta = {m["objectId"]: m for m in rep["object_metadata"]}
+        bed = meta["sysnav|19"]
+        self.assertEqual(bed["objectType"], "Bed")
+        self.assertGreater(bed.get("filled_cells", 0), 100)               # occluded interior claimed
+        r, c = self.export_cell(1.8, 1.8)
+        self.assertEqual(rep["object_instance_map"][r, c], bed["instance_id"])
+        self.assertEqual(rep["traversibility_map"][r, c], 0)
+        # ring around observed floor: that floor is unreachable once the ring stands -> now claimed
+        table = meta["sysnav|20"]
+        r, c = self.export_cell(-2.2, -2.2)
+        self.assertEqual(rep["object_instance_map"][r, c], table["instance_id"])
+        self.assertGreater(table.get("absorbed_cells", 0), 0)
 
     def test_end_to_end_outputs(self):
         with tempfile.TemporaryDirectory() as out:
