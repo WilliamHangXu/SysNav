@@ -31,14 +31,16 @@ from tools.sempath_export.label_aliases import (
     normalize_label,
     object_priority,
 )
-from tools.sempath_export.vendor.convert_procthor_scene import (
+from tools.sempath_export import spb  # noqa: F401  (sys.path bootstrap for the embedded checkout)
+
+from scripts.make_maps.procthor.convert_procthor_scene import (
     _center_fallback_cells,
     _convex_hull,
     _rectangle_from_bounds,
     rasterize_polygon_to_grid,
     world_to_grid,
 )
-from tools.sempath_export.vendor.transform_procthor_to_map import _normalize_simple_category
+from scripts.make_maps.procthor.transform_procthor_to_map import _normalize_simple_category
 
 SNAPSHOT_FILE = "scene_graph_latest.json"
 BEV_FILE = "bev_latest.npz"
@@ -1084,7 +1086,7 @@ def build_scene_representation(
         "map_split": map_split,
         "map_index": map_index,
         "map_assignment_basis": "manual",
-        # converter-only keys (consumed by layered_map.py, ignored by the vendored writers)
+        # converter-only keys (consumed by layered_map.py, ignored by the SemPathBench writers)
         "room_instance_map": rooms.room_instance_map,
         "unknown_map": unknown,
         "occupied_map": occupied,

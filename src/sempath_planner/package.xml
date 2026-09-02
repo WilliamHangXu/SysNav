@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>sempath_planner</name>
+  <version>0.1.0</version>
+  <description>
+    Closed-loop bridge between the SysNav scene-graph exporter and SemPathBench's
+    GroundPlan method. Listens on /keyboard_input: "export" converts the freshly
+    written dumps into a SemPathBench map (embedded checkout, map key real/&lt;id&gt;),
+    "plan &lt;instruction&gt;" runs GroundPlan on it from the robot's current pose,
+    "go" feeds the resulting waypoints to the local planner (/way_point + /speed
+    + the Joy autonomy handshake), "stop" aborts. Publishes the planned path for
+    RViz. Never touches scene-graph state.
+  </description>
+  <maintainer email="willxh.68209@gmail.com">William Xu</maintainer>
+  <license>MIT</license>
+
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>python3-numpy</depend>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

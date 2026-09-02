@@ -1,9 +1,10 @@
 # tools/sempath_export — SysNav run → SemPathBench map
 
-Turns one real-robot SysNav run into a **SemPathBench ProcTHOR-style layered map** without touching the
-SemPathBench repo: the two SysNav nodes dump their state to `output/sempath_export/`, this tool converts the
-dump with **vendored copies** of SemPathBench's own writer code (`vendor/`, pinned to SemPathBench commit
-`06d570d`), and you copy the finished directory into SemPathBench by hand.
+Turns one real-robot SysNav run into a **SemPathBench ProcTHOR-style layered map**, written straight into
+the **embedded SemPathBench checkout** at `<SysNav root>/SemPathBench/` (a full clone of the upstream repo —
+its own git, ignored by SysNav's git; see *Embedded checkout* below). The two SysNav nodes dump their state
+to `output/sempath_export/`, this tool converts the dump using SemPathBench's own writer code imported from
+the checkout, and the map is immediately loadable there as map key `real/<map_id>`.
 
 ```
 tare_planner_node ─► output/sempath_export/scene_graph_latest.json   (rooms+VLM labels, objects, doors, room-grid geometry)
@@ -12,12 +13,15 @@ bev_mapper        ─► output/sempath_export/bev_latest.npz            (occupa
                                    │
    python3 -m tools.sempath_export.transform_sysnav_to_map --dump-dir output/sempath_export --map-id 001_train
                                    │
-                     output/sempath_maps/train/001_train/001_train.{json,png,ppm}  _maps.npz  _metadata.json
-                                                          _thinggraph.json  _overview.png  template_instruction.json
-                                                          001_train_metric_cache/{manifest.json,map_arrays.npz}
-                                   │
-   cp -a output/sempath_maps/train/001_train /home/all/SemPathBench/resources/maps/sysnav/train/   → map key sysnav/001_train
+                     SemPathBench/resources/maps/real/train/001_train/001_train.{json,png,ppm}  _maps.npz
+                        _metadata.json  _thinggraph.json  _overview.png  template_instruction.json
+                        001_train_metric_cache/{manifest.json,map_arrays.npz}      → map key real/001_train
 ```
+
+The `sempath_planner` ROS node (`src/sempath_planner/`) closes the loop live: on `/keyboard_input`,
+`export` runs this converter on the fresh dumps, `plan <instruction>` runs SemPathBench's GroundPlan on the
+result from the robot's current pose (Gemini, `$GEMINI_API_KEY`), `go` feeds the waypoints to the local
+planner, `stop` aborts. See `src/sempath_planner/config/sempath_planner.yaml` for the knobs.
 
 ## 1. Producing a dump (SysNav side)
 
@@ -57,13 +61,14 @@ Room *types* come from `vlm_node` (needs a Gemini/Qwen key); without it every ro
 ```bash
 cd /home/all/AlphaZ/SysNav
 python3 -m tools.sempath_export.transform_sysnav_to_map --dump-dir output/sempath_export --map-id 001_train
-python3 -m tools.sempath_export.vendor.view_procthor_map --prefix output/sempath_maps/train/001_train/001_train --save
+(cd SemPathBench && python3 -m scripts.make_maps.procthor.view_procthor_map \
+    --prefix resources/maps/real/train/001_train/001_train --save resources/maps/real/train/001_train/view.png)
 ```
 
 | Option | Default | Meaning |
 |---|---|---|
 | `--map-id` | required | must end in `_train` / `_valunseen` (SemPathBench's `--set` filtering keys off the suffix) |
-| `--output-dir` | `output/sempath_maps` | writes `<out>/<split>/<id>/<id>.*` (leaf dir == JSON stem, as SemPathBench's discovery requires) |
+| `--output-dir` | `SemPathBench/resources/maps/real` | writes `<out>/<split>/<id>/<id>.*` (leaf dir == JSON stem, split dir elided from the map key → `real/<id>`) |
 | `--resolution` | 0.05 | must equal the BEV resolution (no resampling in v1) |
 | `--padding` | 1.0 m | margin around the explored area |
 | `--footprint cloud\|bbox` | cloud | object footprint from the projected voxel cloud (bbox-hull fallback when an object has no cloud), or from the XY hull of the 8 `bbox3d` corners |
@@ -86,7 +91,7 @@ python3 -m tools.sempath_export.vendor.view_procthor_map --prefix output/sempath
 | `--label-aliases` | – | yaml `{objects: {label: ObjectType}, rooms: {label: category}}` merged over `label_aliases.py` |
 | `--skip-overview`, `--overwrite` | | |
 
-Pipeline (`convert_sysnav_scene.py` → `layered_map.py` → vendored writers):
+Pipeline (`convert_sysnav_scene.py` → `layered_map.py` → SemPathBench writers):
 1. export grid = BEV frame cropped to explored ∪ room cells (+padding); `map_info.x_min/z_min` are the **centres** of
    column 0 / row 0, so export `[r,c]` ≡ BEV `[r0+r, c0+c]` exactly;
 2. traversibility = explored ∧ ¬occupied (after trajectory clearing), unknown = ¬explored ∧ ¬occupied;
@@ -100,28 +105,66 @@ Pipeline (`convert_sysnav_scene.py` → `layered_map.py` → vendored writers):
    `migrate_map_payload` (`object_footprints`, `cell_object_ids`), `grid_coordinate_frame{row_axis: ros_y, col_axis: ros_x}`,
    validation, and the metric cache **last** (its validity is keyed on the JSON's size + mtime).
 
-## 3. Hand-off to SemPathBench
+## 3. Embedded checkout (`<SysNav root>/SemPathBench/`)
 
+SemPathBench is developed upstream (`git@github.com:BaoBao0926/SemPathBench.git`) and embedded here as a
+plain clone — SysNav's git ignores it, its own git tracks it. There is no hand-off step: maps land in
+`SemPathBench/resources/maps/real/<split>/<id>/`, which are untracked files upstream, so `git pull` never
+conflicts with them. Instructions for a map go to `resources/instructions/real/<id>/instruction_files/`.
+The `SEMPATHBENCH_ROOT` env var points the tooling at a different checkout (`tools/sempath_export/spb.py`).
+
+Update ritual (this tool imports upstream internals, so gate every pull):
 ```bash
-mkdir -p /home/all/SemPathBench/resources/maps/sysnav/train
-cp -a output/sempath_maps/train/001_train /home/all/SemPathBench/resources/maps/sysnav/train/   # -a keeps mtimes → cache stays valid
-# SemPathBench: load_map_state("sysnav/001_train"); instructions go to resources/instructions/sysnav/001_train/instruction_files/
+git -C SemPathBench pull
+python3 -m unittest tools.sempath_export.test_convert_sysnav_scene   # converter compatibility gate
+python3 -m unittest discover src/sempath_planner/test                # planner/annotator-UI surface gate
+# breakage → fix the imports here, or git -C SemPathBench checkout <last good commit>
 ```
-Read-only cross-check with SemPathBench's own validator (imports its module, writes nothing):
+Validated against upstream commit `79a6dfa` (2026-09-01).
+
+Sanity check a converted map through SemPathBench's own loader:
 ```bash
-cd /home/all/SemPathBench && python -c "import json; from scripts.make_instruction.make_instruction import validate_map_payload; \
-validate_map_payload(json.load(open('/home/all/AlphaZ/SysNav/output/sempath_maps/train/001_train/001_train.json')), '001_train'); print('ok')"
+cd SemPathBench && python3 -c "import sys; sys.path.insert(0, '.'); \
+from scripts.make_instruction.make_instruction import load_map_state; \
+print(load_map_state('real/001_train')['grid_size'])"
 ```
 
-## 4. Tests
+## 4. Live loop (`sempath_planner`)
+
+Both teleop bringups start the node (`sempath:=false` to disable). Flow, all typed into the
+`keyboard:=true` terminal (free-form lines, spaces fine):
+
+```
+./system_simulation_teleop.sh keyboard:=true          # or system_real_robot_teleop.sh; drive around, then stop
+export                                                # tare+bev dump → converter → map real/live_train
+                                                      # → browser opens the annotator UI on the fresh map
+plan go to the sofa in the lounge                     # GroundPlan from the current pose (15–60 s, $GEMINI_API_KEY)
+                                                      # → orange path + waypoint spheres in RViz, and the browser
+                                                      #   opens with the route pre-selected (LIVE PLAN sample)
+go                                                    # follow: Joy autonomy handshake, /way_point + /speed
+stop                                                  # abort any time (hold waypoint + autonomy off)
+```
+
+The browser pop-up **is** the done signal for `export` and `plan`. The node serves SemPathBench's own
+instruction annotator in-process (default `127.0.0.1:8010`; `ui.*` params in `sempath_planner.yaml`)
+with two additions layered on top via a handler subclass — `?map=<key>` deep links and a `&plan=live`
+route preview injected in memory only (nothing is written to the instruction files unless you save it
+in the UI yourself). `ui.open_browser: false` keeps the server but stops the auto-opened tabs.
+
+The node only plans on a map saved in the same session (pixel→world needs the same SLAM `map` frame), keeps
+the previous plan on a failed `plan`, never accepts a ≤1-point trajectory, and is the only `/way_point`
+publisher besides the RViz waypoint tool (the scene-graph node has no steering on this branch).
+
+## 5. Tests
 
 ```bash
 python3 -m unittest tools.sempath_export.test_convert_sysnav_scene -v
 ```
 Synthetic 10×10 m dump (two rooms, three objects with scrambled box corners, one door, a trajectory with a
 fake "person" streak); covers index round-trips, BEV slicing, renumbering + nearest fill, priority/aliases,
-doorway traversability, occupancy values, the full bundle + validators + metric-cache freshness, and a hash
-guard that the vendored files are unmodified (`vendor/MANIFEST.json`).
+doorway traversability, occupancy values, the full bundle + validators + metric-cache freshness, and the
+embedded-checkout bootstrap. The suite doubles as the compatibility gate after `git -C SemPathBench pull`.
+The `sempath_planner` geometry helpers have their own suite: `python3 -m unittest discover src/sempath_planner/test`.
 
 ## Conventions & limitations
 
@@ -134,4 +177,5 @@ guard that the vendored files are unmodified (`vendor/MANIFEST.json`).
   treats the export as ground truth, so instructions must be authored against the exported map.
 - One floor per export; `--resolution` must equal the BEV resolution; door/room ids > 255 would overflow the door
   cloud's uint8 channels (never happens in practice).
-- `vendor/` is byte-identical to SemPathBench `06d570d` apart from import-path rewrites (`vendor/VENDORED.md`).
+- All SemPathBench code is imported from the embedded checkout via `tools/sempath_export/spb.py` (nothing is
+  vendored); this package deliberately reaches into upstream private helpers, hence the pull-time test gate.

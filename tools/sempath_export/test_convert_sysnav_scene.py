@@ -5,10 +5,10 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import math
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -23,10 +23,10 @@ from tools.sempath_export.transform_sysnav_to_map import (
     transform_sysnav_to_map,
     validate_instance_ids,
 )
-from tools.sempath_export.vendor.regenerate_procthor_maps import validate_map_shape, validate_rich_object_schema
-from tools.sempath_export.vendor.transform_procthor_to_map import expected_simple_demo_output_paths
+from tools.sempath_export import spb
 
-VENDOR_DIR = Path(__file__).resolve().parent / "vendor"
+from scripts.make_maps.procthor.regenerate_procthor_maps import validate_map_shape, validate_rich_object_schema
+from scripts.make_maps.procthor.transform_procthor_to_map import expected_simple_demo_output_paths
 
 # ---- synthetic world: 10 m x 10 m BEV @ 0.05 m, origin (-5, -5); rooms on a 0.1 m mask anchored at (0, 0)
 BEV_RES, BEV_N, BEV_OX, BEV_OY = 0.05, 200, -5.0, -5.0
@@ -497,7 +497,7 @@ class ConverterTest(unittest.TestCase):
                 transform_sysnav_to_map(self.dump, prefix, "001_train", self.opts, skip_overview=True)
 
     def test_relative_output_dir(self):
-        # The vendored metric-cache builder resolves relative paths against its own package root; the
+        # SemPathBench's metric-cache builder resolves relative paths against its own package root; the
         # converter must therefore hand it absolute paths even when --output-dir is relative.
         with tempfile.TemporaryDirectory() as out:
             cwd = os.getcwd()
@@ -516,11 +516,13 @@ class ConverterTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_output_prefix("out", "office_map")
 
-    def test_vendored_files_unmodified(self):
-        manifest = json.loads((VENDOR_DIR / "MANIFEST.json").read_text())
-        for name, record in manifest["files"].items():
-            digest = hashlib.sha256((VENDOR_DIR / name).read_bytes()).hexdigest()
-            self.assertEqual(digest, record["vendored_sha256"], f"{name} was modified; re-sync per VENDORED.md")
+    def test_spb_bootstrap(self):
+        # The embedded checkout is found, on sys.path, and exposes the symbols this package needs.
+        self.assertTrue((spb.SEMPATHBENCH_ROOT / "scripts").is_dir())
+        self.assertIn(str(spb.SEMPATHBENCH_ROOT), sys.path)
+        from scripts.evaluation.metric_cache import build_map_metric_cache  # noqa: F401
+        from scripts.make_maps.procthor.convert_procthor_scene import world_to_grid  # noqa: F401
+        from scripts.make_maps.procthor.view_procthor_map import plot_scene_export  # noqa: F401
 
 
 if __name__ == "__main__":

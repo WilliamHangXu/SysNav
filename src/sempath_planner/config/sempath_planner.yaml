@@ -1,0 +1,35 @@
+sempath_planner:
+  ros__parameters:
+    # ---- map save ("export" on /keyboard_input) -----------------------------
+    dump_dir: "output/sempath_export"   # where tare_planner + bev_mapper write their dumps
+                                        # (relative to sysnav_root)
+    sysnav_root: ""                     # "" = node cwd (the teleop scripts cd to the repo root);
+                                        # must contain tools/ and the SemPathBench/ checkout
+    map_id: "live_train"                # SemPathBench map id; key becomes real/<map_id>,
+                                        # overwritten on every save (must end _train|_valunseen)
+    dump_wait_timeout_s: 20.0           # max wait for fresh dump files after "export"
+    make_overview: false                # also render <map_id>_overview.png on every save (slower)
+
+    # ---- planning ("plan <instruction>") ------------------------------------
+    grounding_variant: "direct_cap_repair"  # GroundPlan variant (upstream's canonical default; full | direct_cap | ir_to_code | ...)
+    llm_timeout_s: 90.0                 # per Gemini request ($GEMINI_API_KEY, model via $GEMINI_MODEL)
+
+    # ---- annotator browser UI (status feedback) -----------------------------
+    # The SemPathBench instruction annotator is served in-process; after "export"
+    # the browser opens on the fresh map, after "plan" it opens with the planned
+    # route pre-selected (LIVE PLAN sample) — that's the "ready, type go" signal.
+    ui:
+      enabled: true
+      host: "127.0.0.1"
+      port: 8010                        # falls back to an ephemeral port if taken
+      open_browser: true                # false: only log the URL, never open tabs
+
+    # ---- execution ("go") ---------------------------------------------------
+    odom_topic: "/state_estimation"
+    speed: 1.0                          # m/s handed to /speed while following
+    rdp_epsilon_m: 0.15                 # path simplification tolerance (corners survive)
+    max_spacing_m: 1.5                  # max distance between consecutive waypoints
+    arrival_radius_m: 0.5               # advance to the next waypoint within this distance
+    final_arrival_radius_m: 0.3         # tighter radius for the goal waypoint
+    waypoint_timeout_s: 60.0            # abort if a waypoint is not reached in time
+    follow_rate_hz: 2.0                 # /way_point + /speed publish rate while following

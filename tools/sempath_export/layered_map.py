@@ -1,8 +1,8 @@
 """SysNav variant of SemPathBench's simple-demo state builder / saver.
 
-The vendored ``scene_representation_to_simple_demo_state`` re-rasterises room polygons, cannot emit the
+SemPathBench's ``scene_representation_to_simple_demo_state`` re-rasterises room polygons, cannot emit the
 ``unknown`` occupancy value and hard-codes ProcTHOR metadata, so this module builds the layered state from
-the converter's ``room_instance_map`` / ``unknown_map`` and then writes the *same file set* with the vendored
+the converter's ``room_instance_map`` / ``unknown_map`` and then writes the *same file set* with the upstream
 helpers (json / png / ppm / template_instruction.json / thinggraph / metric cache).
 """
 
@@ -13,8 +13,10 @@ from pathlib import Path
 
 import numpy as np
 
-from tools.sempath_export.vendor.metric_cache import build_map_metric_cache
-from tools.sempath_export.vendor.transform_procthor_to_map import (
+from tools.sempath_export import spb  # noqa: F401  (sys.path bootstrap for the embedded checkout)
+
+from scripts.evaluation.metric_cache import build_map_metric_cache
+from scripts.make_maps.procthor.transform_procthor_to_map import (
     SIMPLE_DEMO_OBJECT_COLORS,
     SIMPLE_DEMO_OCCUPANCY_TILES,
     SIMPLE_DEMO_ROOM_COLORS,
@@ -39,7 +41,7 @@ SOURCE_LABELS = {
 
 
 def room_instances_from_metadata(room_metadata: list[dict]) -> list[dict]:
-    """Same ids / names / attributes as the vendored ``_room_instances_and_layer``, without rasterisation.
+    """Same ids / names / attributes as SemPathBench's ``_room_instances_and_layer``, without rasterisation.
 
     Instance id == 1-based position in ``room_metadata`` (the converter's ``room_instance_map`` uses the same ids).
     The ``procthor_room_id`` attribute name is kept because ``build_thinggraph_payload`` reads it to link rooms
@@ -134,7 +136,7 @@ def scene_representation_to_layered_state(scene_representation: dict, map_id: st
 
 
 def save_layered_map(scene_representation: dict, output_prefix: str | Path, *, map_id: str) -> dict[str, Path]:
-    """Mirror of the vendored ``save_simple_demo_scene_representation`` using the SysNav state builder."""
+    """Mirror of SemPathBench's ``save_simple_demo_scene_representation`` using the SysNav state builder."""
     prefix = Path(output_prefix)
     prefix.parent.mkdir(parents=True, exist_ok=True)
     json_path, png_path, ppm_path, template_path, thinggraph_path = expected_simple_demo_output_paths(prefix)

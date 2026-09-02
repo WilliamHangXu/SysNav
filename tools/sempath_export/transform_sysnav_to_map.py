@@ -5,7 +5,9 @@
 
 Writes ``<output-dir>/<split>/<map_id>/<map_id>.{json,png,ppm}``, ``_maps.npz``, ``_metadata.json``,
 ``_thinggraph.json``, ``_overview.png``, ``template_instruction.json`` and ``<map_id>_metric_cache/``.
-Copy the finished directory into SemPathBench with ``cp -a`` (the metric cache is keyed on the JSON's mtime).
+The default output dir is the embedded checkout's ``resources/maps/real`` (see
+``tools/sempath_export/spb.py``), so the map is immediately loadable as SemPathBench map key
+``real/<map_id>`` — no hand-off copy step.
 """
 
 from __future__ import annotations
@@ -24,19 +26,22 @@ from tools.sempath_export.convert_sysnav_scene import (
 )
 from tools.sempath_export.label_aliases import load_label_aliases
 from tools.sempath_export.layered_map import save_layered_map
-from tools.sempath_export.vendor.convert_procthor_scene import save_scene_representation
-from tools.sempath_export.vendor.metric_cache import build_map_metric_cache
-from tools.sempath_export.vendor.regenerate_procthor_maps import (
+from tools.sempath_export import spb
+
+from scripts.evaluation.metric_cache import build_map_metric_cache
+from scripts.make_maps.procthor.convert_procthor_scene import save_scene_representation
+from scripts.make_maps.procthor.regenerate_procthor_maps import (
     migrate_map_payload,
     validate_map_shape,
     validate_rich_object_schema,
     write_json_atomic,
 )
-from tools.sempath_export.vendor.transform_procthor_to_map import expected_simple_demo_output_paths, save_map_overview
+from scripts.make_maps.procthor.transform_procthor_to_map import expected_simple_demo_output_paths, save_map_overview
 
 MAP_SPLITS = ("train", "valunseen")
-DEFAULT_OUTPUT_DIR = Path("output") / "sempath_maps"
-SEMPATHBENCH_MAPS_HINT = "/home/all/SemPathBench/resources/maps/sysnav"
+# Maps are written straight into the embedded checkout, under the "real" source root the
+# SemPathBench side expects for real-environment maps (map key = real/<map_id>).
+DEFAULT_OUTPUT_DIR = spb.SEMPATHBENCH_ROOT / "resources" / "maps" / "real"
 
 
 def map_split_from_id(map_id: str) -> str:
@@ -102,7 +107,7 @@ def transform_sysnav_to_map(
     overwrite: bool = False,
     map_index: int | None = None,
 ) -> dict[str, Path]:
-    # Absolute: the vendored metric-cache builder resolves relative paths against ITS package root.
+    # Absolute: SemPathBench's metric-cache builder resolves relative paths against ITS package root.
     prefix = Path(output_prefix).resolve()
     json_path = expected_simple_demo_output_paths(prefix)[0]
     if json_path.exists() and not overwrite:
@@ -113,7 +118,7 @@ def transform_sysnav_to_map(
 
     rep = build_scene_representation(dump, opts, map_id=map_id, map_split=map_split_from_id(map_id), map_index=map_index)
 
-    # 1. raw layers + metadata (vendored), then append provenance
+    # 1. raw layers + metadata (SemPathBench writers), then append provenance
     maps_path, metadata_path = save_scene_representation(rep, prefix)
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     metadata["source"] = "sysnav"
@@ -225,14 +230,11 @@ def main(argv: list[str] | None = None) -> int:
         skip_overview=args.skip_overview, overwrite=args.overwrite, map_index=args.map_index,
     )
     payload = json.loads(outputs["json_path"].read_text(encoding="utf-8"))
-    split = map_split_from_id(args.map_id)
     print(f"map {args.map_id}: grid {payload['grid_size']}x{payload['grid_size']} @ {payload['metadata']['map_info']['resolution']} m, "
           f"{len(payload['room_instances'])} rooms, {len(payload['object_instances'])} objects -> {prefix.parent}")
     for key, path in outputs.items():
         print(f"  {key:26s} {path}")
-    print("hand-off (preserve mtimes so the metric cache stays valid):")
-    print(f"  mkdir -p {SEMPATHBENCH_MAPS_HINT}/{split} && cp -a {prefix.parent} {SEMPATHBENCH_MAPS_HINT}/{split}/")
-    print(f"  -> SemPathBench map key: sysnav/{args.map_id}")
+    print(f"  -> SemPathBench map key: real/{args.map_id}")
     return 0
 
 

@@ -30,7 +30,7 @@ from launch_ros.actions import Node
 #   ros2 launch receive_theta receive_theta_ai_computer.launch   (or _sensorpod)
 # on the computer the Theta Z1 is plugged into; it publishes /camera/image.
 # Driving: RViz teleop panel or the joystick -> /joy -> local_planner -> /cmd_vel;
-# RViz waypoint tool -> /way_point (+ its /joy) -> local_planner.
+# RViz waypoint tool or sempath_planner -> /way_point (+ its /joy) -> local_planner.
 MODES = {  # bagfile -> (base launch, scene-graph scenario, semantic_mapping launch)
     False: ('system_real_robot.launch', 'matterport_real', 'semantic_mapping_real.launch'),
     True: ('system_bagfile.launch', 'matterport_bagfile', 'semantic_mapping_bagfile.launch'),
@@ -59,6 +59,7 @@ def _launch(context):
     vlm_share = get_package_share_directory('vlm_node')
     sim_share = get_package_share_directory('vehicle_simulator')
     bev_share = get_package_share_directory('bev_mapper')
+    sempath_share = get_package_share_directory('sempath_planner')
 
     # Package-root rviz config, shared with scene_graph_sim.launch (the rviz/
     # dir is gitignored). The installed launch is a symlink back to src, so
@@ -98,6 +99,10 @@ def _launch(context):
                 {'scenario': scenario}),
         include(os.path.join(bev_share, 'launch', 'bev_mapper.launch.py'),
                 condition=IfCondition(bev)),
+        # keyboard-driven GroundPlan planning + waypoint execution on the exported
+        # SemPathBench map (export | plan <instruction> | go | stop); inert until commanded
+        include(os.path.join(sempath_share, 'launch', 'sempath_planner.launch.py'),
+                condition=IfCondition(LaunchConfiguration('sempath'))),
         Node(package='rviz2', executable='rviz2', name='rviz2',
              arguments=['-d', rviz_config],
              parameters=[{'use_sim_time': use_sim_time}],
@@ -116,8 +121,9 @@ def generate_launch_description():
                                           'semantic_mapping_node)'),
         DeclareLaunchArgument('keyboard', default_value='false',
                               description='Open sysnav\'s keyboard_input terminal '
-                                          '(only "demo"/"resume" still have an effect: '
-                                          'freeze/resume the object mapper)'),
+                                          '("export" saves the SemPathBench map; "plan '
+                                          '<instruction>" / "go" / "stop" drive sempath_planner; '
+                                          '"demo"/"resume" freeze/resume the object mapper)'),
         DeclareLaunchArgument('bagfile', default_value='false',
                               description='true: no livox driver, scenario matterport_bagfile '
                                           '+ platform mecanum_bagfile; play a raw-Livox bag '
@@ -125,6 +131,10 @@ def generate_launch_description():
         DeclareLaunchArgument('bev', default_value='true',
                               description='Run bev_mapper (BEV occupancy grid + local '
                                           'BEV image from /registered_scan + /state_estimation)'),
+        DeclareLaunchArgument('sempath', default_value='true',
+                              description='Run sempath_planner (keyboard: export | plan '
+                                          '<instruction> | go | stop; needs the SemPathBench/ '
+                                          'checkout and GEMINI_API_KEY for planning)'),
     ] + [DeclareLaunchArgument(a, default_value=d) for a, d in BASE_ARGS.items()]
     entries.append(OpaqueFunction(function=_launch))
     return LaunchDescription(entries)

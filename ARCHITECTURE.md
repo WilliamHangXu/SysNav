@@ -41,10 +41,14 @@ The one on-disk product is the **SemPathBench map export**: the scene-graph
 node and `bev_mapper` dump raw snapshots to `output/sempath_export/` (periodic,
 `/keyboard_input "export"`, and at shutdown) and the standalone tool
 `tools/sempath_export/` converts them into a SemPathBench (ProcTHOR-style)
-layered map under `output/sempath_maps/` — see
-[`tools/sempath_export/README.md`](tools/sempath_export/README.md).
-**Nothing in this stack steers the robot** — `local_planner` follows the
-teleop / waypoint commands only.
+layered map inside the embedded checkout `SemPathBench/resources/maps/real/`
+— see [`tools/sempath_export/README.md`](tools/sempath_export/README.md).
+`sempath_planner` closes the loop live: `/keyboard_input` `export` / `plan
+<instruction>` (SemPathBench GroundPlan, Gemini) / `go` / `stop`, publishing
+`/way_point` + `/speed` to the teleop base while following.
+**Nothing else in this stack steers the robot** — the scene-graph node has no
+steering outputs; `local_planner` follows the teleop / waypoint commands and
+`sempath_planner`'s waypoints only.
 
 ---
 
@@ -58,6 +62,7 @@ teleop / waypoint commands only.
 | `slam` | **ARISE SLAM** (`arise_slam_mid360`): `feature_extraction_node` → `laser_mapping_node` → `imu_preintegration_node`. [README](src/slam/arise_slam_mid360/README.md). |
 | `base_autonomy` | sysnav's teleop base, verbatim: `vehicle_simulator` (Unity sim + the `system_*.launch` bringups), `local_planner` (+ `pathFollower` → `/cmd_vel`), `terrain_analysis(_ext)`, `sensor_scan_generation` (`/state_estimation_at_scan`), `visualization_tools`. |
 | `bev_mapper` | BEV occupancy map from `/registered_scan` + `/state_estimation`. [README](src/bev_mapper/README.md). |
+| `sempath_planner` | Keyboard-driven closed loop on the exported SemPathBench map: `export` (convert dumps), `plan <instruction>` (GroundPlan via the embedded `SemPathBench/` checkout + Gemini), `go`/`stop` (waypoint follower → `/way_point`, `/speed`, Joy autonomy handshake). Plan preview on `/sempath_plan/{path,markers}`. |
 | `utilities` | `livox_ros_driver2` (lidar), `receive_theta` (panorama camera driver), `ROS-TCP-Endpoint` (Unity), RViz teleop / waypoint / goalpoint plugins, `teleop_joy_controller`, `rviz_2d_overlay_plugins`, `serial`. |
 
 ---
@@ -220,8 +225,10 @@ scene-graph logging: `#define ROOM_DBG_ENABLED` at the top of the node's cpp
 Snapshot export: `output/sempath_export/{scene_graph_latest.json, room_mask_latest.png,
 bev_latest.npz}` (params `export.*` in the scenario yamls / `bev_mapper.yaml`), converted by
 `python3 -m tools.sempath_export.transform_sysnav_to_map` into a SemPathBench map bundle
-(`output/sempath_maps/<split>/<id>/`). The deepclean-era GADM exporter was removed with its
-NavGraph dependency; see `RSB_TEST_PLAN.md` for the history.
+inside the embedded checkout (`SemPathBench/resources/maps/real/<split>/<id>/`, map key
+`real/<id>`) — `sempath_planner` does this automatically on `/keyboard_input "export"`.
+The deepclean-era GADM exporter was removed with its NavGraph dependency; see
+`RSB_TEST_PLAN.md` for the history.
 
 ---
 

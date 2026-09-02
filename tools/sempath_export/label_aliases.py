@@ -12,8 +12,10 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from tools.sempath_export.vendor.convert_procthor_scene import NAV_OBJECT_PRIORITY
-from tools.sempath_export.vendor.transform_procthor_to_map import _normalize_simple_category
+from tools.sempath_export import spb  # noqa: F401  (sys.path bootstrap for the embedded checkout)
+
+from scripts.make_maps.procthor.convert_procthor_scene import NAV_OBJECT_PRIORITY
+from scripts.make_maps.procthor.transform_procthor_to_map import _normalize_simple_category
 
 # YOLOE label (normalised) -> ProcTHOR-style objectType (PascalCase, as in ProcTHOR metadata).
 DEFAULT_OBJECT_LABEL_ALIASES: dict[str, str] = {
