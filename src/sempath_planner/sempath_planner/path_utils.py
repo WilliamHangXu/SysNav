@@ -33,6 +33,32 @@ def trajectory_to_world(trajectory: list[list[int]], frame: dict) -> list[tuple[
     return [pixel_to_world(r, c, frame) for r, c in trajectory]
 
 
+def semantic_map_cells(
+    rgb,
+    occupancy,
+    frame: dict,
+    skip_value: int = 2,
+) -> list[tuple[float, float, tuple[int, int, int]]]:
+    """World-centred colored cells of a SemPathBench map render, for an RViz overlay.
+
+    ``rgb`` is the map PNG indexed ``[row][col]`` -> (r, g, b) (one pixel per grid cell, same
+    row/col order as the layers); ``occupancy`` is the matching layer, and cells equal to
+    ``skip_value`` (2 = unknown, i.e. the unexplored padding around the building) are dropped.
+    """
+    res = float(frame["resolution"])
+    x_min = float(frame["x_min"])
+    z_min = float(frame["z_min"])
+    cells: list[tuple[float, float, tuple[int, int, int]]] = []
+    for row, occ_row in enumerate(occupancy):
+        y = z_min + row * res
+        for col, occ in enumerate(occ_row):
+            if occ == skip_value:
+                continue
+            r, g, b = rgb[row][col]
+            cells.append((x_min + col * res, y, (int(r), int(g), int(b))))
+    return cells
+
+
 def _point_segment_distance(p: tuple[float, float], a: tuple[float, float], b: tuple[float, float]) -> float:
     ax, ay = a
     dx, dy = b[0] - ax, b[1] - ay

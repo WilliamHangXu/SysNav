@@ -5,8 +5,12 @@ Commands on ``/keyboard_input`` (std_msgs/String, one line per message — the v
 terminal):
 
   export               tare_planner + bev_mapper write their dumps (same keyword); this node waits
-                       for fresh files, converts them into the embedded SemPathBench checkout
-                       (map key ``real/<map_id>``) and keeps the map's grid frame in memory.
+                       for fresh files, converts them into the embedded SemPathBench checkout and
+                       keeps the map's grid frame in memory. Every export writes a NEW timestamped
+                       map ``real/<run_group>/<YYYYmmdd_HHMMSS>_train`` (run_group separates
+                       sim / robot runs), so nothing is overwritten between runs. The converted
+                       semantic map is also published as a colored cell overlay for RViz
+                       (``/sempath_map/markers``, map frame, transient_local).
   plan <instruction>   run GroundPlan (Gemini, needs $GEMINI_API_KEY) from the robot's current
                        pose; publish the path for RViz. ``replan`` is an alias.
   go                   follow the planned waypoints: Joy autonomy handshake once, then
@@ -31,14 +35,15 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 
-from geometry_msgs.msg import PointStamped, PoseStamped
+from geometry_msgs.msg import Point, PointStamped, PoseStamped
 from nav_msgs.msg import Odometry, Path
 from sensor_msgs.msg import Joy
-from std_msgs.msg import Float32, String
+from std_msgs.msg import ColorRGBA, Float32, String
 from visualization_msgs.msg import Marker, MarkerArray
 
 from sempath_planner.annotator_ui import AnnotatorUI
-from sempath_planner.path_utils import decimate_path, trajectory_to_world, world_to_pixel
+from sempath_planner.path_utils import (
+    decimate_path, semantic_map_cells, trajectory_to_world, world_to_pixel)
 
 TARE_KEYWORDS = {"reset"}          # keyboard words owned by other nodes (never treated as errors here)
 OBJECT_MAPPER_KEYWORDS = {"demo", "resume"}
@@ -55,6 +60,7 @@ class SempathPlannerNode(Node):
         self.pub_joy = self.create_publisher(Joy, '/joy', 5)
         self.pub_path = self.create_publisher(Path, '/sempath_plan/path', latched)
         self.pub_markers = self.create_publisher(MarkerArray, '/sempath_plan/markers', latched)
+        self.pub_map_markers = self.create_publisher(MarkerArray, '/sempath_map/markers', latched)
 
         self.create_subscription(String, '/keyboard_input', self._keyboard_callback, 10)
         self.create_subscription(Odometry, self.odom_topic, self._odom_callback, 10)
@@ -83,14 +89,14 @@ class SempathPlannerNode(Node):
                 self._ui = None
 
         self.get_logger().info(
-            f"sempath_planner ready (map id '{self.map_id}', dumps '{self.dump_dir}'). "
+            f"sempath_planner ready (run group '{self.run_group}', dumps '{self.dump_dir}'). "
             "Keyboard: export | plan <instruction> | go | stop")
 
     def _declare_parameters(self):
         p = self.declare_parameter
         self.dump_dir = p('dump_dir', 'output/sempath_export').value
         self.sysnav_root = p('sysnav_root', '').value            # '' = node cwd (teleop scripts cd to the repo root)
-        self.map_id = p('map_id', 'live_train').value
+        self.run_group = p('run_group', 'sim').value             # maps land in real/<run_group>/<timestamp>_train ('' = ungrouped)
         self.odom_topic = p('odom_topic', '/state_estimation').value
         self.grounding_variant = p('grounding_variant', 'direct_cap_repair').value  # upstream's canonical default
         self.llm_timeout_s = p('llm_timeout_s', 90.0).value
@@ -107,6 +113,9 @@ class SempathPlannerNode(Node):
         self.ui_host = p('ui.host', '127.0.0.1').value
         self.ui_port = p('ui.port', 8010).value
         self.ui_open_browser = p('ui.open_browser', True).value
+        self.map_viz_enabled = p('map_viz.enabled', True).value
+        self.map_viz_z = p('map_viz.z', 0.0).value
+        self.map_viz_alpha = p('map_viz.alpha', 1.0).value
 
     # ------------------------------------------------------------------ inputs
 
@@ -185,28 +194,32 @@ class SempathPlannerNode(Node):
         try:
             from tools.sempath_export.convert_sysnav_scene import ConvertOptions, load_sysnav_dump
             from tools.sempath_export.transform_sysnav_to_map import (
-                DEFAULT_OUTPUT_DIR, build_output_prefix, transform_sysnav_to_map)
+                DEFAULT_OUTPUT_DIR, build_output_prefix, map_key_for_prefix, transform_sysnav_to_map)
         except ImportError as exc:
             self.get_logger().error(f"converter unavailable: {exc}")
             return
 
         t0 = time.time()
         dump = load_sysnav_dump(dump_dir)
-        prefix = build_output_prefix(DEFAULT_OUTPUT_DIR, self.map_id)
+        map_id = time.strftime('%Y%m%d_%H%M%S') + '_train'   # a fresh folder per export
+        out_dir = DEFAULT_OUTPUT_DIR / self.run_group if self.run_group else DEFAULT_OUTPUT_DIR
+        prefix = build_output_prefix(out_dir, map_id)
+        map_key = map_key_for_prefix(prefix)
         outputs = transform_sysnav_to_map(
-            dump, prefix, self.map_id, ConvertOptions(),
+            dump, prefix, map_id, ConvertOptions(),
             skip_overview=not self.make_overview, overwrite=True)
         payload = json.loads(outputs['json_path'].read_text(encoding='utf-8'))
         frame = payload['metadata']['grid_coordinate_frame']
         with self._lock:
-            self._map = {'map_key': f"real/{self.map_id}", 'json_path': outputs['json_path'],
+            self._map = {'map_key': map_key, 'json_path': outputs['json_path'],
                          'frame': frame, 'stamp': time.time()}
             self._plan = None
         self.get_logger().info(
-            f"map saved: real/{self.map_id} ({payload['grid_size']}x{payload['grid_size']} @ "
+            f"map saved: {map_key} ({payload['grid_size']}x{payload['grid_size']} @ "
             f"{frame['resolution']} m, {len(payload['room_instances'])} rooms, "
             f"{len(payload['object_instances'])} objects, {time.time() - t0:.1f}s) -> {outputs['json_path'].parent}")
-        self._open_ui(f"real/{self.map_id}", plan=False)
+        self._publish_semantic_map(outputs['png_path'], payload, frame)
+        self._open_ui(map_key, plan=False)
 
     # ------------------------------------------------------------------ plan (GroundPlan)
 
@@ -313,6 +326,34 @@ class SempathPlannerNode(Node):
             m.color.r, m.color.g, m.color.b, m.color.a = (1.0, 0.2, 0.2, 0.9) if last else (0.2, 0.8, 0.2, 0.9)
             markers.markers.append(m)
         self.pub_markers.publish(markers)
+
+    def _publish_semantic_map(self, png_path: FsPath, payload: dict, frame: dict):
+        """One flat colored cell layer per export on /sempath_map/markers: the SemPathBench render
+        (rooms / objects / occupancy, same colors as the browser UI), anchored in the SLAM map frame.
+        POINTS (billboarded, batched) instead of CUBE_LIST: ~100k cells must not hurt RViz frame rate."""
+        if not self.map_viz_enabled:
+            return
+        try:
+            import cv2
+            img = cv2.cvtColor(cv2.imread(str(png_path)), cv2.COLOR_BGR2RGB)
+        except Exception as exc:
+            self.get_logger().warning(f"semantic map overlay skipped: {type(exc).__name__}: {exc}")
+            return
+        cells = semantic_map_cells(img, payload['layers']['occupancy'], frame)
+        m = Marker()
+        m.header.frame_id = self._frame_id
+        m.header.stamp = self.get_clock().now().to_msg()
+        m.ns, m.id, m.type, m.action = 'semantic_map', 0, Marker.POINTS, Marker.ADD
+        m.pose.orientation.w = 1.0
+        m.scale.x = m.scale.y = float(frame['resolution'])
+        z, alpha = float(self.map_viz_z), float(self.map_viz_alpha)
+        for x, y, (r, g, b) in cells:
+            m.points.append(Point(x=x, y=y, z=z))
+            m.colors.append(ColorRGBA(r=r / 255.0, g=g / 255.0, b=b / 255.0, a=alpha))
+        markers = MarkerArray()
+        markers.markers.append(m)
+        self.pub_map_markers.publish(markers)
+        self.get_logger().info(f"semantic map overlay: {len(cells)} cells on /sempath_map/markers")
 
     # ------------------------------------------------------------------ follower
 

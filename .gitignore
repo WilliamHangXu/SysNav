@@ -64,3 +64,6 @@ src/base_autonomy/vehicle_simulator/mesh/
 # orphaned NanoOWL detector deps (still on disk, untracked)
 src/semantic_mapping/semantic_mapping/external/nanoowl/
 src/semantic_mapping/semantic_mapping/external/torch2trt/
+
+# visualization-replay recordings (record_viz_bag.sh)
+bags/

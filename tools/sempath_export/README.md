@@ -136,14 +136,25 @@ Both teleop bringups start the node (`sempath:=false` to disable). Flow, all typ
 
 ```
 ./system_simulation_teleop.sh keyboard:=true          # or system_real_robot_teleop.sh; drive around, then stop
-export                                                # tare+bev dump → converter → map real/live_train
+export                                                # tare+bev dump → converter → a NEW timestamped map
+                                                      # real/sim/<YYYYmmdd_HHMMSS>_train (sim bringup) or
+                                                      # real/robot/<…>_train (real robot) — one folder per
+                                                      # export, nothing overwritten
                                                       # → browser opens the annotator UI on the fresh map
+                                                      # → RViz shows the semantic map as a colored cell
+                                                      #   layer ("SemPath Map" display, /sempath_map/markers,
+                                                      #   map_viz.* params: z height / alpha / enabled)
 plan go to the sofa in the lounge                     # GroundPlan from the current pose (15–60 s, $GEMINI_API_KEY)
                                                       # → orange path + waypoint spheres in RViz, and the browser
                                                       #   opens with the route pre-selected (LIVE PLAN sample)
 go                                                    # follow: Joy autonomy handshake, /way_point + /speed
 stop                                                  # abort any time (hold waypoint + autonomy off)
 ```
+
+To keep a replayable recording of a session, run `./record_viz_bag.sh [name] [--with-inputs]`
+alongside the stack: it records every topic the teleop RViz config displays. Replay with
+`./play_viz_bag.sh [bag] [play args…]` (newest bag by default) — it reproduces the live
+visualization in RViz with no nodes running.
 
 The browser pop-up **is** the done signal for `export` and `plan`. The node serves SemPathBench's own
 instruction annotator in-process (default `127.0.0.1:8010`; `ui.*` params in `sempath_planner.yaml`)

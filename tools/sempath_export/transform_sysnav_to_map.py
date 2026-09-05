@@ -41,7 +41,22 @@ from scripts.make_maps.procthor.transform_procthor_to_map import expected_simple
 MAP_SPLITS = ("train", "valunseen")
 # Maps are written straight into the embedded checkout, under the "real" source root the
 # SemPathBench side expects for real-environment maps (map key = real/<map_id>).
-DEFAULT_OUTPUT_DIR = spb.SEMPATHBENCH_ROOT / "resources" / "maps" / "real"
+MAPS_ROOT = spb.SEMPATHBENCH_ROOT / "resources" / "maps"
+DEFAULT_OUTPUT_DIR = MAPS_ROOT / "real"
+
+
+def map_key_for_prefix(prefix: str | Path) -> str:
+    """SemPathBench map key for a map written at ``prefix`` by :func:`build_output_prefix`.
+
+    Mirrors upstream ``_map_key_for_json_path``: the key is the map dir relative to
+    ``resources/maps`` with the trailing split dir elided (``real/sim/train/001_train`` ->
+    ``real/sim/001_train``). Raises ``ValueError`` for output dirs outside the checkout,
+    where no map key exists.
+    """
+    parts = Path(prefix).resolve().parent.relative_to(MAPS_ROOT.resolve()).parts
+    if len(parts) >= 3 and parts[-2] in MAP_SPLITS:
+        parts = parts[:-2] + parts[-1:]
+    return "/".join(parts)
 
 
 def map_split_from_id(map_id: str) -> str:
@@ -234,7 +249,10 @@ def main(argv: list[str] | None = None) -> int:
           f"{len(payload['room_instances'])} rooms, {len(payload['object_instances'])} objects -> {prefix.parent}")
     for key, path in outputs.items():
         print(f"  {key:26s} {path}")
-    print(f"  -> SemPathBench map key: real/{args.map_id}")
+    try:
+        print(f"  -> SemPathBench map key: {map_key_for_prefix(prefix)}")
+    except ValueError:
+        print("  (output dir is outside the embedded checkout; not loadable by map key)")
     return 0
 
 

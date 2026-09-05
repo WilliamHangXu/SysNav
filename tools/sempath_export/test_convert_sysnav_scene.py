@@ -19,7 +19,9 @@ import numpy as np
 from tools.sempath_export import convert_sysnav_scene as cs
 from tools.sempath_export.layered_map import scene_representation_to_layered_state
 from tools.sempath_export.transform_sysnav_to_map import (
+    DEFAULT_OUTPUT_DIR,
     build_output_prefix,
+    map_key_for_prefix,
     transform_sysnav_to_map,
     validate_instance_ids,
 )
@@ -515,6 +517,17 @@ class ConverterTest(unittest.TestCase):
         self.assertEqual(build_output_prefix("out", "003_valunseen"), Path("out/valunseen/003_valunseen/003_valunseen"))
         with self.assertRaises(ValueError):
             build_output_prefix("out", "office_map")
+
+    def test_map_key_for_prefix(self):
+        # split dir elided, run-group dirs kept (mirrors upstream _map_key_for_json_path)
+        self.assertEqual(map_key_for_prefix(build_output_prefix(DEFAULT_OUTPUT_DIR, "001_train")),
+                         "real/001_train")
+        self.assertEqual(map_key_for_prefix(build_output_prefix(DEFAULT_OUTPUT_DIR / "sim", "20260904_120000_train")),
+                         "real/sim/20260904_120000_train")
+        self.assertEqual(map_key_for_prefix(build_output_prefix(DEFAULT_OUTPUT_DIR / "robot", "003_valunseen")),
+                         "real/robot/003_valunseen")
+        with self.assertRaises(ValueError):
+            map_key_for_prefix(build_output_prefix("/tmp/elsewhere", "001_train"))
 
     def test_spb_bootstrap(self):
         # The embedded checkout is found, on sys.path, and exposes the symbols this package needs.

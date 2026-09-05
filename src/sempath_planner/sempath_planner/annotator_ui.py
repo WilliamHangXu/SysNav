@@ -3,9 +3,9 @@
 Runs the upstream instruction annotator (``scripts/make_instruction/make_instruction.py``) inside
 the planner node — the upstream module is imported, never modified. A small handler subclass adds:
 
-  GET /?map=real/live_train           open directly on that map (upstream always opens its default)
-  GET /?map=real/live_train&plan=live additionally inject the node's current GroundPlan trajectory
-                                      as the ACTIVE sample, so the route is drawn immediately
+  GET /?map=real/sim/<stamp>_train           open directly on that map (upstream opens its default)
+  GET /?map=real/sim/<stamp>_train&plan=live additionally inject the node's current GroundPlan
+                                             trajectory as the ACTIVE sample, drawn immediately
 
 The injected sample lives only in the served page — nothing is written to the checkout's
 instruction files (unless the user explicitly saves it in the UI, which is their call).

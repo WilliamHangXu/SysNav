@@ -10,7 +10,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sempath_planner.path_utils import decimate_path, pixel_to_world, rdp, trajectory_to_world, world_to_pixel
+from sempath_planner.path_utils import (
+    decimate_path, pixel_to_world, rdp, semantic_map_cells, trajectory_to_world, world_to_pixel)
 
 FRAME = {"resolution": 0.05, "x_min": -3.475, "z_min": 1.025}  # centre of col 0 / row 0
 
@@ -36,6 +37,27 @@ class PixelWorldTest(unittest.TestCase):
         world = trajectory_to_world([[0, 0], [2, 4]], FRAME)
         self.assertAlmostEqual(world[1][0], FRAME["x_min"] + 4 * 0.05)
         self.assertAlmostEqual(world[1][1], FRAME["z_min"] + 2 * 0.05)
+
+
+class SemanticMapCellsTest(unittest.TestCase):
+    def test_cells_match_pixel_to_world_and_skip_unknown(self):
+        rgb = [[(255, 255, 255), (10, 20, 30)],
+               [(40, 50, 60), (0, 0, 0)]]
+        occupancy = [[0, 2],   # (0,1) unknown -> dropped
+                     [1, 0]]
+        cells = semantic_map_cells(rgb, occupancy, FRAME)
+        self.assertEqual(len(cells), 3)
+        by_color = {c: (x, y) for x, y, c in cells}
+        self.assertNotIn((10, 20, 30), by_color)                       # the unknown cell
+        self.assertEqual(by_color[(40, 50, 60)], pixel_to_world(1, 0, FRAME))  # row 1 = +y, col 0
+        self.assertEqual(by_color[(0, 0, 0)], pixel_to_world(1, 1, FRAME))
+
+    def test_plain_int_colors_from_numpy_image(self):
+        import numpy as np
+        rgb = np.full((1, 1, 3), 200, dtype=np.uint8)
+        cells = semantic_map_cells(rgb, [[0]], FRAME)
+        self.assertEqual(cells[0][2], (200, 200, 200))
+        self.assertTrue(all(type(v) is int for v in cells[0][2]))
 
 
 class DecimationTest(unittest.TestCase):

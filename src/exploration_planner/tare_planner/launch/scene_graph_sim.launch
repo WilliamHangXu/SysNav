@@ -110,6 +110,7 @@ def generate_launch_description():
         # keyboard-driven GroundPlan planning + waypoint execution on the exported
         # SemPathBench map (export | plan <instruction> | go | stop); inert until commanded
         include(os.path.join(sempath_share, 'launch', 'sempath_planner.launch.py'),
+                extra={'run_group': 'sim'},   # exports -> resources/maps/real/sim/<timestamp>_train
                 condition=IfCondition(LaunchConfiguration('sempath'))),
         Node(package='rviz2', executable='rviz2', name='rviz2',
              arguments=['-d', rviz_config],

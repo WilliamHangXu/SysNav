@@ -5,8 +5,10 @@ sempath_planner:
                                         # (relative to sysnav_root)
     sysnav_root: ""                     # "" = node cwd (the teleop scripts cd to the repo root);
                                         # must contain tools/ and the SemPathBench/ checkout
-    map_id: "live_train"                # SemPathBench map id; key becomes real/<map_id>,
-                                        # overwritten on every save (must end _train|_valunseen)
+    run_group: "sim"                    # platform subfolder under resources/maps/real (the teleop
+                                        # launches pass sim / robot); every export writes a NEW map
+                                        # real/<run_group>/<YYYYmmdd_HHMMSS>_train — one folder per
+                                        # run, nothing overwritten ("" = ungrouped, real/<stamp>_train)
     dump_wait_timeout_s: 20.0           # max wait for fresh dump files after "export"
     make_overview: false                # also render <map_id>_overview.png on every save (slower)
 
@@ -23,6 +25,17 @@ sempath_planner:
       host: "127.0.0.1"
       port: 8010                        # falls back to an ephemeral port if taken
       open_browser: true                # false: only log the URL, never open tabs
+
+    # ---- semantic map overlay in RViz ---------------------------------------
+    # After every export the converted map render (rooms / objects / occupancy,
+    # same colors as the browser UI) is published once as a flat cell layer on
+    # /sempath_map/markers (transient_local, SLAM map frame) — the "SemPath Map"
+    # display in tare_planner_teleop.rviz.
+    map_viz:
+      enabled: true
+      z: 0.0                            # height of the layer (m); on the real robot set it near the
+                                        # floor height in the SLAM frame if 0 lands mid-air
+      alpha: 1.0                        # per-cell opacity (< 1.0 to see the point cloud through it)
 
     # ---- execution ("go") ---------------------------------------------------
     odom_topic: "/state_estimation"
