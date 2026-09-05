@@ -11,6 +11,12 @@ sempath_planner:
                                         # run, nothing overwritten ("" = ungrouped, real/<stamp>_train)
     dump_wait_timeout_s: 20.0           # max wait for fresh dump files after "export"
     make_overview: false                # also render <map_id>_overview.png on every save (slower)
+    exclude_objects_yaml: "tools/sempath_export/exclude_objects.yaml"
+                                        # object exclusion list {exclude: [label, ...]} — listed
+                                        # objects are left out of the map entirely; RE-READ at every
+                                        # export, so edit + re-export, no restart. Entries match raw
+                                        # ("trash can") and aliased ("GarbageCan") names.
+                                        # "" = converter default (drop "person" only)
 
     # ---- planning ("plan <instruction>") ------------------------------------
     grounding_variant: "direct_cap_repair"  # GroundPlan variant (upstream's canonical default; full | direct_cap | ir_to_code | ...)
@@ -18,8 +24,9 @@ sempath_planner:
 
     # ---- annotator browser UI (status feedback) -----------------------------
     # The SemPathBench instruction annotator is served in-process; after "export"
-    # the browser opens on the fresh map, after "plan" it opens with the planned
-    # route pre-selected (LIVE PLAN sample) — that's the "ready, type go" signal.
+    # the browser opens once on the fresh map. "plan" opens NO new tab — the RViz
+    # path + "plan ready" log line are the "type 'go'" signal (a &plan=live preview
+    # URL is logged for a manual look at the route in the browser).
     ui:
       enabled: true
       host: "127.0.0.1"
@@ -33,9 +40,21 @@ sempath_planner:
     # display in tare_planner_teleop.rviz.
     map_viz:
       enabled: true
-      z: 0.0                            # height of the layer (m); on the real robot set it near the
-                                        # floor height in the SLAM frame if 0 lands mid-air
+      z: 0.0                            # height of the layer (m) — per-platform: the launches pass
+                                        # map_viz_z (sim 0.0 = floor; robot -0.35, the ARISE map
+                                        # origin sits at sensor start height ~0.4 m above ground,
+                                        # so 0 would cover the robot/path markers); tune the number
+                                        # in scene_graph_real_robot.launch if it still floats
       alpha: 1.0                        # per-cell opacity (< 1.0 to see the point cloud through it)
+
+    # ---- "shutdown": kill the map-building pipeline -------------------------
+    # Once a good map is exported, the scene-graph side (YOLO, SAM, room seg,
+    # VLM, BEV) is dead weight for path following — "shutdown" SIGINTs these
+    # processes (SIGKILL after 8 s), matched by executable basename. Base
+    # autonomy, this node, the keyboard terminal and RViz keep running, so
+    # plan/go/stop/clear still work; "export" then needs a full stack restart.
+    mapping_processes: ["tare_planner_node", "room_segmentation", "detection_node",
+                        "semantic_mapping_node", "vlm_reasoning_node", "bev_mapper_node"]
 
     # ---- execution ("go") ---------------------------------------------------
     odom_topic: "/state_estimation"

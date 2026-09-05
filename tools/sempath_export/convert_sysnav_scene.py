@@ -848,7 +848,8 @@ def build_object_layers(
     objects = [o for o in dump.snapshot.get("objects", []) if o.get("status", True) is not False]
     for obj in sorted(objects, key=lambda o: int(o["id"])):
         label = obj.get("label", "")
-        if normalize_label(label) in drop:
+        if (normalize_label(label) in drop
+                or normalize_label(alias_object_label(label, opts.object_aliases)) in drop):
             continue
         cells, source, polygon = _object_cells(obj, map_info, opts)
         if len(cells) < opts.min_object_cells:

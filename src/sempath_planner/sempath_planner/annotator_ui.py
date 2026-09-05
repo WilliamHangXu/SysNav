@@ -95,6 +95,10 @@ class AnnotatorUI:
                 "trajectory": [[int(r), int(c)] for r, c in trajectory],
             }
 
+    def clear_live_plan(self) -> None:
+        with self._lock:
+            self._live_plan = None
+
     def _build_deeplink_html(self, map_id: str, plan_param: str) -> bytes:
         mi = self._mi
         map_key = mi.normalize_map_key(map_id)

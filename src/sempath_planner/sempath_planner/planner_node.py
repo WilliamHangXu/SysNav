@@ -16,6 +16,14 @@ terminal):
   go                   follow the planned waypoints: Joy autonomy handshake once, then
                        /way_point + /speed until arrival (the local planner does the driving).
   stop                 abort: waypoint at the robot's pose + Joy autonomy off.
+  clear                forget the current plan and wipe its path/waypoints from RViz (the
+                       semantic map overlay stays). Refused while the robot is following.
+  shutdown             once a good map is exported: kill the map-building pipeline
+                       (tare_planner_node, room_segmentation, detection_node +
+                       semantic_mapping_node [YOLO/SAM], vlm_reasoning_node, bev_mapper) to
+                       free GPU/CPU. Base autonomy, this node, the keyboard terminal and
+                       RViz keep running, so plan / go / stop / clear still work — but
+                       'export' needs a full stack restart afterwards.
 
 The node only plans on a map it converted in this process, so pixel->world stays valid for the
 current SLAM session by construction. It never touches scene-graph state.
@@ -26,6 +34,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import signal
 import sys
 import threading
 import time
@@ -43,7 +52,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 
 from sempath_planner.annotator_ui import AnnotatorUI
 from sempath_planner.path_utils import (
-    decimate_path, semantic_map_cells, trajectory_to_world, world_to_pixel)
+    cmdline_matches, decimate_path, semantic_map_cells, trajectory_to_world, world_to_pixel)
 
 TARE_KEYWORDS = {"reset"}          # keyboard words owned by other nodes (never treated as errors here)
 OBJECT_MAPPER_KEYWORDS = {"demo", "resume"}
@@ -90,7 +99,7 @@ class SempathPlannerNode(Node):
 
         self.get_logger().info(
             f"sempath_planner ready (run group '{self.run_group}', dumps '{self.dump_dir}'). "
-            "Keyboard: export | plan <instruction> | go | stop")
+            "Keyboard: export | plan <instruction> | go | stop | clear | shutdown")
 
     def _declare_parameters(self):
         p = self.declare_parameter
@@ -102,6 +111,8 @@ class SempathPlannerNode(Node):
         self.llm_timeout_s = p('llm_timeout_s', 90.0).value
         self.dump_wait_timeout_s = p('dump_wait_timeout_s', 20.0).value
         self.make_overview = p('make_overview', False).value     # overview PNG on every save (slower)
+        self.exclude_objects_yaml = p('exclude_objects_yaml',
+                                      'tools/sempath_export/exclude_objects.yaml').value
         self.speed = p('speed', 1.0).value                       # m/s handed to /speed while following
         self.arrival_radius_m = p('arrival_radius_m', 0.5).value
         self.final_arrival_radius_m = p('final_arrival_radius_m', 0.3).value
@@ -116,6 +127,16 @@ class SempathPlannerNode(Node):
         self.map_viz_enabled = p('map_viz.enabled', True).value
         self.map_viz_z = p('map_viz.z', 0.0).value
         self.map_viz_alpha = p('map_viz.alpha', 1.0).value
+        # executable basenames the 'shutdown' keyword kills (the map-building pipeline;
+        # everything path following needs — base autonomy, this node — is NOT listed)
+        self.mapping_processes = p('mapping_processes', [
+            'tare_planner_node',       # scene-graph node (explore.launch)
+            'room_segmentation',
+            'detection_node',          # YOLO
+            'semantic_mapping_node',   # SAM2 object mapper
+            'vlm_reasoning_node',      # room labeling (NOT keyboard_input, same package)
+            'bev_mapper_node',
+        ]).value
 
     # ------------------------------------------------------------------ inputs
 
@@ -144,6 +165,10 @@ class SempathPlannerNode(Node):
             self._start_follow()
         elif word == 'stop':
             self._stop_follow('stopped by user', autonomy_off=True)
+        elif word == 'clear':
+            self._do_clear()
+        elif word == 'shutdown':
+            self._start_shutdown()
         elif word in TARE_KEYWORDS or word in OBJECT_MAPPER_KEYWORDS:
             pass  # other nodes' keywords on the shared channel
         else:
@@ -164,6 +189,85 @@ class SempathPlannerNode(Node):
             target(*args)
         except Exception as exc:  # worker threads must never die silently
             self.get_logger().error(f"'{name}' failed: {type(exc).__name__}: {exc}")
+
+    def _do_clear(self):
+        if self._exec is not None:
+            self.get_logger().error("'clear' refused: the robot is following the plan (type 'stop' first)")
+            return
+        if self._worker is not None and self._worker.is_alive():
+            self.get_logger().error("'clear' refused: a save/plan is still running")
+            return
+        with self._lock:
+            had_plan = self._plan is not None
+            self._plan = None
+        self._wipe_plan_viz()
+        if self._ui is not None:
+            self._ui.clear_live_plan()
+        self.get_logger().info("plan cleared" if had_plan
+                               else "no plan stored; wiped any leftover path from RViz")
+
+    # ------------------------------------------------------------------ shutdown (mapping pipeline)
+
+    def _start_shutdown(self):
+        # deliberately allowed while following: the mapping pipeline only consumes the base
+        # stack's topics, so killing it never disturbs an execution in progress
+        if self._worker is not None and self._worker.is_alive():
+            self.get_logger().error("'shutdown' refused: a save/plan is still running")
+            return
+        self._worker = threading.Thread(target=self._run_worker,
+                                        args=(self._do_shutdown, 'shutdown'), daemon=True)
+        self._worker.start()
+
+    def _find_mapping_processes(self, names: set[str]) -> dict[int, str]:
+        found: dict[int, str] = {}
+        me = os.getpid()
+        for entry in os.listdir('/proc'):
+            if not entry.isdigit() or int(entry) == me:
+                continue
+            try:
+                raw = FsPath(f'/proc/{entry}/cmdline').read_bytes()
+            except OSError:
+                continue  # process vanished mid-scan
+            hit = cmdline_matches([t.decode(errors='replace') for t in raw.split(b'\0') if t], names)
+            if hit:
+                found[int(entry)] = hit
+        return found
+
+    @staticmethod
+    def _pid_alive(pid: int) -> bool:
+        try:  # state field right after the parenthesised comm; zombies count as gone
+            state = FsPath(f'/proc/{pid}/stat').read_text().rsplit(') ', 1)[1][:1]
+        except (OSError, IndexError):
+            return False
+        return state != 'Z'
+
+    def _do_shutdown(self):
+        names = {n for n in self.mapping_processes if n}
+        procs = self._find_mapping_processes(names)
+        if not procs:
+            self.get_logger().info("mapping pipeline already down (nothing to shut down)")
+            return
+        self.get_logger().info(
+            f"shutting down the mapping pipeline: {', '.join(sorted(set(procs.values())))}")
+        for pid in procs:
+            try:
+                os.kill(pid, signal.SIGINT)
+            except ProcessLookupError:
+                pass
+        deadline = time.time() + 8.0   # CUDA teardown (SAM/YOLO) can take a few seconds
+        alive = set(procs)
+        while alive and time.time() < deadline:
+            time.sleep(0.3)
+            alive = {pid for pid in alive if self._pid_alive(pid)}
+        for pid in alive:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        forced = f" ({len(alive)} force-killed)" if alive else ""
+        self.get_logger().info(
+            f"mapping pipeline shut down: {len(procs)} processes{forced}. Base autonomy keeps "
+            "running — plan / go / stop / clear still work; 'export' needs a stack restart.")
 
     # ------------------------------------------------------------------ save (export -> convert)
 
@@ -193,11 +297,21 @@ class SempathPlannerNode(Node):
             sys.path.insert(0, str(root))
         try:
             from tools.sempath_export.convert_sysnav_scene import ConvertOptions, load_sysnav_dump
+            from tools.sempath_export.label_aliases import load_exclude_labels
             from tools.sempath_export.transform_sysnav_to_map import (
                 DEFAULT_OUTPUT_DIR, build_output_prefix, map_key_for_prefix, transform_sysnav_to_map)
         except ImportError as exc:
             self.get_logger().error(f"converter unavailable: {exc}")
             return
+
+        opts = ConvertOptions()
+        if self.exclude_objects_yaml:  # re-read every export, so edits apply without a restart
+            ex_path = FsPath(self.exclude_objects_yaml)
+            if not ex_path.is_absolute():
+                ex_path = root / ex_path
+            drop = load_exclude_labels(ex_path)
+            opts = ConvertOptions(drop_labels=drop)
+            self.get_logger().info(f"excluding objects: {', '.join(drop) if drop else '(none)'}")
 
         t0 = time.time()
         dump = load_sysnav_dump(dump_dir)
@@ -206,7 +320,7 @@ class SempathPlannerNode(Node):
         prefix = build_output_prefix(out_dir, map_id)
         map_key = map_key_for_prefix(prefix)
         outputs = transform_sysnav_to_map(
-            dump, prefix, map_id, ConvertOptions(),
+            dump, prefix, map_id, opts,
             skip_overview=not self.make_overview, overwrite=True)
         payload = json.loads(outputs['json_path'].read_text(encoding='utf-8'))
         frame = payload['metadata']['grid_coordinate_frame']
@@ -284,7 +398,10 @@ class SempathPlannerNode(Node):
         self.get_logger().info(
             f"plan ready in {time.time() - t0:.1f}s: {len(result.trajectory)} cells -> "
             f"{len(waypoints)} waypoints, goal ({goal[0]:.2f}, {goal[1]:.2f}). Check RViz, then type 'go'.")
-        self._open_ui(map_info['map_key'], plan=True)
+        if self._ui is not None:  # no new tab after plan (only export opens one); URL for a manual look
+            url = self._ui.map_url(map_info['map_key'], plan=True)
+            if url:
+                self.get_logger().info(f"live plan preview: {url}")
 
     def _open_ui(self, map_key: str, *, plan: bool):
         if self._ui is None or not self.ui_open_browser:
@@ -325,6 +442,18 @@ class SempathPlannerNode(Node):
             last = i == len(waypoints) - 1
             m.color.r, m.color.g, m.color.b, m.color.a = (1.0, 0.2, 0.2, 0.9) if last else (0.2, 0.8, 0.2, 0.9)
             markers.markers.append(m)
+        self.pub_markers.publish(markers)
+
+    def _wipe_plan_viz(self):
+        """Replace the latched path/markers so RViz (open now or later) shows no plan."""
+        path = Path()
+        path.header.frame_id = self._frame_id
+        path.header.stamp = self.get_clock().now().to_msg()
+        self.pub_path.publish(path)
+        markers = MarkerArray()
+        wipe = Marker()
+        wipe.action = Marker.DELETEALL
+        markers.markers.append(wipe)
         self.pub_markers.publish(markers)
 
     def _publish_semantic_map(self, png_path: FsPath, payload: dict, frame: dict):

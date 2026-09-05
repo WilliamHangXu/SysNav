@@ -1,0 +1,23 @@
+# Object exclusion list for the SemPathBench map export.
+#
+# sempath_planner re-reads this file at EVERY "export", so edits apply to the next map
+# without restarting the stack. Listed objects are excluded from map building entirely:
+# no object instance, no occupancy blocking, no cell ownership.
+#
+# Matching is case/space/underscore-insensitive and checks BOTH the raw detector label
+# (e.g. "trash can") and the aliased SemPathBench object type (e.g. "GarbageCan") —
+# either spelling works.
+#
+# CLI equivalent: python -m tools.sempath_export.transform_sysnav_to_map --exclude-objects <this file>
+exclude:
+  - person
+  - light
+  - printer
+  - unknown
+  - bed
+  - painting
+  - bulletin board
+  - bathtub
+  - pan
+  - curtain
+  - shower knob+

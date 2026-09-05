@@ -11,7 +11,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sempath_planner.path_utils import (
-    decimate_path, pixel_to_world, rdp, semantic_map_cells, trajectory_to_world, world_to_pixel)
+    cmdline_matches, decimate_path, pixel_to_world, rdp, semantic_map_cells,
+    trajectory_to_world, world_to_pixel)
 
 FRAME = {"resolution": 0.05, "x_min": -3.475, "z_min": 1.025}  # centre of col 0 / row 0
 
@@ -82,6 +83,35 @@ class DecimationTest(unittest.TestCase):
         pts = [(0.0, 0.0), (0.5, 0.0), (1.0, 0.0), (1.0, 0.5), (1.0, 1.0)]
         out = decimate_path(pts, 0.05, 10.0)
         self.assertEqual(out, [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0)])
+
+
+MAPPING = {"tare_planner_node", "room_segmentation", "detection_node",
+           "semantic_mapping_node", "vlm_reasoning_node", "bev_mapper_node"}
+
+
+class CmdlineMatchesTest(unittest.TestCase):
+    def test_matches_python_node_shim_and_cpp_binary(self):
+        py = ["/usr/bin/python3", "/x/install/semantic_mapping/lib/semantic_mapping/detection_node",
+              "--ros-args", "--params-file", "/x/share/mapping_mecanum_sim.yaml"]
+        cpp = ["/x/install/tare_planner/lib/tare_planner/tare_planner_node",
+               "--ros-args", "-p", "scenario:=matterport_sim"]
+        self.assertEqual(cmdline_matches(py, MAPPING), "detection_node")
+        self.assertEqual(cmdline_matches(cpp, MAPPING), "tare_planner_node")
+
+    def test_spares_package_mates_and_path_substrings(self):
+        # the keyboard terminal lives in the vlm_node PACKAGE: its argv contains "vlm_node"
+        # both as a path component and as a bare `ros2 run` token — must never match
+        terminal = ["bash", "-c", "ros2 run vlm_node keyboard_input"]
+        run = ["ros2", "run", "vlm_node", "keyboard_input"]
+        shim = ["/usr/bin/python3", "/x/install/vlm_node/lib/vlm_node/keyboard_input", "--ros-args"]
+        for tokens in (terminal, run, shim):
+            self.assertIsNone(cmdline_matches(tokens, MAPPING))
+
+    def test_basename_must_match_exactly(self):
+        # a params-file named after a node must not drag an unrelated process in
+        tokens = ["/usr/bin/python3", "/x/lib/foo/other_node",
+                  "--params-file", "/x/share/detection_node.yaml"]
+        self.assertIsNone(cmdline_matches(tokens, MAPPING))
 
 
 if __name__ == "__main__":

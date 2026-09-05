@@ -72,15 +72,17 @@ def generate_launch_description():
         DeclareLaunchArgument('keyboard', default_value='false',
                               description='Open sysnav\'s keyboard_input terminal '
                                           '("export" saves the SemPathBench map; "plan '
-                                          '<instruction>" / "go" / "stop" drive sempath_planner; '
-                                          '"demo"/"resume" freeze/resume the object mapper)'),
+                                          '<instruction>" / "go" / "stop" / "clear" / "shutdown" '
+                                          'drive sempath_planner; "demo"/"resume" freeze/resume '
+                                          'the object mapper)'),
         DeclareLaunchArgument('bev', default_value='true',
                               description='Run bev_mapper (BEV occupancy grid + local '
                                           'BEV image from /registered_scan + /state_estimation)'),
         DeclareLaunchArgument('sempath', default_value='true',
                               description='Run sempath_planner (keyboard: export | plan '
-                                          '<instruction> | go | stop; needs the SemPathBench/ '
-                                          'checkout and GEMINI_API_KEY for planning)'),
+                                          '<instruction> | go | stop | clear | shutdown; needs '
+                                          'the SemPathBench/ checkout and GEMINI_API_KEY for '
+                                          'planning)'),
     ] + [DeclareLaunchArgument(a, default_value=sim_defaults[a]) for a in sim_args]
 
     # --- base autonomy: sysnav's teleop sim launch, unchanged -----------------

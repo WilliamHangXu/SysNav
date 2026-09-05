@@ -145,18 +145,34 @@ export                                                # tare+bev dump → conver
                                                       #   layer ("SemPath Map" display, /sempath_map/markers,
                                                       #   map_viz.* params: z height / alpha / enabled)
 plan go to the sofa in the lounge                     # GroundPlan from the current pose (15–60 s, $GEMINI_API_KEY)
-                                                      # → orange path + waypoint spheres in RViz, and the browser
-                                                      #   opens with the route pre-selected (LIVE PLAN sample)
+                                                      # → orange path + waypoint spheres in RViz ("plan ready" in
+                                                      #   the log; no new browser tab — a &plan=live preview URL
+                                                      #   is logged for a manual look)
 go                                                    # follow: Joy autonomy handshake, /way_point + /speed
 stop                                                  # abort any time (hold waypoint + autonomy off)
+clear                                                 # forget the plan + wipe its path/waypoints from RViz
+                                                      # (semantic map overlay stays; refused while following)
+shutdown                                              # once the map is good: kill the map-building pipeline
+                                                      # (tare scene graph, room seg, YOLO+SAM, VLM, BEV) to free
+                                                      # GPU/CPU — base autonomy + this node keep running, so
+                                                      # plan/go/stop/clear still work; a new `export` needs a
+                                                      # stack restart (kill list: `mapping_processes` param)
 ```
+
+Objects can be blacklisted from exported maps via `tools/sempath_export/exclude_objects.yaml`
+(`exclude: [label, ...]`; ships with `person`): listed objects are left out of map building
+entirely — no instance, no occupancy blocking. The node re-reads it at **every** `export`, so
+edit + re-export applies without restarting; entries match both the raw detector label
+("trash can") and the aliased type ("GarbageCan"). CLI: `--exclude-objects <yaml>`
+(merged into `--drop-labels`); node param: `exclude_objects_yaml`.
 
 To keep a replayable recording of a session, run `./record_viz_bag.sh [name] [--with-inputs]`
 alongside the stack: it records every topic the teleop RViz config displays. Replay with
 `./play_viz_bag.sh [bag] [play args…]` (newest bag by default) — it reproduces the live
 visualization in RViz with no nodes running.
 
-The browser pop-up **is** the done signal for `export` and `plan`. The node serves SemPathBench's own
+The browser pop-up is the done signal for `export`; for `plan` it's the RViz path + the "plan ready"
+log line (no extra tab per plan). The node serves SemPathBench's own
 instruction annotator in-process (default `127.0.0.1:8010`; `ui.*` params in `sempath_planner.yaml`)
 with two additions layered on top via a handler subclass — `?map=<key>` deep links and a `&plan=live`
 route preview injected in memory only (nothing is written to the instruction files unless you save it

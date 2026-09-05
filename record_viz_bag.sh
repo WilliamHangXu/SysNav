@@ -9,8 +9,12 @@
 #
 # Replay with ./play_viz_bag.sh (starts RViz + `ros2 bag play --clock`).
 #
-# Latched topics (/sempath_plan/*, /sempath_map/markers) keep their transient_local QoS in the
-# bag, so a late-started RViz still receives the last map overlay and plan.
+# Latched topics (/sempath_plan/*, /sempath_map/markers, /tf_static) are delivered to the
+# recorder WHEN IT STARTS, so a bag begun after export/plan still contains the current map
+# overlay and plan -> record one bag per task: start this right before 'go', Ctrl+C when the
+# task ends, start the next one for the next task (verified: a transient_local message
+# published before recording shows up in the bag). Give the recorder ~2 s to discover topics.
+# On replay they keep transient_local QoS, so a late-started RViz also gets them.
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 cd "$SCRIPT_DIR"

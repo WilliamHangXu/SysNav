@@ -102,7 +102,9 @@ def _launch(context):
         # keyboard-driven GroundPlan planning + waypoint execution on the exported
         # SemPathBench map (export | plan <instruction> | go | stop); inert until commanded
         include(os.path.join(sempath_share, 'launch', 'sempath_planner.launch.py'),
-                extra={'run_group': 'robot'},  # exports -> resources/maps/real/robot/<timestamp>_train
+                # exports -> resources/maps/real/robot/<timestamp>_train; overlay near the floor
+                # (ARISE map origin is at the sensor start height, ground ~0.4 m below it)
+                extra={'run_group': 'robot', 'map_viz_z': '-0.35'},
                 condition=IfCondition(LaunchConfiguration('sempath'))),
         Node(package='rviz2', executable='rviz2', name='rviz2',
              arguments=['-d', rviz_config],
@@ -123,8 +125,9 @@ def generate_launch_description():
         DeclareLaunchArgument('keyboard', default_value='false',
                               description='Open sysnav\'s keyboard_input terminal '
                                           '("export" saves the SemPathBench map; "plan '
-                                          '<instruction>" / "go" / "stop" drive sempath_planner; '
-                                          '"demo"/"resume" freeze/resume the object mapper)'),
+                                          '<instruction>" / "go" / "stop" / "clear" / "shutdown" '
+                                          'drive sempath_planner; "demo"/"resume" freeze/resume '
+                                          'the object mapper)'),
         DeclareLaunchArgument('bagfile', default_value='false',
                               description='true: no livox driver, scenario matterport_bagfile '
                                           '+ platform mecanum_bagfile; play a raw-Livox bag '
@@ -134,8 +137,9 @@ def generate_launch_description():
                                           'BEV image from /registered_scan + /state_estimation)'),
         DeclareLaunchArgument('sempath', default_value='true',
                               description='Run sempath_planner (keyboard: export | plan '
-                                          '<instruction> | go | stop; needs the SemPathBench/ '
-                                          'checkout and GEMINI_API_KEY for planning)'),
+                                          '<instruction> | go | stop | clear | shutdown; needs '
+                                          'the SemPathBench/ checkout and GEMINI_API_KEY for '
+                                          'planning)'),
     ] + [DeclareLaunchArgument(a, default_value=d) for a, d in BASE_ARGS.items()]
     entries.append(OpaqueFunction(function=_launch))
     return LaunchDescription(entries)

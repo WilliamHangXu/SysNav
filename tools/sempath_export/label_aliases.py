@@ -103,6 +103,24 @@ def object_priority(object_type: str, priorities: dict[str, int] | None = None) 
     return int(table.get(object_type, DEFAULT_OBJECT_PRIORITY))
 
 
+def load_exclude_labels(path: str | Path) -> tuple[str, ...]:
+    """Load an object exclusion list ``{exclude: [label, ...]}`` -> normalized label tuple.
+
+    Feeds ``ConvertOptions.drop_labels``: listed objects are excluded from map building
+    entirely (no instance, no occupancy blocking, no cell ownership). Entries match both the
+    raw detector label ("trash can") and the aliased SemPathBench type ("GarbageCan").
+    """
+    import yaml  # local import: optional dependency
+
+    payload = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    entries = payload.get("exclude")
+    if entries is None:
+        entries = []
+    if not isinstance(entries, list):
+        raise ValueError(f"{path}: `exclude` must be a list of object labels")
+    return tuple(dict.fromkeys(normalize_label(e) for e in entries if normalize_label(e)))
+
+
 def load_label_aliases(path: str | Path | None) -> tuple[dict[str, str], dict[str, str]]:
     """Merge a user yaml ``{objects: {label: ObjectType}, rooms: {label: category}}`` over the defaults."""
     objects = dict(DEFAULT_OBJECT_LABEL_ALIASES)

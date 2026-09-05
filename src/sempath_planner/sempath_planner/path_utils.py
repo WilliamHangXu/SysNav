@@ -59,6 +59,22 @@ def semantic_map_cells(
     return cells
 
 
+def cmdline_matches(tokens: list[str], names: set[str] | frozenset[str]) -> str | None:
+    """The executable name a process cmdline belongs to, or None.
+
+    A process matches when the BASENAME of any argv token equals one of ``names`` exactly —
+    ROS nodes carry their executable as a path token (``.../lib/<pkg>/<executable>`` for both
+    ament_python shims and C++ binaries). Exact basename match keeps package-mates apart: the
+    ``keyboard_input`` terminal (``.../lib/vlm_node/keyboard_input``) must never match
+    ``vlm_reasoning_node`` even though ``vlm_node`` appears in its path and argv.
+    """
+    for tok in tokens:
+        base = tok.rsplit("/", 1)[-1]
+        if base in names:
+            return base
+    return None
+
+
 def _point_segment_distance(p: tuple[float, float], a: tuple[float, float], b: tuple[float, float]) -> float:
     ax, ay = a
     dx, dy = b[0] - ax, b[1] - ay

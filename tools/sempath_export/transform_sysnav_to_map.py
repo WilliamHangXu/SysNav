@@ -24,7 +24,7 @@ from tools.sempath_export.convert_sysnav_scene import (
     build_scene_representation,
     load_sysnav_dump,
 )
-from tools.sempath_export.label_aliases import load_label_aliases
+from tools.sempath_export.label_aliases import load_exclude_labels, load_label_aliases
 from tools.sempath_export.layered_map import save_layered_map
 from tools.sempath_export import spb
 
@@ -202,7 +202,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="pad the watershed door line's thin axis to this depth (m) -> ProcTHOR-style door rectangle")
     parser.add_argument("--room-fill-radius", type=float, default=0.5)
     parser.add_argument("--min-room-cells", type=int, default=25)
-    parser.add_argument("--drop-labels", default="person", help="comma-separated YOLOE labels to ignore")
+    parser.add_argument("--drop-labels", default="person",
+                        help="comma-separated object labels to ignore (raw or aliased type)")
+    parser.add_argument("--exclude-objects", type=Path, default=None,
+                        help="yaml {exclude: [label, ...]} merged into --drop-labels "
+                             "(see exclude_objects.yaml; the live node reads it at every export)")
     parser.add_argument("--label-aliases", type=Path, default=None, help="yaml {objects: {...}, rooms: {...}} merged over the defaults")
     parser.add_argument("--skip-overview", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
@@ -211,6 +215,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def options_from_args(args: argparse.Namespace) -> ConvertOptions:
     object_aliases, room_aliases = load_label_aliases(args.label_aliases)
+    drop_labels = [label.strip() for label in args.drop_labels.split(",") if label.strip()]
+    if args.exclude_objects is not None:
+        drop_labels.extend(load_exclude_labels(args.exclude_objects))
     return ConvertOptions(
         resolution=args.resolution,
         padding_m=args.padding,
@@ -230,7 +237,7 @@ def options_from_args(args: argparse.Namespace) -> ConvertOptions:
         min_room_cells=args.min_room_cells,
         merge_gap_m=args.merge_gap,
         footprint_close_m=args.footprint_close,
-        drop_labels=tuple(label.strip() for label in args.drop_labels.split(",") if label.strip()),
+        drop_labels=tuple(drop_labels),
         object_aliases=object_aliases,
         room_aliases=room_aliases,
     )

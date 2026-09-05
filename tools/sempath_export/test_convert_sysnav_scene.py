@@ -17,6 +17,7 @@ import cv2
 import numpy as np
 
 from tools.sempath_export import convert_sysnav_scene as cs
+from tools.sempath_export.label_aliases import load_exclude_labels
 from tools.sempath_export.layered_map import scene_representation_to_layered_state
 from tools.sempath_export.transform_sysnav_to_map import (
     DEFAULT_OUTPUT_DIR,
@@ -511,6 +512,22 @@ class ConverterTest(unittest.TestCase):
                 os.chdir(cwd)
             self.assertTrue(outputs["json_path"].is_absolute())
             self.assertTrue((Path(out) / "rel_out/train/002_train/002_train_metric_cache/manifest.json").exists())
+
+    def test_drop_by_aliased_type_and_exclude_yaml(self):
+        # "GarbageCan" drops sysnav|13 even though its raw label is "trash can"
+        _, objects = self._objects(cs.ConvertOptions(drop_labels=("person", "GarbageCan")))
+        by_id = {m["objectId"]: m for m in objects.object_metadata}
+        self.assertNotIn("sysnav|13", by_id)
+        self.assertIn("sysnav|12", by_id)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "exclude.yaml"
+            path.write_text("exclude:\n  - person\n  - Trash_Can\n  - person\n", encoding="utf-8")
+            self.assertEqual(load_exclude_labels(path), ("person", "trash can"))
+            path.write_text("exclude: []\n", encoding="utf-8")
+            self.assertEqual(load_exclude_labels(path), ())
+            path.write_text("exclude: {a: b}\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                load_exclude_labels(path)
 
     def test_cli_build_output_prefix(self):
         self.assertEqual(build_output_prefix("out", "001_train"), Path("out/train/001_train/001_train"))
