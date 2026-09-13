@@ -43,10 +43,10 @@ prompts:
   #   prompts:
   #     - pillow
   #   is_instance: true
-  # refrigerator:
-  #   prompts:
-  #     - refrigerator
-  #   is_instance: true
+  refrigerator:
+    prompts:
+      - refrigerator
+    is_instance: true
   # door:
   #   prompts:
   #     - door
@@ -95,14 +95,14 @@ prompts:
     prompts:
       - vase
     is_instance: true
-  cabinet:
-    prompts:
-      - cabinet
-    is_instance: true
-  # shelf:
+  # cabinet:
   #   prompts:
-  #     - shelf
+  #     - cabinet
   #   is_instance: true
+  shelf:
+    prompts:
+      - shelf
+    is_instance: true
   book:
     prompts:
       - book
@@ -203,10 +203,10 @@ prompts:
     prompts:
       - person
     is_instance: true
-  # locker:
-  #   prompts:
-  #     - locker
-  #   is_instance: true
+  locker:
+    prompts:
+      - locker
+    is_instance: true
   picture:
     prompts:
       - picture

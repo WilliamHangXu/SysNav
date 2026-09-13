@@ -169,7 +169,8 @@ edit + re-export applies without restarting; entries match both the raw detector
 To keep a replayable recording of a session, run `./record_viz_bag.sh [name] [--with-inputs]`
 alongside the stack: it records every topic the teleop RViz config displays. Replay with
 `./play_viz_bag.sh [bag] [play args…]` (newest bag by default) — it reproduces the live
-visualization in RViz with no nodes running.
+visualization in RViz with no nodes running; the player starts paused, press SPACE in its
+terminal to begin playback.
 
 The browser pop-up is the done signal for `export`; for `plan` it's the RViz path + the "plan ready"
 log line (no extra tab per plan). The node serves SemPathBench's own

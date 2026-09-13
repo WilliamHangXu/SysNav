@@ -5,8 +5,10 @@
 #   ./play_viz_bag.sh                              # newest bag under bags/
 #   ./play_viz_bag.sh bags/my_run                  # a specific bag
 #   ./play_viz_bag.sh bags/my_run --loop --rate 2  # extra args go to `ros2 bag play`
-#   ./play_viz_bag.sh --start-paused               # flags-only also works (newest bag)
+#   ./play_viz_bag.sh --rate 2                     # flags-only also works (newest bag)
 #
+# The player starts PAUSED: arrange RViz first, then press SPACE in this terminal
+# to start playback (SPACE pauses/resumes any time).
 # Plays with --clock and runs RViz on sim time — correct for BOTH sim and real-robot
 # bags (RViz follows the recorded stamps, so TF, clouds and markers line up).
 # When the bag ends RViz keeps the last rendered state; Ctrl+C closes everything.
@@ -33,7 +35,8 @@ RVIZ_PID=$!
 trap 'kill $RVIZ_PID 2>/dev/null' EXIT
 sleep 3                    # let RViz subscribe before the first messages play
 
-ros2 bag play "$BAG" --clock "$@"
+echo ">>> starting PAUSED — press SPACE here to play <<<"
+ros2 bag play "$BAG" --clock --start-paused "$@"
 
 echo "bag finished — RViz keeps the last state, Ctrl+C to close"
 wait $RVIZ_PID
